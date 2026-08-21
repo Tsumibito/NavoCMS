@@ -47,9 +47,9 @@ an anchor while publishing content.
 
 ## Current status
 
-Sprints 0–4 establish the public contracts, TypeScript microkernel, multitenant security boundary,
-portable Markdown content engine, and the first versioned design-system compiler and Astro catalogue.
-Sprint 5 is implementing the authenticated MCP editing and review boundary:
+Sprints 0–5 establish the public contracts, TypeScript microkernel, multitenant security boundary,
+portable Markdown content engine, versioned design-system compiler and Astro catalogue, plus the
+authenticated MCP editing and review boundary:
 
 - [Product requirements](docs/product/PRD.md)
 - [Delivery roadmap](docs/roadmap/SPRINTS.md)

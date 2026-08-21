@@ -98,7 +98,7 @@ Gate: P3.
 
 ## Sprint 5 — Agent/MCP editing product
 
-**Status:** In progress on `codex/sprint-5-agent-mcp`.
+**Status:** Completed and accepted in [PR #11](https://github.com/Tsumibito/NavoCMS/pull/11).
 
 - goal-oriented MCP tools and resources, scoped discovery, Markdown/diff/draft/workflow widgets,
   non-UI fallbacks, bounded outputs, redaction, and agent evaluations.
