@@ -111,7 +111,7 @@ Gate: P4.
 
 - Neon production/staging topology with scale-to-zero, direct migration and pooled runtime
   identities, durable MCP persistence, event ledger and idempotency, Docker image, health/readiness,
-  and matching Coolify applications on `ai7`.
+  and matching applications on an operator-managed Coolify Docker host.
 
 Operational gate: staging proves migrations, forced RLS, restart persistence, and the same container
 artifact that production will run.

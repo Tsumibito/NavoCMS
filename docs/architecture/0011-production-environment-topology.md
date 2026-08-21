@@ -8,7 +8,8 @@
 
 NavoCMS must dogfood `navocms.com` before the hosted product exists. The control plane needs a stable
 integration target while content and schema previews remain cheap and disposable. The first
-deployment uses Coolify on `ai7` and Neon Postgres with scale-to-zero.
+reference deployment uses an operator-managed Coolify Docker host and Neon Postgres with
+scale-to-zero.
 
 ## Decision
 

@@ -7,7 +7,8 @@ NavoCMS uses two long-lived Coolify applications built from the repository `Dock
 | `navocms-staging` | reviewed `main` or release candidate | Neon `staging` branch | migration, OAuth, RLS, workflow, and release verification |
 | `navocms-production` | pinned release tag | Neon production branch | public control plane |
 
-Both applications run on `ai7`, expose container port `8788`, and use `/healthz` for container
+Both applications run on the operator's Coolify-managed Docker host, expose container port `8788`,
+and use `/healthz` for container
 liveness. `/readyz` also checks that Neon is reachable and the required schema exists. Coolify should
 route traffic only after the Docker health check passes.
 
