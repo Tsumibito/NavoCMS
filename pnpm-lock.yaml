@@ -35,6 +35,9 @@ importers:
       '@navocms/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+      '@navocms/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       fastify:
         specifier: 5.12.1
         version: 5.12.1
@@ -57,9 +60,16 @@ importers:
       '@navocms/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@navocms/security':
+        specifier: workspace:*
+        version: link:../security
       '@opentelemetry/api':
         specifier: 1.9.0
         version: 1.9.0
+
+  packages/persistence-postgres: {}
+
+  packages/security: {}
 
   plugins/noop-service:
     dependencies:

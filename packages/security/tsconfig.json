@@ -5,11 +5,6 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "references": [
-    { "path": "../../packages/contracts" },
-    { "path": "../../packages/kernel" },
-    { "path": "../../packages/security" }
-  ],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]
 }

@@ -2,12 +2,20 @@ import { readFile } from "node:fs/promises";
 
 import { createApi } from "../apps/api/dist/app.js";
 import { contracts } from "../packages/contracts/dist/index.js";
+import { withDatabaseScope } from "../packages/persistence-postgres/dist/index.js";
+import { protectedResourceMetadata } from "../packages/security/dist/index.js";
 import { createNoopService } from "../plugins/noop-service/dist/app.js";
 
 const pluginFixture = JSON.parse(
   await readFile(new URL("../examples/plugins/media-imgproxy.plugin.json", import.meta.url), "utf8")
 );
 contracts.plugin.parse(pluginFixture);
+protectedResourceMetadata({
+  resource: "https://api.navocms.com",
+  authorizationServers: ["https://identity.example"],
+  scopes: ["content:read"]
+});
+if (typeof withDatabaseScope !== "function") throw new Error("Built PostgreSQL adapter smoke failed");
 
 const api = createApi();
 const health = await api.inject({ method: "GET", url: "/health" });

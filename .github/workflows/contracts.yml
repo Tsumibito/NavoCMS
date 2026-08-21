@@ -16,6 +16,19 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: navocms_test
+          POSTGRES_PASSWORD: navocms_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d navocms_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,3 +46,12 @@ jobs:
 
       - name: Validate contracts, boundaries, build, and tests
         run: pnpm check
+
+      - name: Verify PostgreSQL tenant isolation
+        env:
+          PGPASSWORD: navocms_test
+        run: |
+          psql -h 127.0.0.1 -U postgres -d navocms_test \
+            -f packages/persistence-postgres/migrations/0001_multitenancy_and_rls.sql
+          psql -h 127.0.0.1 -U postgres -d navocms_test \
+            -f packages/persistence-postgres/tests/rls-isolation.sql

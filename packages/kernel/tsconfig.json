@@ -5,7 +5,7 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "references": [{ "path": "../contracts" }],
+  "references": [{ "path": "../contracts" }, { "path": "../security" }],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "src/test-fixtures.ts"]
 }

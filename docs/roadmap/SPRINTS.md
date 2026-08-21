@@ -59,8 +59,7 @@ Gate: P0 closed.
 
 ## Sprint 1 — TypeScript microkernel and plugin graph
 
-**Status:** Implemented in draft [PR #4](https://github.com/Tsumibito/NavoCMS/pull/4); P1 closes on
-merge.
+**Status:** Completed and accepted in [PR #4](https://github.com/Tsumibito/NavoCMS/pull/4).
 
 - workspace boundaries for kernel, SDK, first-party plugins, and examples;
 - Fastify service shell and stable domain API boundary;

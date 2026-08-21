@@ -2,7 +2,9 @@
   "files": [],
   "references": [
     { "path": "packages/contracts" },
+    { "path": "packages/security" },
     { "path": "packages/kernel" },
+    { "path": "packages/persistence-postgres" },
     { "path": "apps/api" },
     { "path": "plugins/noop-service" }
   ]

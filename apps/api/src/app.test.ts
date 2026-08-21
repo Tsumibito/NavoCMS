@@ -41,4 +41,22 @@ describe("NavoCMS API shell", () => {
     expect(invalid.json()).toMatchObject({ error: "CONTRACT_VALIDATION_FAILED" });
     await app.close();
   });
+
+  it("publishes MCP OAuth protected-resource metadata when configured", async () => {
+    const app = createApi({
+      oauthResource: {
+        resource: "https://api.navocms.com",
+        authorizationServers: ["https://identity.example"],
+        scopes: ["content:read", "content:draft"]
+      }
+    });
+    const response = await app.inject({ method: "GET", url: "/.well-known/oauth-protected-resource" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      resource: "https://api.navocms.com",
+      authorization_servers: ["https://identity.example"],
+      scopes_supported: ["content:read", "content:draft"]
+    });
+    await app.close();
+  });
 });
