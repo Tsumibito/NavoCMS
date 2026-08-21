@@ -58,7 +58,8 @@
 - Select identity provider and specify OAuth 2.1 resource/authorization metadata and PKCE behavior.
 - Define plugin provenance, signing, trusted publisher, and revocation policy.
 - Prototype database roles and RLS across migrations, backup, restore, and background workers.
-- Select secret manager and short-lived credential mechanism.
+- Implement production secret-provider adapters, short-lived leases, rotation, and access auditing
+  under the [secret management policy](SECRETS.md).
 - Define CSP and origin policy for MCP Apps and protected previews.
 - Define event integrity/checkpoint and redaction test strategy.
 - Commission an external security review before hosted external tenants.

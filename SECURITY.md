@@ -30,3 +30,6 @@ These are targets, not contractual service levels:
 High-priority areas include tenant/site isolation, OAuth and MCP authorization, stale approvals,
 plugin supply chain, secret handling, event/log leakage, media ingestion, SSRF, preview access,
 webhook authenticity, and publication rollback.
+
+The normative repository and deployment secret-handling rules are documented in the
+[secret management policy](docs/security/SECRETS.md).

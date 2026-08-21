@@ -47,6 +47,7 @@ NAVOCMS_PLUGIN_TOKEN=replace-with-at-least-16-characters \
 
 - `pnpm check:contracts`: public schema compilation, fixtures, and semantic invariants;
 - `pnpm check:boundaries`: forbidden package dependency directions;
+- `pnpm check:secrets`: public-repository environment and decryption-key policy;
 - `pnpm check:build`: packaged-schema, API, and service-plugin smoke checks;
 - `pnpm check:docs`: Markdown consistency;
 - `pnpm check:links`: local documentation links;
