@@ -1,0 +1,151 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "DesignSystem",
+  "metadata": {
+    "name": "tidal-signal",
+    "version": "0.1.0",
+    "title": "Tidal Signal",
+    "description": "A precise, high-visibility system for editorial and service websites."
+  },
+  "spec": {
+    "tokens": {
+      "color": {
+        "horizon": { "$type": "color", "$value": "#f3f7fb", "$description": "Main page field" },
+        "paper": { "$type": "color", "$value": "#ffffff", "$description": "Raised surface" },
+        "ink": { "$type": "color", "$value": "#12263a", "$description": "Primary text" },
+        "muted": { "$type": "color", "$value": "#52697d", "$description": "Secondary text" },
+        "line": { "$type": "color", "$value": "#bed0df", "$description": "Structural rules" },
+        "signal": { "$type": "color", "$value": "#0057b8", "$description": "Primary action" },
+        "coral": { "$type": "color", "$value": "#f15a47", "$description": "Attention signal" },
+        "safe": { "$type": "color", "$value": "#157a6e", "$description": "Verified state" },
+        "action": { "$type": "color", "$value": "{color.signal}", "$description": "Semantic action color" }
+      },
+      "space": {
+        "xs": { "$type": "dimension", "$value": "0.375rem" },
+        "sm": { "$type": "dimension", "$value": "0.75rem" },
+        "md": { "$type": "dimension", "$value": "1.25rem" },
+        "lg": { "$type": "dimension", "$value": "2rem" },
+        "xl": { "$type": "dimension", "$value": "3.5rem" },
+        "section": { "$type": "dimension", "$value": "clamp(4rem, 9vw, 8rem)" }
+      },
+      "radius": {
+        "control": { "$type": "dimension", "$value": "0.5rem" },
+        "surface": { "$type": "dimension", "$value": "1rem" },
+        "pill": { "$type": "dimension", "$value": "999px" }
+      },
+      "type": {
+        "display": { "$type": "fontFamily", "$value": "Iowan Old Style, Baskerville, Georgia, serif" },
+        "body": { "$type": "fontFamily", "$value": "Avenir Next, Avenir, Segoe UI, sans-serif" },
+        "utility": { "$type": "fontFamily", "$value": "SFMono-Regular, Consolas, Liberation Mono, monospace" },
+        "measure": { "$type": "dimension", "$value": "68ch" }
+      },
+      "motion": {
+        "quick": { "$type": "duration", "$value": "140ms" },
+        "ease": { "$type": "cubicBezier", "$value": "cubic-bezier(0.2, 0.8, 0.2, 1)" }
+      }
+    },
+    "components": [
+      {
+        "id": "signal-button",
+        "title": "Signal button",
+        "description": "A compact, explicit action with a high-visibility focus treatment.",
+        "element": "button",
+        "props": {
+          "type": "object",
+          "required": ["label"],
+          "properties": { "label": { "type": "string", "minLength": 1 } }
+        },
+        "slots": [],
+        "variants": [
+          { "name": "tone", "values": ["primary", "quiet", "danger"], "default": "primary" },
+          { "name": "size", "values": ["small", "medium"], "default": "medium" }
+        ],
+        "states": ["default", "hover", "focus-visible", "active", "disabled", "loading"],
+        "accessibility": {
+          "nameRequired": true,
+          "keyboard": ["Enter", "Space"],
+          "rules": ["Visible focus must meet 3:1 contrast", "Loading state keeps the accessible name"]
+        }
+      },
+      {
+        "id": "story-card",
+        "title": "Story card",
+        "description": "A content summary that keeps title, evidence, and action in a predictable order.",
+        "element": "article",
+        "props": {
+          "type": "object",
+          "required": ["title", "summary"],
+          "properties": {
+            "title": { "type": "string", "minLength": 1 },
+            "summary": { "type": "string", "minLength": 1 },
+            "eyebrow": { "type": "string" }
+          }
+        },
+        "slots": [
+          { "name": "media", "required": false, "description": "Responsive image or diagram" },
+          { "name": "action", "required": false, "description": "One clear next action" }
+        ],
+        "variants": [
+          { "name": "emphasis", "values": ["standard", "featured"], "default": "standard" }
+        ],
+        "states": ["default", "hover", "focus-visible", "empty"],
+        "accessibility": {
+          "nameRequired": false,
+          "keyboard": [],
+          "rules": ["Heading level follows page context", "Media alt text describes editorial purpose"]
+        }
+      },
+      {
+        "id": "section-shell",
+        "title": "Section shell",
+        "description": "The shared responsive boundary for page sections and their optional labels.",
+        "element": "section",
+        "props": {
+          "type": "object",
+          "properties": { "label": { "type": "string" } }
+        },
+        "slots": [
+          { "name": "content", "required": true, "description": "Section content" }
+        ],
+        "variants": [
+          { "name": "width", "values": ["reading", "content", "full"], "default": "content" }
+        ],
+        "states": ["default"],
+        "accessibility": {
+          "nameRequired": false,
+          "keyboard": [],
+          "rules": ["Labelled sections reference a visible heading"]
+        }
+      }
+    ],
+    "recipes": [
+      {
+        "id": "editorial-landing",
+        "title": "Editorial landing",
+        "description": "A clear opening argument followed by a bounded set of supporting stories.",
+        "slots": [
+          { "id": "opening", "component": "section-shell", "required": true, "minItems": 1, "maxItems": 1 },
+          { "id": "stories", "component": "story-card", "required": true, "minItems": 2, "maxItems": 6 },
+          { "id": "next-action", "component": "signal-button", "required": true, "minItems": 1, "maxItems": 1 }
+        ],
+        "variants": [
+          { "name": "density", "values": ["calm", "compact"], "default": "calm" }
+        ]
+      }
+    ],
+    "overridePolicy": {
+      "allowedTokenPaths": ["color.signal", "color.coral", "type.display"],
+      "allowedComponentVariants": ["signal-button", "story-card"],
+      "reasonRequired": true,
+      "maxExpiryDays": 180
+    },
+    "catalogue": {
+      "viewports": [
+        { "name": "mobile", "width": 390, "height": 844 },
+        { "name": "desktop", "width": 1440, "height": 1000 }
+      ],
+      "locales": ["en", "de", "ru"],
+      "themes": ["light"]
+    }
+  }
+}

@@ -4,6 +4,8 @@
     { "path": "packages/contracts" },
     { "path": "packages/security" },
     { "path": "packages/content" },
+    { "path": "packages/design" },
+    { "path": "packages/design-astro" },
     { "path": "packages/kernel" },
     { "path": "packages/persistence-postgres" },
     { "path": "apps/api" },

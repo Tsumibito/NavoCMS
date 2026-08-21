@@ -4,6 +4,8 @@ import process from "node:process";
 
 const files = [
   "content-type.schema.json",
+  "design-override.schema.json",
+  "design-system.schema.json",
   "event-envelope.schema.json",
   "plugin-manifest.schema.json",
   "site-profile.schema.json"

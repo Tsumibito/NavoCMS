@@ -4,10 +4,21 @@ import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.
 import * as addFormatsModule from "ajv-formats";
 import type { FormatsPlugin } from "ajv-formats";
 
-import type { ContentTypeDefinition, DomainEvent, PluginManifest, SiteProfile } from "./types.js";
+import type {
+  ContentTypeDefinition,
+  DesignOverrideDefinition,
+  DesignSystemDefinition,
+  DesignToken,
+  DesignTokenGroup,
+  DomainEvent,
+  PluginManifest,
+  SiteProfile
+} from "./types.js";
 
 const schemaFiles = {
   contentType: "content-type.schema.json",
+  designOverride: "design-override.schema.json",
+  designSystem: "design-system.schema.json",
   event: "event-envelope.schema.json",
   plugin: "plugin-manifest.schema.json",
   profile: "site-profile.schema.json"
@@ -16,8 +27,8 @@ const MAX_VALIDATION_ISSUES = 20;
 
 function readSchema(filename: string): object {
   const packagedUrl = new URL(`./schemas/${filename}`, import.meta.url);
-  const url = existsSync(packagedUrl) ? packagedUrl : new URL(`../../../schemas/${filename}`, import.meta.url);
-  return JSON.parse(readFileSync(url, "utf8")) as object;
+  const location = existsSync(packagedUrl) ? packagedUrl : new URL(`../../../schemas/${filename}`, import.meta.url);
+  return JSON.parse(readFileSync(location, "utf8")) as object;
 }
 
 function formatErrors(errors: ErrorObject[] | null | undefined): string[] {
@@ -128,6 +139,67 @@ function contentTypeSemantics(contentType: ContentTypeDefinition): string[] {
   return issues;
 }
 
+function isDesignToken(value: DesignToken | DesignTokenGroup): value is DesignToken {
+  return "$value" in value;
+}
+
+function designTokenPaths(group: DesignTokenGroup, prefix = ""): string[] {
+  return Object.entries(group).flatMap(([name, value]) => {
+    const path = prefix ? `${prefix}.${name}` : name;
+    return isDesignToken(value) ? [path] : designTokenPaths(value, path);
+  });
+}
+
+function variantIssues(owner: string, variants: readonly { name: string; values: readonly string[]; default: string }[]) {
+  const issues: string[] = [];
+  const duplicateNames = duplicates(variants.map(({ name }) => name));
+  if (duplicateNames.length > 0) issues.push(`${owner} variant names must be unique: ${duplicateNames.join(", ")}`);
+  for (const variant of variants) {
+    if (!variant.values.includes(variant.default)) {
+      issues.push(`${owner} variant ${variant.name} default must be one of its values`);
+    }
+  }
+  return issues;
+}
+
+function designSystemSemantics(design: DesignSystemDefinition): string[] {
+  const issues: string[] = [];
+  const tokenPaths = new Set(designTokenPaths(design.spec.tokens));
+  const componentIds = design.spec.components.map(({ id }) => id);
+  const componentDuplicates = duplicates(componentIds);
+  const recipeDuplicates = duplicates(design.spec.recipes.map(({ id }) => id));
+  if (componentDuplicates.length > 0) issues.push(`component IDs must be unique: ${componentDuplicates.join(", ")}`);
+  if (recipeDuplicates.length > 0) issues.push(`recipe IDs must be unique: ${recipeDuplicates.join(", ")}`);
+
+  for (const component of design.spec.components) {
+    issues.push(...variantIssues(`component ${component.id}`, component.variants));
+    const slotDuplicates = duplicates(component.slots.map(({ name }) => name));
+    if (slotDuplicates.length > 0) issues.push(`component ${component.id} slot names must be unique`);
+  }
+
+  const knownComponents = new Set(componentIds);
+  for (const recipe of design.spec.recipes) {
+    issues.push(...variantIssues(`recipe ${recipe.id}`, recipe.variants));
+    const slotDuplicates = duplicates(recipe.slots.map(({ id }) => id));
+    if (slotDuplicates.length > 0) issues.push(`recipe ${recipe.id} slot IDs must be unique`);
+    for (const slot of recipe.slots) {
+      if (!knownComponents.has(slot.component)) issues.push(`recipe ${recipe.id} references unknown component ${slot.component}`);
+      if (slot.minItems > slot.maxItems) issues.push(`recipe ${recipe.id} slot ${slot.id} minItems exceeds maxItems`);
+    }
+  }
+
+  for (const path of design.spec.overridePolicy.allowedTokenPaths) {
+    if (!tokenPaths.has(path)) issues.push(`override policy references unknown token ${path}`);
+  }
+  for (const id of design.spec.overridePolicy.allowedComponentVariants) {
+    if (!knownComponents.has(id)) issues.push(`override policy references unknown component ${id}`);
+  }
+
+  const viewportDuplicates = duplicates(design.spec.catalogue.viewports.map(({ name }) => name));
+  if (viewportDuplicates.length > 0) issues.push(`catalogue viewport names must be unique`);
+  return issues;
+}
+
 function eventSemantics(event: DomainEvent): string[] {
   if (event.navoconsequence !== "G0" && !event.navoidempotencykey) {
     return [`${event.navoconsequence} event requires navoidempotencykey`];
@@ -146,6 +218,15 @@ export const contracts = {
     "content type",
     ajv.compile<ContentTypeDefinition>(readSchema(schemaFiles.contentType)),
     contentTypeSemantics
+  ),
+  designOverride: new ContractValidator<DesignOverrideDefinition>(
+    "design override",
+    ajv.compile<DesignOverrideDefinition>(readSchema(schemaFiles.designOverride))
+  ),
+  designSystem: new ContractValidator<DesignSystemDefinition>(
+    "design system",
+    ajv.compile<DesignSystemDefinition>(readSchema(schemaFiles.designSystem)),
+    designSystemSemantics
   ),
   event: new ContractValidator<DomainEvent>(
     "event envelope",

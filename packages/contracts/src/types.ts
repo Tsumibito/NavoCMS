@@ -113,6 +113,113 @@ export interface ContentTypeDefinition {
   };
 }
 
+export type DesignTokenPrimitive = string | number | boolean;
+export type DesignTokenValue = DesignTokenPrimitive | Readonly<Record<string, DesignTokenPrimitive>>;
+
+export interface DesignToken {
+  readonly $value: DesignTokenValue;
+  readonly $type?:
+    | "color"
+    | "dimension"
+    | "fontFamily"
+    | "fontWeight"
+    | "duration"
+    | "cubicBezier"
+    | "number"
+    | "strokeStyle"
+    | "border"
+    | "shadow"
+    | "gradient"
+    | "typography";
+  readonly $description?: string;
+}
+
+export interface DesignTokenGroup {
+  readonly [name: string]: DesignToken | DesignTokenGroup;
+}
+
+export interface DesignVariant {
+  readonly name: string;
+  readonly values: readonly string[];
+  readonly default: string;
+}
+
+export interface DesignComponent {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly element: string;
+  readonly props: Readonly<Record<string, unknown>>;
+  readonly slots: readonly {
+    readonly name: string;
+    readonly required: boolean;
+    readonly description?: string;
+  }[];
+  readonly variants: readonly DesignVariant[];
+  readonly states: readonly string[];
+  readonly accessibility: {
+    readonly role?: string;
+    readonly nameRequired: boolean;
+    readonly keyboard: readonly string[];
+    readonly rules: readonly string[];
+  };
+}
+
+export interface DesignRecipe {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly slots: readonly {
+    readonly id: string;
+    readonly component: string;
+    readonly required: boolean;
+    readonly minItems: number;
+    readonly maxItems: number;
+  }[];
+  readonly variants: readonly DesignVariant[];
+}
+
+export interface DesignSystemDefinition {
+  readonly apiVersion: NavoApiVersion;
+  readonly kind: "DesignSystem";
+  readonly metadata: {
+    readonly name: string;
+    readonly version: string;
+    readonly title: string;
+    readonly description: string;
+  };
+  readonly spec: {
+    readonly tokens: DesignTokenGroup;
+    readonly components: readonly DesignComponent[];
+    readonly recipes: readonly DesignRecipe[];
+    readonly overridePolicy: {
+      readonly allowedTokenPaths: readonly string[];
+      readonly allowedComponentVariants: readonly string[];
+      readonly reasonRequired: true;
+      readonly maxExpiryDays?: number;
+    };
+    readonly catalogue: {
+      readonly viewports: readonly { readonly name: string; readonly width: number; readonly height: number }[];
+      readonly locales: readonly string[];
+      readonly themes: readonly string[];
+    };
+  };
+}
+
+export interface DesignOverrideDefinition {
+  readonly apiVersion: NavoApiVersion;
+  readonly kind: "DesignOverride";
+  readonly metadata: { readonly name: string; readonly version: string; readonly createdAt: string };
+  readonly spec: {
+    readonly designSystem: { readonly name: string; readonly version: string };
+    readonly scope: { readonly kind: "site" | "locale" | "route" | "content-type"; readonly selector: string };
+    readonly reason: string;
+    readonly expiresAt?: string;
+    readonly tokens: Readonly<Record<string, DesignTokenPrimitive>>;
+    readonly componentVariants: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  };
+}
+
 export interface EventActor {
   readonly type: "human" | "agent" | "service" | "system";
   readonly id: string;

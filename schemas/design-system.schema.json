@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v0alpha1/design-system.schema.json",
+  "title": "NavoCMS Design System v0alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "navocms.io/v0alpha1" },
+    "kind": { "const": "DesignSystem" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tokens", "components", "recipes", "overridePolicy", "catalogue"],
+      "properties": {
+        "tokens": { "$ref": "#/$defs/tokenGroup" },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/component" }
+        },
+        "recipes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/recipe" }
+        },
+        "overridePolicy": { "$ref": "#/$defs/overridePolicy" },
+        "catalogue": { "$ref": "#/$defs/catalogue" }
+      }
+    }
+  },
+  "$defs": {
+    "slug": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "tokenPath": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9]*)+$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "title", "description"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "version": { "$ref": "#/$defs/semver" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "tokenValue": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "oneOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }]
+          }
+        }
+      ]
+    },
+    "token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$value"],
+      "properties": {
+        "$value": { "$ref": "#/$defs/tokenValue" },
+        "$type": {
+          "enum": [
+            "color",
+            "dimension",
+            "fontFamily",
+            "fontWeight",
+            "duration",
+            "cubicBezier",
+            "number",
+            "strokeStyle",
+            "border",
+            "shadow",
+            "gradient",
+            "typography"
+          ]
+        },
+        "$description": { "type": "string", "minLength": 1, "maxLength": 300 }
+      }
+    },
+    "tokenGroup": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z][a-zA-Z0-9]*$" },
+      "additionalProperties": {
+        "oneOf": [{ "$ref": "#/$defs/token" }, { "$ref": "#/$defs/tokenGroup" }]
+      }
+    },
+    "variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "values", "default"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/slug" },
+          "uniqueItems": true
+        },
+        "default": { "$ref": "#/$defs/slug" }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "description", "element", "props", "slots", "variants", "states", "accessibility"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "element": { "enum": ["a", "article", "aside", "button", "div", "footer", "form", "header", "nav", "section"] },
+        "props": { "type": "object" },
+        "slots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "required"],
+            "properties": {
+              "name": { "$ref": "#/$defs/slug" },
+              "required": { "type": "boolean" },
+              "description": { "type": "string", "minLength": 1, "maxLength": 200 }
+            }
+          }
+        },
+        "variants": { "type": "array", "items": { "$ref": "#/$defs/variant" } },
+        "states": {
+          "type": "array",
+          "items": { "enum": ["default", "hover", "focus-visible", "active", "disabled", "loading", "error", "empty"] },
+          "uniqueItems": true
+        },
+        "accessibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nameRequired", "keyboard", "rules"],
+          "properties": {
+            "role": { "type": "string", "minLength": 1 },
+            "nameRequired": { "type": "boolean" },
+            "keyboard": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+            "rules": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+          }
+        }
+      }
+    },
+    "recipeSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "component", "required", "minItems", "maxItems"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "component": { "$ref": "#/$defs/slug" },
+        "required": { "type": "boolean" },
+        "minItems": { "type": "integer", "minimum": 0 },
+        "maxItems": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "description", "slots", "variants"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "slots": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/recipeSlot" } },
+        "variants": { "type": "array", "items": { "$ref": "#/$defs/variant" } }
+      }
+    },
+    "overridePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowedTokenPaths", "allowedComponentVariants", "reasonRequired"],
+      "properties": {
+        "allowedTokenPaths": { "type": "array", "items": { "$ref": "#/$defs/tokenPath" }, "uniqueItems": true },
+        "allowedComponentVariants": { "type": "array", "items": { "$ref": "#/$defs/slug" }, "uniqueItems": true },
+        "reasonRequired": { "const": true },
+        "maxExpiryDays": { "type": "integer", "minimum": 1, "maximum": 3650 }
+      }
+    },
+    "catalogue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["viewports", "locales", "themes"],
+      "properties": {
+        "viewports": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "width", "height"],
+            "properties": {
+              "name": { "$ref": "#/$defs/slug" },
+              "width": { "type": "integer", "minimum": 320, "maximum": 3840 },
+              "height": { "type": "integer", "minimum": 480, "maximum": 2160 }
+            }
+          }
+        },
+        "locales": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 2 }, "uniqueItems": true },
+        "themes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/slug" }, "uniqueItems": true }
+      }
+    }
+  }
+}

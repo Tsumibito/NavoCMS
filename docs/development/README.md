@@ -15,9 +15,12 @@ pnpm check
 | `@navocms/contracts` | Public types, validators, packaged JSON Schemas | AJV only |
 | `@navocms/security` | OAuth, intersected authority, secrets, storage, quotas | Node.js only |
 | `@navocms/content` | Markdown, types/packs, revisions, patches, portable bundles | Contracts, security, remark, AJV |
+| `@navocms/design` | Design validation, DTCG tokens, overrides, digests, catalogue model | Contracts only |
+| `@navocms/design-astro` | Complete component/recipe bindings for Astro | Design only |
 | `@navocms/persistence-postgres` | Scoped transactions and ordered RLS migrations | Driver-neutral |
 | `@navocms/kernel` | Capabilities, plugin graph/host, events, trajectories, tracing | Contracts, security, OpenTelemetry API |
 | `@navocms/api` | Fastify transport, OAuth metadata, and development probes | Contracts, kernel, security, Fastify |
+| `@navocms/design-catalogue` | Generated Astro review and quality surface | Design, Astro adapter, Astro |
 | `@navocms/plugin-noop-service` | External authenticated/idempotent service example | Fastify; never kernel |
 
 Build all packages:
@@ -49,9 +52,17 @@ NAVOCMS_PLUGIN_TOKEN=replace-with-at-least-16-characters \
 - `pnpm check:boundaries`: forbidden package dependency directions;
 - `pnpm check:secrets`: public-repository environment and decryption-key policy;
 - `pnpm check:build`: packaged-schema, API, and service-plugin smoke checks;
+- `pnpm check:catalogue`: contract compilation, Astro bindings, diagnostics, and static catalogue build;
 - `pnpm check:docs`: Markdown consistency;
 - `pnpm check:links`: local documentation links;
 - `pnpm typecheck`: source and test type safety;
 - `pnpm test`: unit and Fastify injection tests.
+- `pnpm test:visual`: Chromium visual baselines, responsive overflow, and WCAG checks.
+
+Install the pinned Playwright browser once before local visual checks:
+
+```bash
+pnpm exec playwright install chromium
+```
 
 Build artifacts under package `dist/` directories are generated and must not be committed.

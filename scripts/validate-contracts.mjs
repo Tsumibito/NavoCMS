@@ -27,6 +27,8 @@ const schemaPaths = {
   plugin: "schemas/plugin-manifest.schema.json",
   profile: "schemas/site-profile.schema.json",
   contentType: "schemas/content-type.schema.json",
+  designOverride: "schemas/design-override.schema.json",
+  designSystem: "schemas/design-system.schema.json",
   event: "schemas/event-envelope.schema.json"
 };
 
@@ -87,10 +89,44 @@ function semanticEvent(document, file) {
   }
 }
 
+function tokenPaths(group, prefix = "") {
+  return Object.entries(group).flatMap(([name, value]) => {
+    const tokenPath = prefix ? `${prefix}.${name}` : name;
+    return Object.hasOwn(value, "$value") ? [tokenPath] : tokenPaths(value, tokenPath);
+  });
+}
+
+function semanticDesignSystem(document, file) {
+  const componentIds = document.spec.components.map(({ id }) => id);
+  const components = new Set(componentIds);
+  const tokens = new Set(tokenPaths(document.spec.tokens));
+  unique(componentIds, `${file}: component IDs`);
+  unique(document.spec.recipes.map(({ id }) => id), `${file}: recipe IDs`);
+  for (const component of document.spec.components) {
+    unique(component.variants.map(({ name }) => name), `${file}: ${component.id} variants`);
+    for (const variant of component.variants) {
+      assert(variant.values.includes(variant.default), `${file}: ${variant.name} default is invalid`);
+    }
+  }
+  for (const recipe of document.spec.recipes) {
+    for (const slot of recipe.slots) {
+      assert(components.has(slot.component), `${file}: unknown component ${slot.component}`);
+      assert(slot.minItems <= slot.maxItems, `${file}: ${slot.id} has an invalid item range`);
+    }
+  }
+  for (const path of document.spec.overridePolicy.allowedTokenPaths) {
+    assert(tokens.has(path), `${file}: unknown override token ${path}`);
+  }
+}
+
+function semanticDesignOverride() {}
+
 const fixtureKinds = [
   { suffix: ".plugin.json", validator: "plugin", semantic: semanticPlugin },
   { suffix: ".profile.json", validator: "profile", semantic: semanticProfile },
   { suffix: ".content-type.json", validator: "contentType", semantic: semanticContentType },
+  { suffix: ".design-override.json", validator: "designOverride", semantic: semanticDesignOverride },
+  { suffix: ".design-system.json", validator: "designSystem", semantic: semanticDesignSystem },
   { suffix: ".event.json", validator: "event", semantic: semanticEvent }
 ];
 
@@ -110,6 +146,8 @@ const negativeChecks = [
   ["plugin", { apiVersion: "navocms.io/v0alpha1", kind: "PluginManifest" }],
   ["profile", { apiVersion: "navocms.io/v0alpha1", kind: "SiteProfile" }],
   ["contentType", { apiVersion: "navocms.io/v0alpha1", kind: "ContentType" }],
+  ["designOverride", { apiVersion: "navocms.io/v0alpha1", kind: "DesignOverride" }],
+  ["designSystem", { apiVersion: "navocms.io/v0alpha1", kind: "DesignSystem" }],
   ["event", { specversion: "1.0" }]
 ];
 
@@ -117,5 +155,5 @@ for (const [name, invalidDocument] of negativeChecks) {
   assert(!validators[name](invalidDocument), `${name} schema unexpectedly accepted an invalid fixture`);
 }
 
-assert(validated >= 7, `Expected at least seven contract fixtures, validated ${validated}`);
+assert(validated >= 9, `Expected at least nine contract fixtures, validated ${validated}`);
 console.log(`Validated ${Object.keys(schemaPaths).length} schemas and ${validated} contract fixtures.`);

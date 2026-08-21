@@ -1,0 +1,17 @@
+---
+interface Props {
+  eyebrow: string;
+  title: string;
+  summary: string;
+  featured?: boolean;
+}
+
+const { eyebrow, title, summary, featured = false } = Astro.props;
+---
+
+<article class:list={["story-card", { "story-card--featured": featured }]}>
+  <p class="story-card__eyebrow">{eyebrow}</p>
+  <h3>{title}</h3>
+  <p>{summary}</p>
+  <a href="#recipe">Inspect recipe <span aria-hidden="true">→</span></a>
+</article>

@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { createApi } from "../apps/api/dist/app.js";
 import { contracts } from "../packages/contracts/dist/index.js";
 import { canonicalMarkdown } from "../packages/content/dist/index.js";
+import { compileDesignSystem } from "../packages/design/dist/index.js";
+import { createAstroDesignAdapter } from "../packages/design-astro/dist/index.js";
 import { withDatabaseScope } from "../packages/persistence-postgres/dist/index.js";
 import { protectedResourceMetadata } from "../packages/security/dist/index.js";
 import { createNoopService } from "../plugins/noop-service/dist/app.js";
@@ -14,6 +16,15 @@ contracts.plugin.parse(pluginFixture);
 if (canonicalMarkdown("# Portable content") !== "# Portable content\n") {
   throw new Error("Built content engine smoke failed");
 }
+const designFixture = JSON.parse(
+  await readFile(new URL("../examples/design-systems/tidal-signal.design-system.json", import.meta.url), "utf8")
+);
+const compiledDesign = compileDesignSystem(designFixture);
+createAstroDesignAdapter(compiledDesign, [
+  { id: "signal-button", module: "./SignalButton.astro" },
+  { id: "story-card", module: "./StoryCard.astro" },
+  { id: "section-shell", module: "./SectionShell.astro" }
+]);
 protectedResourceMetadata({
   resource: "https://api.navocms.com",
   authorizationServers: ["https://identity.example"],

@@ -43,6 +43,16 @@ const rules = [
     reason: "the content engine cannot depend on applications, plugins, the kernel, or HTTP transport"
   },
   {
+    directory: "packages/design/src",
+    forbidden: ["@navocms/kernel", "apps/", "plugins/", "fastify", "astro"],
+    reason: "the design engine cannot depend on applications, plugins, the kernel, transport, or a renderer"
+  },
+  {
+    directory: "packages/design-astro/src",
+    forbidden: ["@navocms/kernel", "apps/", "plugins/", "fastify"],
+    reason: "the Astro design adapter cannot depend on applications, plugins, the kernel, or transport"
+  },
+  {
     directory: "plugins/noop-service/src",
     forbidden: ["@navocms/kernel"],
     reason: "service plugins must not import the trusted kernel"
