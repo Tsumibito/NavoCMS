@@ -1,0 +1,10 @@
+---
+interface Props {
+  label: string;
+  tone?: "primary" | "quiet" | "danger";
+}
+
+const { label, tone = "primary" } = Astro.props;
+---
+
+<button class:list={["signal-button", `signal-button--${tone}`]} type="button">{label}</button>

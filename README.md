@@ -3,7 +3,7 @@
 **The agent-native CMS. No admin panel. Your agent is the interface.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Project status](https://img.shields.io/badge/status-sprint_3_content-orange.svg)](docs/roadmap/SPRINTS.md)
+[![Project status](https://img.shields.io/badge/status-sprint_4_design-orange.svg)](docs/roadmap/SPRINTS.md)
 
 NavoCMS is an open-source, multisite content platform designed to be operated through ChatGPT,
 Claude, Codex, or any compatible MCP client. It gives agents safe, typed operations for drafting,
@@ -47,8 +47,8 @@ an anchor while publishing content.
 
 ## Current status
 
-Sprints 0–3 establish the public contracts, TypeScript microkernel, multitenant security boundary,
-and portable Markdown content engine:
+Sprints 0–4 establish the public contracts, TypeScript microkernel, multitenant security boundary,
+portable Markdown content engine, and the first versioned design-system compiler and Astro catalogue:
 
 - [Product requirements](docs/product/PRD.md)
 - [Delivery roadmap](docs/roadmap/SPRINTS.md)

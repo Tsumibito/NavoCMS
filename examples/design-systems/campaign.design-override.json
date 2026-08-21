@@ -1,0 +1,17 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "DesignOverride",
+  "metadata": {
+    "name": "autumn-campaign",
+    "version": "0.1.0",
+    "createdAt": "2026-08-01T00:00:00Z"
+  },
+  "spec": {
+    "designSystem": { "name": "tidal-signal", "version": "0.1.0" },
+    "scope": { "kind": "route", "selector": "/autumn-guide" },
+    "reason": "Use the seasonal campaign accent on one approved landing page.",
+    "expiresAt": "2026-12-01T00:00:00Z",
+    "tokens": { "color.coral": "#d94b3d" },
+    "componentVariants": { "story-card": { "emphasis": "featured" } }
+  }
+}

@@ -9,3 +9,7 @@ coverage/
 dist/
 tmp/
 *.log
+playwright-report/
+test-results/
+.astro/
+apps/design-catalogue/src/generated/

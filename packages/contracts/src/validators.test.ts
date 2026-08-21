@@ -14,6 +14,12 @@ describe("public contract validators", () => {
     expect(contracts.plugin.parse(await fixture("plugins/media-imgproxy.plugin.json"))).toBeTruthy();
     expect(contracts.profile.parse(await fixture("profiles/simple-blog.profile.json"))).toBeTruthy();
     expect(contracts.contentType.parse(await fixture("content-types/article.content-type.json"))).toBeTruthy();
+    expect(
+      contracts.designSystem.parse(await fixture("design-systems/tidal-signal.design-system.json"))
+    ).toBeTruthy();
+    expect(
+      contracts.designOverride.parse(await fixture("design-systems/campaign.design-override.json"))
+    ).toBeTruthy();
     expect(contracts.event.parse(await fixture("events/revision-created.event.json"))).toBeTruthy();
   });
 
@@ -39,5 +45,23 @@ describe("public contract validators", () => {
 
     expect(() => contracts.plugin.parse(unsafe)).toThrowError(/must be idempotent for G1/);
     expect(contracts.plugin.is(unsafe)).toBe(false);
+  });
+
+  it("rejects design recipes that reference unknown components", async () => {
+    const design = contracts.designSystem.parse(
+      await fixture("design-systems/tidal-signal.design-system.json")
+    );
+    const invalid = {
+      ...design,
+      spec: {
+        ...design.spec,
+        recipes: design.spec.recipes.map((recipe) => ({
+          ...recipe,
+          slots: recipe.slots.map((slot) => ({ ...slot, component: "missing-component" }))
+        }))
+      }
+    };
+
+    expect(() => contracts.designSystem.parse(invalid)).toThrowError(/unknown component/);
   });
 });

@@ -13,6 +13,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0006](0006-immutable-previewed-releases.md) | Accepted | Approval and publication bind to immutable release hashes |
 | [0007](0007-microkernel-package-boundaries.md) | Accepted | Enforced contracts, kernel, API, and service-plugin package boundaries |
 | [0008](0008-identity-and-isolation-boundary.md) | Accepted | OAuth identity, intersected authority, RLS, and secret boundaries |
+| [0009](0009-versioned-design-contracts.md) | Accepted | Portable design contracts, bounded overrides, and renderer adapters |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

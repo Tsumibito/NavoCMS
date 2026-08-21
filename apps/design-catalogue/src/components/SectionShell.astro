@@ -1,0 +1,13 @@
+---
+interface Props {
+  label?: string;
+  id?: string;
+}
+
+const { label, id } = Astro.props;
+---
+
+<section {id} class="section-shell" aria-labelledby={label && id ? `${id}-title` : undefined}>
+  {label && <p class="section-shell__label" id={id ? `${id}-title` : undefined}>{label}</p>}
+  <slot />
+</section>

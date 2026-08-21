@@ -44,6 +44,9 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install catalogue browser
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Validate contracts, boundaries, build, and tests
         run: pnpm check
 
