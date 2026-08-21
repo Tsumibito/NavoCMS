@@ -91,7 +91,7 @@ Gate: P3.
 
 ## Sprint 4 — Design-system contract and catalogue
 
-**Status:** In progress on `codex/sprint-4-design-system`; gate closes after CI and merge.
+**Status:** Completed and accepted in [PR #9](https://github.com/Tsumibito/NavoCMS/pull/9).
 
 - DTCG tokens, component/variant/recipe schemas, overrides, Astro adapter, generated catalogue,
   responsive fixtures, visual regression, and accessibility checks.
