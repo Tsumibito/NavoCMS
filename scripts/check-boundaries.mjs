@@ -38,6 +38,11 @@ const rules = [
     reason: "the PostgreSQL adapter cannot depend on applications, plugins, or transport"
   },
   {
+    directory: "packages/content/src",
+    forbidden: ["@navocms/kernel", "apps/", "plugins/", "fastify"],
+    reason: "the content engine cannot depend on applications, plugins, the kernel, or HTTP transport"
+  },
+  {
     directory: "plugins/noop-service/src",
     forbidden: ["@navocms/kernel"],
     reason: "service plugins must not import the trusted kernel"

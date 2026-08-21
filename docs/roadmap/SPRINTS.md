@@ -72,7 +72,7 @@ Gate: P1.
 
 ## Sprint 2 — Multitenancy, identity, RLS, secrets, and quotas
 
-**Status:** Implemented in [PR #5](https://github.com/Tsumibito/NavoCMS/pull/5); P2 closes on merge.
+**Status:** Completed and accepted in [PR #5](https://github.com/Tsumibito/NavoCMS/pull/5).
 
 - tenants, sites, environments, memberships, roles, service accounts, OAuth/OIDC, and MCP OAuth;
 - PostgreSQL RLS, separate migration identity, site-scoped storage, secret broker, usage, quotas,

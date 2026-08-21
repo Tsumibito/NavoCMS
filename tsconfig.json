@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/contracts" },
     { "path": "packages/security" },
+    { "path": "packages/content" },
     { "path": "packages/kernel" },
     { "path": "packages/persistence-postgres" },
     { "path": "apps/api" },

@@ -3,7 +3,7 @@
 **The agent-native CMS. No admin panel. Your agent is the interface.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Project status](https://img.shields.io/badge/status-sprint_1_microkernel-orange.svg)](docs/roadmap/SPRINTS.md)
+[![Project status](https://img.shields.io/badge/status-sprint_3_content-orange.svg)](docs/roadmap/SPRINTS.md)
 
 NavoCMS is an open-source, multisite content platform designed to be operated through ChatGPT,
 Claude, Codex, or any compatible MCP client. It gives agents safe, typed operations for drafting,
@@ -14,7 +14,7 @@ Website: [navocms.com](https://navocms.com) · Repository:
 [github.com/Tsumibito/NavoCMS](https://github.com/Tsumibito/NavoCMS)
 
 > [!IMPORTANT]
-> NavoCMS is in its microkernel implementation stage. It is not yet production software. The public
+> NavoCMS is in its content-engine implementation stage. It is not yet production software. The public
 > schemas under `schemas/` are version `v0alpha1` and may change before the first release.
 
 ## What makes it different
@@ -47,8 +47,8 @@ an anchor while publishing content.
 
 ## Current status
 
-Sprint 0 established the public product and safety contracts. Sprint 1 implements the TypeScript
-microkernel and plugin graph:
+Sprints 0–3 establish the public contracts, TypeScript microkernel, multitenant security boundary,
+and portable Markdown content engine:
 
 - [Product requirements](docs/product/PRD.md)
 - [Delivery roadmap](docs/roadmap/SPRINTS.md)
@@ -74,7 +74,7 @@ examples/profiles/       contract fixtures for representative sites
 schemas/                  machine-readable v0alpha1 JSON Schemas
 scripts/                  deterministic repository checks
 apps/                     transport applications; not the trusted kernel
-packages/                 public contracts and trusted microkernel
+packages/                 contracts, security, content, persistence, and trusted microkernel
 plugins/                  independently deployable example/service plugins
 ```
 

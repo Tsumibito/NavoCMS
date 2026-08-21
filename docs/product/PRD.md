@@ -324,11 +324,15 @@ Accepted direction:
 - Astro and Cloudflare as first providers, not permanent kernel dependencies;
 - service plugins remain language-neutral.
 
-Experiments required before locking implementation:
+Resolved foundation experiments:
+
+- in-process plugin lifecycle and unload semantics (Sprint 1);
+- runtime/migration RLS behavior and adversarial site isolation (Sprint 2);
+- stable Markdown AST identity and source-hash structural patches (Sprint 3).
+
+Experiments still required before locking implementation:
 
 - durable workflow provider: DBOS, Restate, or a small Postgres-backed worker;
-- in-process plugin encapsulation and unload semantics;
-- stable Markdown AST node identity and safe structural patches;
-- RLS behavior across application, service, migration, backup, and restore roles;
+- backup/restore RLS behavior and operational break-glass procedure;
 - protected preview portability across hosts;
 - design component capability negotiation across renderers.

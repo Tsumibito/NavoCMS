@@ -1,6 +1,6 @@
 # ADR 0007 — Microkernel package boundaries
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 

@@ -40,3 +40,11 @@ Managed content forbids arbitrary MDX, JavaScript, and unsafe HTML.
 
 Sprint 3 must demonstrate semantic round trips, stale-patch rejection, directive validation, safe
 rendering, conflict handling, and deterministic conversion of representative legacy articles/pages.
+
+## Implementation resolution
+
+Sprint 3 resolves the AST experiment with content-addressed node identifiers plus a mandatory full
+source hash. Node identity deliberately excludes absolute offsets, so unchanged unique nodes survive
+unrelated insertions. Identical duplicate nodes use occurrence suffixes and therefore rely on the
+source hash to detect ambiguous stale edits. Portable export always retains Markdown as the
+authoritative source and recomputes the AST during verified import.
