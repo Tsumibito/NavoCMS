@@ -60,7 +60,8 @@
 - Prototype database roles and RLS across migrations, backup, restore, and background workers.
 - Implement production secret-provider adapters, short-lived leases, rotation, and access auditing
   under the [secret management policy](SECRETS.md).
-- Define CSP and origin policy for MCP Apps and protected previews.
+- Maintain the no-network/no-device MCP Apps policy from Sprint 5; define the separate origin and CSP
+  policy required by protected previews before P6.
 - Define event integrity/checkpoint and redaction test strategy.
 - Commission an external security review before hosted external tenants.
 

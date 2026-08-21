@@ -10,7 +10,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -b && node scripts/copy-contract-schemas.mjs",
+    "build": "pnpm --filter @navocms/mcp build:widget && tsc -b && node scripts/copy-contract-schemas.mjs",
     "check": "pnpm check:contracts && pnpm check:boundaries && pnpm check:secrets && pnpm check:docs && pnpm check:links && pnpm typecheck && pnpm check:build && pnpm check:catalogue && pnpm test && pnpm test:visual",
     "check:build": "node scripts/smoke-built-packages.mjs",
     "check:catalogue": "node scripts/generate-design-catalogue.mjs && pnpm --filter @navocms/design-catalogue check && pnpm --filter @navocms/design-catalogue build",
@@ -20,7 +20,7 @@
     "check:links": "node scripts/check-local-links.mjs",
     "check:secrets": "node scripts/check-secret-policy.mjs",
     "clean": "tsc -b --clean",
-    "test": "vitest run",
+    "test": "pnpm --filter @navocms/mcp build:widget && vitest run",
     "test:visual": "playwright test",
     "test:watch": "vitest",
     "typecheck": "pnpm build && tsc -p tsconfig.test.json --pretty false"

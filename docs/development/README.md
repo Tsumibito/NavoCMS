@@ -20,6 +20,7 @@ pnpm check
 | `@navocms/persistence-postgres` | Scoped transactions and ordered RLS migrations | Driver-neutral |
 | `@navocms/kernel` | Capabilities, plugin graph/host, events, trajectories, tracing | Contracts, security, OpenTelemetry API |
 | `@navocms/api` | Fastify transport, OAuth metadata, and development probes | Contracts, kernel, security, Fastify |
+| `@navocms/mcp` | OAuth-scoped agent editing tools and optional MCP Apps review UI | Content, kernel, security, MCP SDK |
 | `@navocms/design-catalogue` | Generated Astro review and quality surface | Design, Astro adapter, Astro |
 | `@navocms/plugin-noop-service` | External authenticated/idempotent service example | Fastify; never kernel |
 
@@ -38,6 +39,10 @@ pnpm --filter @navocms/api dev
 The API listens on `127.0.0.1:3000` by default. Its contract-validation endpoints remain development
 scaffolding, not a production management API. A deployment configures the OAuth protected-resource
 metadata and must place every future content/management route behind the verified scope boundary.
+
+The [MCP application](../../apps/mcp/README.md) has a separate development entry point and refuses
+to start without an OAuth issuer/resource plus an explicit tenant and site. Sprint 5 uses an
+in-memory editing adapter; it is a protocol and policy proving surface, not production persistence.
 
 Run the external no-op service with a local development token:
 

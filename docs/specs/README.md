@@ -10,6 +10,7 @@ Schemas live in [`schemas/`](../../schemas/README.md).
 | [Content type](content-type-v0alpha1.md) | Declarative collections, fields, relations, indexes, and policies |
 | [Content engine](content-engine-v0alpha1.md) | Markdown, AST identity, revisions, patches, and portable bundles |
 | [Design system](design-system-v0alpha1.md) | DTCG tokens, components, recipes, overrides, catalogues, and renderer bindings |
+| [MCP editing](mcp-editing-v0alpha1.md) | Scoped discovery, drafts, stable patches, review UI, and preview handoff |
 | [Event envelope](event-envelope-v0alpha1.md) | Portable domain audit and integration event metadata |
 | [Consequence policy](consequence-policy-v0alpha1.md) | Effect levels, approval, idempotency, and compensation |
 

@@ -1,0 +1,30 @@
+{
+  "name": "@navocms/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build:widget": "node scripts/build-widget.mjs",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@navocms/content": "workspace:*",
+    "@navocms/kernel": "workspace:*",
+    "@navocms/security": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "tsx": "4.23.12"
+  }
+}

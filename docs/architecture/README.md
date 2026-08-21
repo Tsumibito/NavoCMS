@@ -14,6 +14,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0007](0007-microkernel-package-boundaries.md) | Accepted | Enforced contracts, kernel, API, and service-plugin package boundaries |
 | [0008](0008-identity-and-isolation-boundary.md) | Accepted | OAuth identity, intersected authority, RLS, and secret boundaries |
 | [0009](0009-versioned-design-contracts.md) | Accepted | Portable design contracts, bounded overrides, and renderer adapters |
+| [0010](0010-decoupled-mcp-editing-surface.md) | Accepted | OAuth-scoped tools with decoupled MCP Apps review surfaces |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

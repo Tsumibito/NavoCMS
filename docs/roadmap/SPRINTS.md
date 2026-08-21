@@ -98,6 +98,8 @@ Gate: P3.
 
 ## Sprint 5 — Agent/MCP editing product
 
+**Status:** In progress on `codex/sprint-5-agent-mcp`.
+
 - goal-oriented MCP tools and resources, scoped discovery, Markdown/diff/draft/workflow widgets,
   non-UI fallbacks, bounded outputs, redaction, and agent evaluations.
 
