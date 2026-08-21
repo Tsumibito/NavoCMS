@@ -9,6 +9,7 @@
     { "path": "packages/kernel" },
     { "path": "packages/persistence-postgres" },
     { "path": "apps/api" },
+    { "path": "apps/mcp" },
     { "path": "plugins/noop-service" }
   ]
 }

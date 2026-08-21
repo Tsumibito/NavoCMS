@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { createApi } from "../apps/api/dist/app.js";
+import { createMcpServer, InMemoryEditingRepository, McpEditingService } from "../apps/mcp/dist/index.js";
 import { contracts } from "../packages/contracts/dist/index.js";
 import { canonicalMarkdown } from "../packages/content/dist/index.js";
 import { compileDesignSystem } from "../packages/design/dist/index.js";
@@ -39,9 +40,27 @@ if (health.statusCode !== 200 || health.json().product !== "NavoCMS") {
 }
 await api.close();
 
+const mcpRepository = new InMemoryEditingRepository();
+mcpRepository.registerSite({
+  tenantId: "11111111-1111-4111-8111-111111111111",
+  siteId: "22222222-2222-4222-8222-222222222222",
+  name: "Build smoke",
+  primaryLocale: "en",
+  locales: ["en"]
+});
+const mcp = createMcpServer(new McpEditingService(mcpRepository), {
+  authorization: {
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    siteId: "22222222-2222-4222-8222-222222222222",
+    principal: { id: "build-smoke", kind: "agent", issuer: "https://identity.example", subject: "build-smoke" },
+    layers: [{ name: "principal", permissions: ["content:read"] }]
+  }
+});
+if (typeof mcp.connect !== "function") throw new Error("Built MCP server smoke failed");
+
 const service = createNoopService({ token: "build-smoke-token-0001" });
 const serviceHealth = await service.inject({ method: "GET", url: "/health" });
 if (serviceHealth.statusCode !== 200) throw new Error("Built no-op service health smoke failed");
 await service.close();
 
-console.log("Built contracts, API, and service plugin smoke checks pass.");
+console.log("Built contracts, API, MCP, and service plugin smoke checks pass.");
