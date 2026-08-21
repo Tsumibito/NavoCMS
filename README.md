@@ -14,7 +14,7 @@ Website: [navocms.com](https://navocms.com) · Repository:
 [github.com/Tsumibito/NavoCMS](https://github.com/Tsumibito/NavoCMS)
 
 > [!IMPORTANT]
-> NavoCMS is in its production-foundation implementation stage. It is not yet production software. The public
+> NavoCMS has completed its production-foundation stage. It is not yet production software. The public
 > schemas under `schemas/` are version `v0alpha1` and may change before the first release.
 
 ## What makes it different
