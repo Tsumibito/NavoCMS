@@ -3,7 +3,7 @@
 **The agent-native CMS. No admin panel. Your agent is the interface.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Project status](https://img.shields.io/badge/status-sprint_5_agent_editing-orange.svg)](docs/roadmap/SPRINTS.md)
+[![Project status](https://img.shields.io/badge/status-sprint_6_production_foundation-orange.svg)](docs/roadmap/SPRINTS.md)
 
 NavoCMS is an open-source, multisite content platform designed to be operated through ChatGPT,
 Claude, Codex, or any compatible MCP client. It gives agents safe, typed operations for drafting,
@@ -14,7 +14,7 @@ Website: [navocms.com](https://navocms.com) · Repository:
 [github.com/Tsumibito/NavoCMS](https://github.com/Tsumibito/NavoCMS)
 
 > [!IMPORTANT]
-> NavoCMS is in its agent-editing implementation stage. It is not yet production software. The public
+> NavoCMS is in its production-foundation implementation stage. It is not yet production software. The public
 > schemas under `schemas/` are version `v0alpha1` and may change before the first release.
 
 ## What makes it different
@@ -49,13 +49,15 @@ an anchor while publishing content.
 
 Sprints 0–5 establish the public contracts, TypeScript microkernel, multitenant security boundary,
 portable Markdown content engine, versioned design-system compiler and Astro catalogue, plus the
-authenticated MCP editing and review boundary:
+authenticated MCP editing and review boundary. Sprint 6 connects that product surface to durable
+PostgreSQL persistence and a repeatable Neon/Coolify production topology:
 
 - [Product requirements](docs/product/PRD.md)
 - [Delivery roadmap](docs/roadmap/SPRINTS.md)
 - [Architecture decisions](docs/architecture/README.md)
 - [Plugin and platform specifications](docs/specs/README.md)
 - [Threat model](docs/security/THREAT_MODEL.md)
+- [Production foundation](docs/operations/PRODUCTION_FOUNDATION.md)
 - [Machine-readable schemas](schemas/README.md)
 
 The intended implementation direction is a TypeScript trusted kernel with PostgreSQL and

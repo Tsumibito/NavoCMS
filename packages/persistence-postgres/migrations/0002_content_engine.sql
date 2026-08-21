@@ -1,6 +1,5 @@
 BEGIN;
 
-SET ROLE navocms_migrator;
 SET search_path = navocms, pg_catalog;
 
 CREATE TABLE IF NOT EXISTS content_types (
@@ -114,5 +113,4 @@ GRANT SELECT ON
   content_types, content_documents, content_variants, content_revisions, content_relations
   TO navocms_plugin;
 
-RESET ROLE;
 COMMIT;

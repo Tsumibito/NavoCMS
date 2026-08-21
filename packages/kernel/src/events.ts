@@ -13,6 +13,7 @@ export interface LedgerRecord<TData extends Record<string, unknown> = Record<str
 export interface EventQuery {
   readonly tenantId?: string;
   readonly siteId?: string;
+  readonly principalId?: string;
   readonly correlationId?: string;
   readonly type?: string;
 }

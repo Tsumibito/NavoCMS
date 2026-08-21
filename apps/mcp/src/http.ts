@@ -22,6 +22,7 @@ export interface McpHttpOptions {
   readonly resource: string;
   readonly authorizationServers: readonly string[];
   readonly documentationUrl?: string;
+  readonly readiness?: () => Promise<boolean>;
 }
 
 export function createMcpHttpServer(options: McpHttpOptions) {
@@ -36,6 +37,17 @@ export function createMcpHttpServer(options: McpHttpOptions) {
   const metadataUrl = `${resourceUrl.origin}${metadataPath}`;
 
   return createNodeServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/healthz") {
+      return sendJson(response, 200, { status: "ok" });
+    }
+    if (request.method === "GET" && request.url === "/readyz") {
+      try {
+        const ready = options.readiness ? await options.readiness() : true;
+        return sendJson(response, ready ? 200 : 503, { status: ready ? "ready" : "not-ready" });
+      } catch {
+        return sendJson(response, 503, { status: "not-ready" });
+      }
+    }
     if (request.method === "GET" && request.url === metadataPath) {
       return sendJson(response, 200, metadata);
     }

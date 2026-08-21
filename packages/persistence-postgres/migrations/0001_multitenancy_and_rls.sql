@@ -14,9 +14,7 @@ BEGIN
 END
 $roles$;
 
-CREATE SCHEMA IF NOT EXISTS navocms AUTHORIZATION navocms_migrator;
-ALTER SCHEMA navocms OWNER TO navocms_migrator;
-SET ROLE navocms_migrator;
+CREATE SCHEMA IF NOT EXISTS navocms;
 SET search_path = navocms, pg_catalog;
 
 CREATE TABLE IF NOT EXISTS tenants (
@@ -212,8 +210,7 @@ GRANT USAGE ON SCHEMA navocms TO navocms_app, navocms_plugin;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA navocms TO navocms_app;
 GRANT SELECT, INSERT, UPDATE ON usage_events TO navocms_plugin;
 GRANT SELECT ON sites, environments, secret_references, quota_limits, kill_switches TO navocms_plugin;
-ALTER DEFAULT PRIVILEGES FOR ROLE navocms_migrator IN SCHEMA navocms
+ALTER DEFAULT PRIVILEGES IN SCHEMA navocms
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO navocms_app;
 
-RESET ROLE;
 COMMIT;

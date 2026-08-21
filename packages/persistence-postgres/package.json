@@ -9,5 +9,16 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "migrations"]
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "dependencies": {
+    "@navocms/contracts": "workspace:*",
+    "@navocms/security": "workspace:*",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.5"
+  }
 }
