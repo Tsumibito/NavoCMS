@@ -1,6 +1,6 @@
 # ADR 0008 — Identity and isolation boundary
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 

@@ -8,6 +8,7 @@ Schemas live in [`schemas/`](../../schemas/README.md).
 | [Plugin manifest](plugin-manifest-v0alpha1.md) | Capabilities, dependencies, trust, permissions, effects |
 | [Site profile](site-profile-v0alpha1.md) | Four anchors, provider bindings, locales, and installed plugins |
 | [Content type](content-type-v0alpha1.md) | Declarative collections, fields, relations, indexes, and policies |
+| [Content engine](content-engine-v0alpha1.md) | Markdown, AST identity, revisions, patches, and portable bundles |
 | [Event envelope](event-envelope-v0alpha1.md) | Portable domain audit and integration event metadata |
 | [Consequence policy](consequence-policy-v0alpha1.md) | Effect levels, approval, idempotency, and compensation |
 
