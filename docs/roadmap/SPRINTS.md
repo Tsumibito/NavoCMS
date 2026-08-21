@@ -82,6 +82,8 @@ Gate: P2.
 
 ## Sprint 3 — Content schemas, Markdown AST, and revisions
 
+**Status:** Implemented in [PR #6](https://github.com/Tsumibito/NavoCMS/pull/6); P3 closes on merge.
+
 - declarative types and packs, revisions, relations, variants, stable AST patches, conflict handling,
   import/export, and representative legacy-editor conversion.
 
