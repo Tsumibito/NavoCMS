@@ -1,7 +1,6 @@
 \set ON_ERROR_STOP on
 
 BEGIN;
-SET ROLE navocms_migrator;
 SET search_path = navocms, pg_catalog;
 
 INSERT INTO tenants (id, slug, name) VALUES
@@ -17,7 +16,6 @@ INSERT INTO service_accounts (id, tenant_id, site_id, name, credential_fingerpri
   ('11110000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001', 'publisher', 'fingerprint-one'),
   ('22220000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000002', '22000000-0000-4000-8000-000000000002', 'publisher', 'fingerprint-two');
 
-RESET ROLE;
 SET ROLE navocms_app;
 SELECT set_config('navocms.tenant_id', '10000000-0000-4000-8000-000000000001', true);
 SELECT set_config('navocms.site_id', '11000000-0000-4000-8000-000000000001', true);

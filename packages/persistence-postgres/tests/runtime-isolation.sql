@@ -1,7 +1,6 @@
 \set ON_ERROR_STOP on
 
 BEGIN;
-SET ROLE navocms_migrator;
 SET search_path = navocms, pg_catalog;
 
 INSERT INTO tenants (id, slug, name) VALUES
@@ -21,7 +20,6 @@ INSERT INTO idempotency_records (
   ('50000000-0000-4000-8000-000000000005', '55000000-0000-4000-8000-000000000005', 'draft_create', 'runtime-one', repeat('a', 64), 'pending'),
   ('60000000-0000-4000-8000-000000000006', '66000000-0000-4000-8000-000000000006', 'draft_create', 'runtime-two', repeat('b', 64), 'pending');
 
-RESET ROLE;
 SET ROLE navocms_app;
 SELECT set_config('navocms.tenant_id', '50000000-0000-4000-8000-000000000005', true);
 SELECT set_config('navocms.site_id', '55000000-0000-4000-8000-000000000005', true);
