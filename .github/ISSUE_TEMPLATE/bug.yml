@@ -1,0 +1,49 @@
+name: Bug report
+description: Report reproducible incorrect behavior in NavoCMS.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets, customer content, PII, or vulnerability details.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Observed behavior
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe sequence that reproduces the issue.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.x.y or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact area
+      options:
+        - Contracts or schemas
+        - Agent or MCP tools
+        - Content or revisions
+        - Plugins or workflows
+        - Tenancy or authorization
+        - Preview, publish, or rollback
+        - Documentation or developer experience
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This report contains no vulnerability details or sensitive data.
+          required: true

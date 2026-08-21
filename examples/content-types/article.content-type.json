@@ -1,0 +1,45 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "ContentType",
+  "metadata": {
+    "name": "article",
+    "version": "0.1.0",
+    "title": "Article",
+    "description": "Long-form editorial content with portable Markdown prose."
+  },
+  "spec": {
+    "fields": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "slug", "body"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "summary": { "type": "string", "maxLength": 500 },
+        "body": { "type": "string", "contentMediaType": "text/markdown" },
+        "publishedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "relations": [
+      { "name": "author", "target": "person", "cardinality": "one", "onDelete": "restrict" },
+      { "name": "topics", "target": "topic", "cardinality": "many", "onDelete": "nullify" }
+    ],
+    "localization": {
+      "mode": "document",
+      "requiredLocales": []
+    },
+    "indexes": [
+      { "name": "article_slug_unique", "fields": ["slug", "locale"], "unique": true },
+      { "name": "article_published_at", "fields": ["publishedAt"], "unique": false }
+    ],
+    "rendererCapabilities": ["content.markdown", "component.image", "component.callout"],
+    "defaultWorkflow": "navocms.editorial.standard.v1",
+    "permissions": {
+      "read": ["viewer", "editor", "publisher", "site-admin"],
+      "draft": ["editor", "publisher", "site-admin"],
+      "publish": ["publisher", "site-admin"]
+    },
+    "retentionClass": "published-history"
+  }
+}

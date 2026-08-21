@@ -1,0 +1,52 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "SiteProfile",
+  "metadata": {
+    "name": "simple-blog",
+    "version": "0.1.0",
+    "displayName": "Simple Blog"
+  },
+  "spec": {
+    "environment": "production",
+    "locales": {
+      "default": "en",
+      "supported": ["en"]
+    },
+    "anchors": {
+      "content": {
+        "ref": "packs/editorial",
+        "version": "0.1.0",
+        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "design": {
+        "ref": "design/minimal",
+        "version": "0.1.0",
+        "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "delivery": {
+        "ref": "delivery/astro-cloudflare",
+        "version": "0.1.0",
+        "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "governance": {
+        "ref": "governance/editor-publisher",
+        "version": "0.1.0",
+        "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    },
+    "plugins": [
+      { "id": "navocms.content.markdown", "version": "0.1.0", "enabled": true },
+      { "id": "navocms.renderer.astro", "version": "0.1.0", "enabled": true },
+      { "id": "navocms.deploy.cloudflare", "version": "0.1.0", "enabled": true }
+    ],
+    "bindings": [
+      { "capability": "content.parse", "version": 1, "provider": "navocms.content.markdown" },
+      { "capability": "site.render", "version": 1, "provider": "navocms.renderer.astro" },
+      { "capability": "site.deploy", "version": 1, "provider": "navocms.deploy.cloudflare" }
+    ],
+    "urlPolicy": {
+      "canonicalHost": "blog.example.com",
+      "immutablePublicUrls": true
+    }
+  }
+}

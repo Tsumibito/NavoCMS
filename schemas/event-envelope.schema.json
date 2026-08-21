@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v0alpha1/event-envelope.schema.json",
+  "title": "NavoCMS Event Envelope v0alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specversion", "id", "source", "type", "time", "datacontenttype", "navotenantid", "navositeid", "navocorrelationid", "navoconsequence", "navoschemaversion", "navoactor", "data"],
+  "properties": {
+    "specversion": { "const": "1.0" },
+    "id": { "type": "string", "format": "uuid" },
+    "source": { "type": "string", "format": "uri-reference" },
+    "type": { "type": "string", "pattern": "^io\\.navocms\\.[a-z0-9.-]+\\.v[1-9][0-9]*$" },
+    "subject": { "type": "string", "minLength": 1 },
+    "time": { "type": "string", "format": "date-time" },
+    "datacontenttype": { "const": "application/json" },
+    "navotenantid": { "type": "string", "format": "uuid" },
+    "navositeid": { "type": "string", "format": "uuid" },
+    "navocorrelationid": { "type": "string", "format": "uuid" },
+    "navocausationid": { "type": "string", "format": "uuid" },
+    "navoconsequence": { "enum": ["G0", "G1", "G2", "G3", "G4"] },
+    "navoidempotencykey": { "type": "string", "minLength": 16, "maxLength": 200 },
+    "navoschemaversion": { "type": "integer", "minimum": 1 },
+    "navoactor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "enum": ["human", "agent", "service", "system"] },
+        "id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["uri", "mediaType", "digest"],
+        "properties": {
+          "uri": { "type": "string", "format": "uri-reference" },
+          "mediaType": { "type": "string", "minLength": 1 },
+          "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "data": { "type": "object" }
+  }
+}

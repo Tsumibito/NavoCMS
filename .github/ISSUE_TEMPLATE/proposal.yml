@@ -1,0 +1,39 @@
+name: Product or architecture proposal
+description: Propose a product capability, public contract, or architecture change.
+title: "proposal: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user outcome or architectural constraint, not only a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Which capability, contract, plugin, or kernel boundary changes?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and safety impact
+      description: Cover tenancy, permissions, data, migrations, external effects, and rollback.
+    validations:
+      required: true
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: Product fit
+      options:
+        - label: Core behavior remains usable without an embedded UI.
+        - label: Provider-specific behavior stays behind a capability contract.
+        - label: The proposal does not give an agent authority to install code or widen permissions.

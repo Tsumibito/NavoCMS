@@ -1,0 +1,23 @@
+{
+  "name": "navocms",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The agent-native CMS. No admin panel. Your agent is the interface.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.24.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "pnpm check:contracts && pnpm check:docs && pnpm check:links",
+    "check:contracts": "node scripts/validate-contracts.mjs",
+    "check:docs": "markdownlint-cli2",
+    "check:links": "node scripts/check-local-links.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "markdownlint-cli2": "0.23.2"
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v0alpha1/plugin-manifest.schema.json",
+  "title": "NavoCMS Plugin Manifest v0alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "navocms.io/v0alpha1" },
+    "kind": { "const": "PluginManifest" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "provides", "requires", "permissions", "effects"],
+      "properties": {
+        "runtime": { "enum": ["kernel", "module", "service", "ui", "sandbox"] },
+        "provides": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability" },
+          "uniqueItems": true
+        },
+        "requires": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requirement" },
+          "uniqueItems": true
+        },
+        "subscribes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/eventType" },
+          "uniqueItems": true
+        },
+        "permissions": { "$ref": "#/$defs/permissions" },
+        "effects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/effect" }
+        },
+        "configSchema": { "type": "string", "format": "uri-reference" },
+        "healthcheck": { "type": "string", "pattern": "^/" }
+      }
+    }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "displayName", "description"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$" },
+        "version": { "$ref": "#/$defs/semver" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "capabilityName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9]*)+$"
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/capabilityName" },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/capabilityName" },
+        "version": { "type": "integer", "minimum": 1 },
+        "optional": { "type": "boolean" }
+      }
+    },
+    "eventType": {
+      "type": "string",
+      "pattern": "^io\\.navocms\\.[a-z0-9.-]+\\.v[1-9][0-9]*$"
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data", "network", "scopes"],
+      "properties": {
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["read", "write"],
+          "properties": {
+            "read": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+            "write": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+          }
+        },
+        "network": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9*.-]+(?::[0-9]+)?$" },
+          "uniqueItems": true
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?::[a-z][a-z0-9]*)+$" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "consequence", "idempotent"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$" },
+        "consequence": { "enum": ["G0", "G1", "G2", "G3", "G4"] },
+        "idempotent": { "type": "boolean" },
+        "compensation": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

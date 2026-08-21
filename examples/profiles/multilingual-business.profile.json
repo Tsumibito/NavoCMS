@@ -1,0 +1,58 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "SiteProfile",
+  "metadata": {
+    "name": "multilingual-business",
+    "version": "0.1.0",
+    "displayName": "Multilingual Business"
+  },
+  "spec": {
+    "environment": "production",
+    "locales": {
+      "default": "en",
+      "supported": ["en", "fr", "uk"]
+    },
+    "anchors": {
+      "content": {
+        "ref": "packs/marketing-business",
+        "version": "0.1.0",
+        "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "design": {
+        "ref": "design/editorial-business",
+        "version": "0.1.0",
+        "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "delivery": {
+        "ref": "delivery/astro-cloudflare",
+        "version": "0.1.0",
+        "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "governance": {
+        "ref": "governance/multilingual-marketing",
+        "version": "0.1.0",
+        "digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+      }
+    },
+    "plugins": [
+      { "id": "navocms.content.markdown", "version": "0.1.0", "enabled": true },
+      { "id": "navocms.localization.core", "version": "0.1.0", "enabled": true },
+      { "id": "navocms.seo.structured-data", "version": "0.1.0", "enabled": true },
+      { "id": "navocms.forms.core", "version": "0.1.0", "enabled": true },
+      { "id": "navocms.renderer.astro", "version": "0.1.0", "enabled": true },
+      { "id": "navocms.deploy.cloudflare", "version": "0.1.0", "enabled": true }
+    ],
+    "bindings": [
+      { "capability": "content.parse", "version": 1, "provider": "navocms.content.markdown" },
+      { "capability": "content.localize", "version": 1, "provider": "navocms.localization.core" },
+      { "capability": "seo.structured", "version": 1, "provider": "navocms.seo.structured-data" },
+      { "capability": "form.submit", "version": 1, "provider": "navocms.forms.core" },
+      { "capability": "site.render", "version": 1, "provider": "navocms.renderer.astro" },
+      { "capability": "site.deploy", "version": 1, "provider": "navocms.deploy.cloudflare" }
+    ],
+    "urlPolicy": {
+      "canonicalHost": "business.example.com",
+      "immutablePublicUrls": true
+    }
+  }
+}
