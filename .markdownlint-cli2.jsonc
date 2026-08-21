@@ -7,5 +7,13 @@
     "MD041": false,
     "MD060": false
   },
-  "globs": ["*.md", ".github/**/*.md", "docs/**/*.md", "schemas/**/*.md"]
+  "globs": [
+    "*.md",
+    ".github/**/*.md",
+    "apps/*/README.md",
+    "docs/**/*.md",
+    "packages/*/README.md",
+    "plugins/*/README.md",
+    "schemas/**/*.md"
+  ]
 }

@@ -1,0 +1,18 @@
+import { copyFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import process from "node:process";
+
+const files = [
+  "content-type.schema.json",
+  "event-envelope.schema.json",
+  "plugin-manifest.schema.json",
+  "site-profile.schema.json"
+];
+const destination = path.join(process.cwd(), "packages/contracts/dist/schemas");
+
+await mkdir(destination, { recursive: true });
+for (const file of files) {
+  await copyFile(path.join(process.cwd(), "schemas", file), path.join(destination, file));
+}
+
+console.log(`Copied ${files.length} public schemas into @navocms/contracts.`);

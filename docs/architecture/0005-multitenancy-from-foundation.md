@@ -1,6 +1,6 @@
 # ADR 0005 — Multitenancy from the foundation
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 

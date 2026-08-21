@@ -1,0 +1,24 @@
+{
+  "name": "@navocms/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/app.d.ts",
+      "default": "./dist/app.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@navocms/contracts": "workspace:*",
+    "@navocms/kernel": "workspace:*",
+    "fastify": "5.12.1"
+  },
+  "devDependencies": {
+    "tsx": "4.23.12"
+  }
+}

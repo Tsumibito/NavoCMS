@@ -1,6 +1,6 @@
 # ADR 0004 — Markdown content model
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 

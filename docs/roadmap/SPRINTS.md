@@ -26,6 +26,8 @@ parallel work may reduce calendar time but cannot remove a gate.
 
 ## Sprint 0 — Foundation contracts
 
+**Status:** Completed and accepted in [PR #1](https://github.com/Tsumibito/NavoCMS/pull/1).
+
 Goal: make the project implementable without hiding product or security decisions in code.
 
 Deliverables:
@@ -53,9 +55,12 @@ Verification:
 - local and GitHub checks pass from a clean checkout;
 - unresolved implementation choices are visible experiments, not accidental commitments.
 
-Gate: P0 after maintainer acceptance.
+Gate: P0 closed.
 
 ## Sprint 1 — TypeScript microkernel and plugin graph
+
+**Status:** Implemented in draft [PR #4](https://github.com/Tsumibito/NavoCMS/pull/4); P1 closes on
+merge.
 
 - workspace boundaries for kernel, SDK, first-party plugins, and examples;
 - Fastify service shell and stable domain API boundary;

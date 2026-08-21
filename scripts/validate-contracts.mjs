@@ -95,7 +95,8 @@ const fixtureKinds = [
 ];
 
 let validated = 0;
-for (const file of await listJsonFiles("examples")) {
+const fixtureFiles = [...(await listJsonFiles("examples")), ...(await listJsonFiles("plugins"))];
+for (const file of fixtureFiles) {
   const fixture = fixtureKinds.find(({ suffix }) => file.endsWith(suffix));
   if (!fixture) continue;
   const document = await readJson(file);
@@ -116,5 +117,5 @@ for (const [name, invalidDocument] of negativeChecks) {
   assert(!validators[name](invalidDocument), `${name} schema unexpectedly accepted an invalid fixture`);
 }
 
-assert(validated >= 6, `Expected at least six contract fixtures, validated ${validated}`);
+assert(validated >= 7, `Expected at least seven contract fixtures, validated ${validated}`);
 console.log(`Validated ${Object.keys(schemaPaths).length} schemas and ${validated} contract fixtures.`);

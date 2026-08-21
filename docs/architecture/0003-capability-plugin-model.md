@@ -1,6 +1,6 @@
 # ADR 0003 — Capability-based plugin model
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 

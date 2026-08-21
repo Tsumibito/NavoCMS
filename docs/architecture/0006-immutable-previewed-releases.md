@@ -1,6 +1,6 @@
 # ADR 0006 — Immutable previewed releases
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 
