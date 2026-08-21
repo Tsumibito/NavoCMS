@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/kernel" },
+    { "path": "apps/api" },
+    { "path": "plugins/noop-service" }
+  ]
+}

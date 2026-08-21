@@ -1,6 +1,6 @@
 # ADR 0001 — Agent-first product boundary
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 

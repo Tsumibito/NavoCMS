@@ -10,14 +10,24 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "pnpm check:contracts && pnpm check:docs && pnpm check:links",
+    "build": "tsc -b && node scripts/copy-contract-schemas.mjs",
+    "check": "pnpm check:contracts && pnpm check:boundaries && pnpm check:docs && pnpm check:links && pnpm typecheck && pnpm check:build && pnpm test",
+    "check:build": "node scripts/smoke-built-packages.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:contracts": "node scripts/validate-contracts.mjs",
     "check:docs": "markdownlint-cli2",
-    "check:links": "node scripts/check-local-links.mjs"
+    "check:links": "node scripts/check-local-links.mjs",
+    "clean": "tsc -b --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm build && tsc -p tsconfig.test.json --pretty false"
   },
   "devDependencies": {
+    "@types/node": "24.10.1",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "markdownlint-cli2": "0.23.2"
+    "markdownlint-cli2": "0.23.2",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
   }
 }

@@ -1,4 +1,4 @@
-name: Contract checks
+name: Quality checks
 
 on:
   pull_request:
@@ -31,5 +31,5 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Validate contracts and documentation
+      - name: Validate contracts, boundaries, build, and tests
         run: pnpm check

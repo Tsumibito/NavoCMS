@@ -1,6 +1,6 @@
 # ADR 0002 — TypeScript kernel and language-neutral service plugins
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-21
 

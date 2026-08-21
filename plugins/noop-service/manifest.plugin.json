@@ -1,0 +1,29 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "PluginManifest",
+  "metadata": {
+    "id": "navocms.example.noop-service",
+    "version": "0.1.0",
+    "displayName": "No-op service plugin",
+    "description": "Demonstrates a language-neutral authenticated service boundary without importing the kernel."
+  },
+  "spec": {
+    "runtime": "service",
+    "provides": [{ "name": "test.noop", "version": 1 }],
+    "requires": [],
+    "permissions": {
+      "data": { "read": [], "write": [] },
+      "network": [],
+      "scopes": ["plugin:invoke"]
+    },
+    "effects": [
+      {
+        "name": "invoke",
+        "consequence": "G1",
+        "idempotent": true,
+        "compensation": "No compensation is required because the plugin performs no external effect."
+      }
+    ],
+    "healthcheck": "/health"
+  }
+}
