@@ -12,6 +12,7 @@
   "files": ["dist"],
   "dependencies": {
     "@navocms/contracts": "workspace:*",
+    "@navocms/security": "workspace:*",
     "@opentelemetry/api": "1.9.0"
   }
 }

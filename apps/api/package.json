@@ -16,6 +16,7 @@
   "dependencies": {
     "@navocms/contracts": "workspace:*",
     "@navocms/kernel": "workspace:*",
+    "@navocms/security": "workspace:*",
     "fastify": "5.12.1"
   },
   "devDependencies": {

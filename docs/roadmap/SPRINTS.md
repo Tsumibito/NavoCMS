@@ -59,8 +59,7 @@ Gate: P0 closed.
 
 ## Sprint 1 — TypeScript microkernel and plugin graph
 
-**Status:** Implemented in draft [PR #4](https://github.com/Tsumibito/NavoCMS/pull/4); P1 closes on
-merge.
+**Status:** Completed and accepted in [PR #4](https://github.com/Tsumibito/NavoCMS/pull/4).
 
 - workspace boundaries for kernel, SDK, first-party plugins, and examples;
 - Fastify service shell and stable domain API boundary;
@@ -72,6 +71,8 @@ merge.
 Gate: P1.
 
 ## Sprint 2 — Multitenancy, identity, RLS, secrets, and quotas
+
+**Status:** Implemented in [PR #5](https://github.com/Tsumibito/NavoCMS/pull/5); P2 closes on merge.
 
 - tenants, sites, environments, memberships, roles, service accounts, OAuth/OIDC, and MCP OAuth;
 - PostgreSQL RLS, separate migration identity, site-scoped storage, secret broker, usage, quotas,

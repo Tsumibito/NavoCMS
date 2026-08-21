@@ -97,4 +97,19 @@ describe("Event Ledger", () => {
       expect.objectContaining({ code: "TRAJECTORY_TRANSITION_INVALID" })
     );
   });
+
+  it("rejects secret-shaped fields before they enter the ledger", async () => {
+    const events = factory();
+    const store = new InMemoryEventStore();
+    await expect(
+      store.append(
+        events.create({
+          type: "io.navocms.plugin.configured.v1",
+          consequence: "G1",
+          idempotencyKey: "plugin:configure:secret-test",
+          data: { pluginId: "publisher", access_token: "must-never-be-stored" }
+        })
+      )
+    ).rejects.toMatchObject({ code: "PROJECTION_SENSITIVE_FIELD" });
+  });
 });

@@ -28,6 +28,16 @@ const rules = [
     reason: "the kernel cannot depend on applications, concrete plugins, or HTTP transport"
   },
   {
+    directory: "packages/security/src",
+    forbidden: ["@navocms/kernel", "apps/", "plugins/", "fastify"],
+    reason: "security primitives cannot depend on the kernel, applications, plugins, or transport"
+  },
+  {
+    directory: "packages/persistence-postgres/src",
+    forbidden: ["@navocms/kernel", "apps/", "plugins/", "fastify"],
+    reason: "the PostgreSQL adapter cannot depend on applications, plugins, or transport"
+  },
+  {
     directory: "plugins/noop-service/src",
     forbidden: ["@navocms/kernel"],
     reason: "service plugins must not import the trusted kernel"

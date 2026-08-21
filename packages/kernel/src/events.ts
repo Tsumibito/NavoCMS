@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { contracts, type ConsequenceLevel, type DomainEvent, type EventActor } from "@navocms/contracts";
+import { assertSafeProjection } from "@navocms/security";
 
 import { KernelError } from "./errors.js";
 
@@ -37,6 +38,7 @@ export class InMemoryEventStore implements EventStore {
   public async append<TData extends Record<string, unknown>>(
     eventInput: DomainEvent<TData>
   ): Promise<LedgerRecord<TData>> {
+    assertSafeProjection(eventInput.data);
     const event = contracts.event.parse(structuredClone(eventInput)) as DomainEvent<TData>;
     if (this.#eventIds.has(event.id)) {
       throw new KernelError("EVENT_ID_DUPLICATE", `Event ID ${event.id} already exists`, { eventId: event.id });
