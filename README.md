@@ -14,7 +14,7 @@ Website: [navocms.com](https://navocms.com) · Repository:
 [github.com/Tsumibito/NavoCMS](https://github.com/Tsumibito/NavoCMS)
 
 > [!IMPORTANT]
-> NavoCMS is in its content-engine implementation stage. It is not yet production software. The public
+> NavoCMS is in its design-system implementation stage. It is not yet production software. The public
 > schemas under `schemas/` are version `v0alpha1` and may change before the first release.
 
 ## What makes it different
