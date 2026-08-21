@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/examples/schemas/media-imgproxy.config.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["endpoint", "sourceRef", "signingKeyRef"],
+  "properties": {
+    "endpoint": { "type": "string", "format": "uri" },
+    "sourceRef": { "type": "string", "minLength": 1 },
+    "signingKeyRef": { "type": "string", "pattern": "^secret://" }
+  }
+}

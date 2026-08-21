@@ -1,0 +1,32 @@
+{
+  "specversion": "1.0",
+  "id": "0198c9b8-95e6-7d5f-89c7-8d8d92034c11",
+  "source": "/tenants/0198c9b8-1111-7777-8888-111111111111/sites/0198c9b8-2222-7777-8888-222222222222/content",
+  "type": "io.navocms.content.revision-created.v1",
+  "subject": "documents/0198c9b8-3333-7777-8888-333333333333/revisions/4",
+  "time": "2026-08-21T12:00:00Z",
+  "datacontenttype": "application/json",
+  "navotenantid": "0198c9b8-1111-7777-8888-111111111111",
+  "navositeid": "0198c9b8-2222-7777-8888-222222222222",
+  "navocorrelationid": "0198c9b8-4444-7777-8888-444444444444",
+  "navocausationid": "0198c9b8-5555-7777-8888-555555555555",
+  "navoconsequence": "G1",
+  "navoidempotencykey": "draft:0198c9b8-3333:revision:4",
+  "navoschemaversion": 1,
+  "navoactor": {
+    "type": "agent",
+    "id": "agent-session:0198c9b8-6666"
+  },
+  "artifacts": [
+    {
+      "uri": "urn:navocms:artifact:revision:0198c9b8-3333:4",
+      "mediaType": "text/markdown",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "data": {
+    "documentId": "0198c9b8-3333-7777-8888-333333333333",
+    "revisionNumber": 4,
+    "source": "agent-proposal"
+  }
+}

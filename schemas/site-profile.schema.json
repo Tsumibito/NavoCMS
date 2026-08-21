@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v0alpha1/site-profile.schema.json",
+  "title": "NavoCMS Site Profile v0alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "navocms.io/v0alpha1" },
+    "kind": { "const": "SiteProfile" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "displayName"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "version": { "$ref": "#/$defs/semver" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment", "locales", "anchors", "plugins", "bindings", "urlPolicy"],
+      "properties": {
+        "environment": { "enum": ["development", "preview", "production"] },
+        "locales": { "$ref": "#/$defs/locales" },
+        "anchors": { "$ref": "#/$defs/anchors" },
+        "plugins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/plugin" },
+          "uniqueItems": true
+        },
+        "bindings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/binding" },
+          "uniqueItems": true
+        },
+        "urlPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["canonicalHost", "immutablePublicUrls"],
+          "properties": {
+            "canonicalHost": { "type": "string", "format": "hostname" },
+            "immutablePublicUrls": { "const": true }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "version", "digest"],
+      "properties": {
+        "ref": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/semver" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "anchors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content", "design", "delivery", "governance"],
+      "properties": {
+        "content": { "$ref": "#/$defs/anchor" },
+        "design": { "$ref": "#/$defs/anchor" },
+        "delivery": { "$ref": "#/$defs/anchor" },
+        "governance": { "$ref": "#/$defs/anchor" }
+      }
+    },
+    "locales": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default", "supported"],
+      "properties": {
+        "default": { "type": "string", "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$" },
+        "supported": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "pluginId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$" },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "enabled"],
+      "properties": {
+        "id": { "$ref": "#/$defs/pluginId" },
+        "version": { "$ref": "#/$defs/semver" },
+        "enabled": { "type": "boolean" },
+        "configRef": { "type": "string", "minLength": 1 }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "version", "provider"],
+      "properties": {
+        "capability": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9]*)+$" },
+        "version": { "type": "integer", "minimum": 1 },
+        "provider": { "$ref": "#/$defs/pluginId" }
+      }
+    }
+  }
+}

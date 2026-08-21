@@ -1,0 +1,40 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "PluginManifest",
+  "metadata": {
+    "id": "navocms.media.imgproxy",
+    "version": "0.1.0",
+    "displayName": "imgproxy media provider",
+    "description": "Transforms immutable image originals into signed responsive variants."
+  },
+  "spec": {
+    "runtime": "service",
+    "provides": [
+      { "name": "image.transform", "version": 1 },
+      { "name": "image.variant", "version": 1 }
+    ],
+    "requires": [
+      { "name": "blob.storage", "version": 1 },
+      { "name": "events.publish", "version": 1 }
+    ],
+    "subscribes": ["io.navocms.asset.ingested.v1"],
+    "permissions": {
+      "data": {
+        "read": ["assets"],
+        "write": ["asset_variants"]
+      },
+      "network": ["media.internal"],
+      "scopes": ["assets:read", "assets:transform"]
+    },
+    "effects": [
+      {
+        "name": "transform",
+        "consequence": "G1",
+        "idempotent": true,
+        "compensation": "Remove the derived variant reference; preserve the immutable original."
+      }
+    ],
+    "configSchema": "./media-imgproxy.config.schema.json",
+    "healthcheck": "/health"
+  }
+}
