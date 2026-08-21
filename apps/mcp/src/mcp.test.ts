@@ -42,7 +42,7 @@ describe("MCP editing service", () => {
     }) as DraftResult;
     expect(retried.draft.revisionId).toBe(first.draft.revisionId);
 
-    const content = service.getContent(context, first.draft.revisionId) as ContentResult;
+    const content = await service.getContent(context, first.draft.revisionId) as ContentResult;
     const paragraphText = content.astNodes.find((node) => node.type === "text" && node.text.includes("Original"));
     expect(paragraphText).toBeDefined();
     const patched = await service.patchRevision(context, {
@@ -53,7 +53,7 @@ describe("MCP editing service", () => {
     }) as PatchResult;
     expect(patched.draft.revisionNumber).toBe(2);
     expect(patched.diff.lines.some((line) => line.kind === "add" && line.line.includes("Reviewed"))).toBe(true);
-    expect(service.preparePreview(context, patched.draft.revisionId)).toMatchObject({
+    await expect(service.preparePreview(context, patched.draft.revisionId)).resolves.toMatchObject({
       status: "ready-for-workflow",
       sourceHash: patched.draft.sourceHash,
       previewUrl: null,
@@ -90,8 +90,8 @@ describe("MCP editing service", () => {
       markdown: "# Forbidden\n",
       idempotencyKey: "viewer-draft-0001"
     })).rejects.toBeInstanceOf(SecurityError);
-    expect(() => service.getContent(requestContext("editor", secondSite.siteId), created.draft.revisionId))
-      .toThrow(/does not exist|not found|another tenant or site/i);
+    await expect(service.getContent(requestContext("editor", secondSite.siteId), created.draft.revisionId))
+      .rejects.toThrow(/does not exist|not found|another tenant or site/i);
   });
 
   it("bounds search and Markdown projections and rejects idempotency-key drift", async () => {
@@ -107,10 +107,10 @@ describe("MCP editing service", () => {
       slug: "bounded-content",
       idempotencyKey: "bounded-draft-0001"
     }) as DraftResult;
-    const content = service.getContent(context, created.draft.revisionId) as ContentResult;
+    const content = await service.getContent(context, created.draft.revisionId) as ContentResult;
     expect(content.markdown).toHaveLength(20_000);
     expect(content.truncated).toBe(true);
-    expect((service.search(context, "", 999) as { limit: number }).limit).toBe(20);
+    expect((await service.search(context, "", 999) as { limit: number }).limit).toBe(20);
     await expect(service.createDraft(context, {
       ...base,
       slug: "different-input",

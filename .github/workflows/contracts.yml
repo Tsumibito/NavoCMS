@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17-alpine
@@ -62,3 +62,10 @@ jobs:
             -f packages/persistence-postgres/migrations/0002_content_engine.sql
           psql -h 127.0.0.1 -U postgres -d navocms_test \
             -f packages/persistence-postgres/tests/content-isolation.sql
+          psql -h 127.0.0.1 -U postgres -d navocms_test \
+            -f packages/persistence-postgres/migrations/0003_runtime_foundation.sql
+          psql -h 127.0.0.1 -U postgres -d navocms_test \
+            -f packages/persistence-postgres/tests/runtime-isolation.sql
+
+      - name: Build production container
+        run: docker build --tag navocms:${{ github.sha }} .

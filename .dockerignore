@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.env.keys*
+node_modules
+dist
+coverage
+playwright-report
+test-results
+tmp
+*.log
+.DS_Store

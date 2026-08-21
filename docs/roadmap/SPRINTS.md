@@ -105,12 +105,16 @@ Gate: P3.
 
 Gate: P4.
 
-## Sprint 6 — Media and asset pipeline
+## Sprint 6 — Production runtime and deployment foundation
 
-- immutable originals, provenance, safe upload/remote ingest, isolated decode, object storage,
-  AVIF/WebP/JPEG presets, crops, focal points, responsive variants, and asset review UI.
+**Status:** In progress.
 
-Gate: P5 with Sprint 4.
+- Neon production/staging topology with scale-to-zero, direct migration and pooled runtime
+  identities, durable MCP persistence, event ledger and idempotency, Docker image, health/readiness,
+  and matching applications on an operator-managed Coolify Docker host.
+
+Operational gate: staging proves migrations, forced RLS, restart persistence, and the same container
+artifact that production will run.
 
 ## Sprint 7 — Durable workflow, preview, release, and rollback
 
@@ -119,48 +123,56 @@ Gate: P5 with Sprint 4.
 
 Gate: P6.
 
-## Sprint 8 — Astro/Cloudflare provider and first-site shadow migration
+## Sprint 8 — Media pipeline and first Astro publication vertical
 
-- Astro renderer, Cloudflare preview/deploy/cache providers, legacy import, route and content parity,
-  shadow builds, delta reconciliation, and verified fallback.
+- immutable originals, provenance, safe upload/remote ingest, isolated decode, object storage,
+  AVIF/WebP/JPEG presets, crops, focal points, responsive variants, asset review UI, Astro renderer,
+  and Cloudflare preview/deploy/cache providers.
 
-## Sprint 9 — SEO, structured data, and localization
+Gate: P5 with Sprint 4.
+
+## Sprint 9 — Webstudio importer and first-site shadow migration
+
+- Webstudio extraction/conversion, legacy import, route and content parity, shadow builds, delta
+  reconciliation, domain inventory, and verified fallback.
+
+## Sprint 10 — SEO, structured data, and localization
 
 - semantic entity graph and JSON-LD, metadata/canonical/sitemap/hreflang, translation state, SEO
   service plugins, intent, links, freshness, duplication, evidence, and indexability gates.
 
-## Sprint 10 — Forms, leads, consent, CRM, email, and analytics
+## Sprint 11 — Forms, leads, consent, CRM, email, and analytics
 
 - declarative responsive forms, typed triggers, consent receipts, anti-abuse, PII-isolated leads,
   provider-neutral analytics, email and CRM capabilities, scoped MCP tables, and delivery events.
 
-## Sprint 11 — Quality, observability, backup, and operations
+## Sprint 12 — Quality, observability, backup, and operations
 
 - performance/RUM, accessibility, visual/route/security gates, synthetics, SLOs, alerts, backup,
   clean restore, retention/deletion, cost attribution, and security review.
 
-## Sprint 12 — First-site cutover
+## Sprint 13 — First-site cutover
 
 - parity lock, incremental import, new content authority, old CMS read-only/retirement, full release
   gates, rollback rehearsal, runbooks, and observation window.
 
 Gate: P7.
 
-## Sprint 13 — Three-site pilot and SDK hardening
+## Sprint 14 — Three-site pilot and SDK hardening
 
 - two more sites, distinct memberships and profiles, meaningful provider swap, SDK/templates,
   contract tests, Python example plugin, onboarding, cloning, export/import, staged upgrades.
 
 Gate: P8.
 
-## Sprint 14 — Open-source v0.1
+## Sprint 15 — Open-source v0.1
 
 - bootstrap CLI, install/deploy guides, examples, API/MCP docs, plugin author kit, SBOM, signed
   release artifacts, upgrade and restore tests, and explicit hosted/core separation.
 
 Gate: P9.
 
-## Sprint 15 — Limited hosted beta
+## Sprint 16 — Limited hosted beta
 
 - onboarding, invitations, account recovery, billing, quotas, platform models and BYOK, abuse/spend
   controls, support audit, offboarding, deletion, incident/backup/key runbooks, and bounded beta
@@ -177,14 +189,15 @@ Gate: P10.
 | Agent-readable content engine | 3 |
 | Usable ChatGPT/Claude draft and diff flow | 5 |
 | Exact-hash publish and rollback | 7 |
-| First real site without its old CMS | 12 |
-| Three-site reusable pilot | 13 |
-| Open-source v0.1 | 14 |
-| Limited hosted beta | 15 |
+| Production control plane on Neon and Coolify | 6 |
+| First real site without its old CMS | 13 |
+| Three-site reusable pilot | 14 |
+| Open-source v0.1 | 15 |
+| Limited hosted beta | 16 |
 
 ## Scope control
 
-The following do not enter Sprints 0–13 unless required by a pilot site:
+The following do not enter Sprints 0–14 unless required by a pilot site:
 
 - payments, gated areas, courses, comments, booking, or marketplace;
 - full visual page builder or arbitrary agent-authored CSS/JavaScript;

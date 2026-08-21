@@ -18,6 +18,19 @@ interface VariantIndex {
   readonly slug: string;
 }
 
+export interface RepositoryScope {
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly principalId: string;
+}
+
+export interface RepositoryContext {
+  readonly site: SiteDescriptor;
+  readonly principalId: string;
+}
+
+type Awaitable<T> = T | Promise<T>;
+
 export interface CreateDraftInput {
   readonly site: SiteDescriptor;
   readonly typeName: string;
@@ -38,15 +51,15 @@ export interface PatchDraftInput {
 }
 
 export interface EditingRepository {
-  getSite(tenantId: string, siteId: string): SiteDescriptor | undefined;
-  search(site: SiteDescriptor, query: string, limit: number): readonly ContentHit[];
-  findDocument(site: SiteDescriptor, documentId: string): ContentHit | undefined;
-  getRevision(site: SiteDescriptor, revisionId: string): ContentRevision;
-  createDraft(input: CreateDraftInput): DraftSummary;
-  patchDraft(input: PatchDraftInput): { readonly draft: DraftSummary; readonly diff: RevisionDiff };
-  compare(site: SiteDescriptor, fromRevisionId: string, toRevisionId: string): RevisionDiff;
-  listDrafts(site: SiteDescriptor, limit: number): readonly DraftSummary[];
-  workflowFor(site: SiteDescriptor, revisionId: string): string;
+  getSite(scope: RepositoryScope): Awaitable<SiteDescriptor | undefined>;
+  search(context: RepositoryContext, query: string, limit: number): Awaitable<readonly ContentHit[]>;
+  findDocument(context: RepositoryContext, documentId: string): Awaitable<ContentHit | undefined>;
+  getRevision(context: RepositoryContext, revisionId: string): Awaitable<ContentRevision>;
+  createDraft(input: CreateDraftInput): Awaitable<DraftSummary>;
+  patchDraft(input: PatchDraftInput): Awaitable<{ readonly draft: DraftSummary; readonly diff: RevisionDiff }>;
+  compare(context: RepositoryContext, fromRevisionId: string, toRevisionId: string): Awaitable<RevisionDiff>;
+  listDrafts(context: RepositoryContext, limit: number): Awaitable<readonly DraftSummary[]>;
+  workflowFor(context: RepositoryContext, revisionId: string): Awaitable<string>;
 }
 
 export class InMemoryEditingRepository implements EditingRepository {
@@ -66,11 +79,11 @@ export class InMemoryEditingRepository implements EditingRepository {
     for (const pack of foundationPacks) this.#engine.registerPack(site, pack);
   }
 
-  public getSite(tenantId: string, siteId: string): SiteDescriptor | undefined {
-    return this.#sites.get(scopeKey(tenantId, siteId));
+  public getSite(scope: RepositoryScope): SiteDescriptor | undefined {
+    return this.#sites.get(scopeKey(scope.tenantId, scope.siteId));
   }
 
-  public search(site: SiteDescriptor, query: string, limit: number): readonly ContentHit[] {
+  public search({ site }: RepositoryContext, query: string, limit: number): readonly ContentHit[] {
     const needle = query.trim().toLocaleLowerCase();
     const hits = this.#engine.listDocuments(site).flatMap((document) => {
       const indexed = [...this.#variants.entries()]
@@ -93,7 +106,7 @@ export class InMemoryEditingRepository implements EditingRepository {
     );
   }
 
-  public findDocument(site: SiteDescriptor, documentId: string): ContentHit | undefined {
+  public findDocument({ site }: RepositoryContext, documentId: string): ContentHit | undefined {
     const document = this.#engine.listDocuments(site).find((candidate) => candidate.id === documentId);
     if (!document) return undefined;
     const indexed = [...this.#variants.entries()]
@@ -105,7 +118,7 @@ export class InMemoryEditingRepository implements EditingRepository {
     return revision ? toHit(indexed, revision) : undefined;
   }
 
-  public getRevision(site: SiteDescriptor, revisionId: string): ContentRevision {
+  public getRevision({ site }: RepositoryContext, revisionId: string): ContentRevision {
     return this.#engine.getRevision(site, revisionId);
   }
 
@@ -146,11 +159,11 @@ export class InMemoryEditingRepository implements EditingRepository {
     return Object.freeze({ draft: toDraft(indexed, changed.revision), diff: changed.diff });
   }
 
-  public compare(site: SiteDescriptor, fromRevisionId: string, toRevisionId: string): RevisionDiff {
+  public compare({ site }: RepositoryContext, fromRevisionId: string, toRevisionId: string): RevisionDiff {
     return this.#engine.compare(site, fromRevisionId, toRevisionId);
   }
 
-  public listDrafts(site: SiteDescriptor, limit: number): readonly DraftSummary[] {
+  public listDrafts({ site }: RepositoryContext, limit: number): readonly DraftSummary[] {
     return Object.freeze(
       [...this.#drafts.entries()]
         .filter(([key]) => key.startsWith(`${scopeKey(site.tenantId, site.siteId)}:`))
@@ -165,7 +178,7 @@ export class InMemoryEditingRepository implements EditingRepository {
     );
   }
 
-  public workflowFor(site: SiteDescriptor, revisionId: string): string {
+  public workflowFor({ site }: RepositoryContext, revisionId: string): string {
     const revision = this.#engine.getRevision(site, revisionId);
     const indexed = this.#variants.get(variantKey(site, revision.variantId));
     if (!indexed) throw new Error("Revision does not belong to an indexed content variant");

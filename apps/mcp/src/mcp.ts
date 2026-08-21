@@ -37,7 +37,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     description: "List only the site visible to the current OAuth token. Use before content work when site context is unclear.",
     inputSchema: {},
     annotations: readOnlyAnnotations()
-  }, safeTool(async () => result("Authorized site", { sites: service.listSites(context) })));
+  }, safeTool(async () => result("Authorized site", { sites: await service.listSites(context) })));
 
   server.registerTool("content_search", {
     title: "Search site content",
@@ -47,21 +47,21 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
       limit: z.number().int().min(1).max(20).optional()
     },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ query, limit }) => result("Content search completed", service.search(context, query, limit))));
+  }, safeTool(async ({ query, limit }) => result("Content search completed", await service.search(context, query, limit))));
 
   server.registerTool("content_get", {
     title: "Read a content revision",
     description: "Read portable Markdown, safe metadata, stable AST node IDs, and the source hash for one authorized revision. Use before proposing a patch.",
     inputSchema: { revisionId: z.string().min(1) },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ revisionId }) => result("Content revision loaded", service.getContent(context, revisionId))));
+  }, safeTool(async ({ revisionId }) => result("Content revision loaded", await service.getContent(context, revisionId))));
 
   server.registerTool("drafts_list", {
     title: "List drafts",
     description: "List the newest bounded draft queue for the authorized site.",
     inputSchema: { limit: z.number().int().min(1).max(20).optional() },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ limit }) => result("Draft queue loaded", service.listDrafts(context, limit))));
+  }, safeTool(async ({ limit }) => result("Draft queue loaded", await service.listDrafts(context, limit))));
 
   server.registerTool("draft_create", {
     title: "Create a Markdown draft",
@@ -107,7 +107,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ fromRevisionId, toRevisionId }) => result(
     "Revision comparison completed",
-    service.compare(context, fromRevisionId, toRevisionId)
+    await service.compare(context, fromRevisionId, toRevisionId)
   )));
 
   server.registerTool("preview_prepare", {
@@ -115,7 +115,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     description: "Validate and bind the exact immutable revision and workflow for a future protected preview. Sprint 5 deliberately returns no URL and performs no deployment.",
     inputSchema: { revisionId: z.string().min(1) },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ revisionId }) => result("Revision is ready for the protected preview workflow", service.preparePreview(context, revisionId))));
+  }, safeTool(async ({ revisionId }) => result("Revision is ready for the protected preview workflow", await service.preparePreview(context, revisionId))));
 
   registerStandardTools(server, service, context);
   registerReviewTools(server, service, context);
@@ -125,7 +125,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     description: "Safe agent-readable identity and locale profile for the OAuth-scoped site.",
     mimeType: "application/json"
   }, async (uri) => ({
-    contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ sites: service.listSites(context) }) }]
+    contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ sites: await service.listSites(context) }) }]
   }));
 
   registerAppResource(server, "NavoCMS editorial review", WIDGET_URI, {
@@ -150,7 +150,7 @@ function registerStandardTools(server: McpServer, service: McpEditingService, co
     inputSchema: { query: z.string().max(500) },
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ query }) => jsonOnly({
-    results: extractResults(service.search(context, query))
+    results: extractResults(await service.search(context, query))
       .map((item) => ({ id: `document:${String(item.id)}`, title: item.title, url: `navocms://document/${String(item.id)}` }))
   })));
 
@@ -159,7 +159,7 @@ function registerStandardTools(server: McpServer, service: McpEditingService, co
     description: "Standard connector fetch for an ID returned by search. Returns one JSON text block with Markdown and safe metadata.",
     inputSchema: { id: z.string().min(1) },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ id }) => jsonOnly(service.fetch(context, id))));
+  }, safeTool(async ({ id }) => jsonOnly(await service.fetch(context, id))));
 }
 
 function registerReviewTools(server: McpServer, service: McpEditingService, context: McpRequestContext): void {
@@ -171,7 +171,7 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     annotations: readOnlyAnnotations(),
     _meta: appMeta
   }, safeTool(async ({ revisionId }) => {
-    const content = service.getContent(context, revisionId) as Record<string, unknown>;
+    const content = await service.getContent(context, revisionId) as Record<string, unknown>;
     const metadata = content.metadata as Record<string, unknown>;
     return result("Markdown review opened", {
       view: "markdown",
@@ -190,7 +190,7 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     annotations: readOnlyAnnotations(),
     _meta: appMeta
   }, safeTool(async ({ fromRevisionId, toRevisionId }) => {
-    const compared = service.compare(context, fromRevisionId, toRevisionId) as { diff: Record<string, unknown> };
+    const compared = await service.compare(context, fromRevisionId, toRevisionId) as { diff: Record<string, unknown> };
     return result("Revision diff opened", { view: "diff", ...compared.diff });
   }));
 
@@ -201,7 +201,7 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     annotations: readOnlyAnnotations(),
     _meta: appMeta
   }, safeTool(async ({ limit }) => {
-    const queue = service.listDrafts(context, limit) as Record<string, unknown>;
+    const queue = await service.listDrafts(context, limit) as Record<string, unknown>;
     return result("Draft queue opened", { view: "drafts", ...queue });
   }));
 
@@ -213,7 +213,7 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     _meta: appMeta
   }, safeTool(async ({ revisionId }) => result("Preview handoff opened", {
     view: "workflow",
-    ...service.preparePreview(context, revisionId)
+    ...await service.preparePreview(context, revisionId)
   })));
 }
 

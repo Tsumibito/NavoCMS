@@ -9,7 +9,8 @@
     { "path": "../../packages/contracts" },
     { "path": "../../packages/security" },
     { "path": "../../packages/content" },
-    { "path": "../../packages/kernel" }
+    { "path": "../../packages/kernel" },
+    { "path": "../../packages/persistence-postgres" }
   ],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "src/widget.ts"]

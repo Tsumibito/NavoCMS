@@ -6,25 +6,71 @@ import { assertSafeProjection, requirePermission } from "@navocms/security";
 
 import { McpEditingError } from "./errors.js";
 import { MCP_LIMITS, type McpRequestContext, type PreviewPreparation } from "./model.js";
-import { inputFingerprint, type EditingRepository } from "./repository.js";
+import { inputFingerprint, type EditingRepository, type RepositoryContext } from "./repository.js";
 
 interface IdempotentRecord<T> {
   readonly fingerprint: string;
+  readonly status: "pending" | "completed" | "failed";
+  readonly errorCode?: string;
   readonly value: T;
+}
+
+interface IdempotencyReservation<T> {
+  readonly status: "reserved" | "completed" | "pending" | "failed";
+  readonly value?: T;
+  readonly errorCode?: string;
+}
+
+export interface IdempotencyStore {
+  reserve<T>(scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string }, operation: string, key: string, fingerprint: string): Promise<IdempotencyReservation<T>>;
+  complete(scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string }, operation: string, key: string, fingerprint: string, value: unknown): Promise<void>;
+  fail(scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string }, operation: string, key: string, fingerprint: string, errorCode: string): Promise<void>;
+}
+
+export class InMemoryIdempotencyStore implements IdempotencyStore {
+  readonly #records = new Map<string, IdempotentRecord<unknown>>();
+
+  public async reserve<T>(scope: { readonly tenantId: string; readonly siteId: string }, operation: string, key: string, fingerprint: string): Promise<IdempotencyReservation<T>> {
+    const identity = `${scope.tenantId}:${scope.siteId}:${operation}:${key}`;
+    const existing = this.#records.get(identity);
+    if (!existing) {
+      this.#records.set(identity, { fingerprint, status: "pending", value: undefined });
+      return { status: "reserved" };
+    }
+    if (existing.fingerprint !== fingerprint) throw new Error("IDEMPOTENCY_KEY_REUSED");
+    return {
+      status: existing.status,
+      ...(existing.status === "completed" ? { value: existing.value as T } : {}),
+      ...(existing.errorCode ? { errorCode: existing.errorCode } : {})
+    };
+  }
+
+  public async complete(scope: { readonly tenantId: string; readonly siteId: string }, operation: string, key: string, fingerprint: string, value: unknown): Promise<void> {
+    this.#records.set(`${scope.tenantId}:${scope.siteId}:${operation}:${key}`, { fingerprint, status: "completed", value });
+  }
+
+  public async fail(scope: { readonly tenantId: string; readonly siteId: string }, operation: string, key: string, fingerprint: string, errorCode: string): Promise<void> {
+    this.#records.set(`${scope.tenantId}:${scope.siteId}:${operation}:${key}`, { fingerprint, status: "failed", errorCode, value: undefined });
+  }
 }
 
 export class McpEditingService {
   readonly #repository: EditingRepository;
   readonly #events: EventStore;
-  readonly #idempotency = new Map<string, IdempotentRecord<unknown>>();
+  readonly #idempotency: IdempotencyStore;
 
-  public constructor(repository: EditingRepository, events: EventStore = new InMemoryEventStore()) {
+  public constructor(
+    repository: EditingRepository,
+    events: EventStore = new InMemoryEventStore(),
+    idempotency: IdempotencyStore = new InMemoryIdempotencyStore()
+  ) {
     this.#repository = repository;
     this.#events = events;
+    this.#idempotency = idempotency;
   }
 
-  public listSites(context: McpRequestContext): readonly object[] {
-    const site = this.requireSite(context, "content:read");
+  public async listSites(context: McpRequestContext): Promise<readonly object[]> {
+    const { site } = await this.requireSite(context, "content:read");
     return Object.freeze([safe({
       siteId: site.siteId,
       name: site.name,
@@ -33,19 +79,19 @@ export class McpEditingService {
     })]);
   }
 
-  public search(context: McpRequestContext, query: string, requestedLimit?: number): object {
-    const site = this.requireSite(context, "content:read");
+  public async search(context: McpRequestContext, query: string, requestedLimit?: number): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
     const limit = boundedLimit(requestedLimit);
-    const results = this.#repository.search(site, query, limit);
+    const results = await this.#repository.search(repositoryContext, query, limit);
     return safe({ query, results, count: results.length, limit });
   }
 
-  public fetch(context: McpRequestContext, id: string): object {
-    const site = this.requireSite(context, "content:read");
+  public async fetch(context: McpRequestContext, id: string): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
     const documentId = id.replace(/^document:/, "");
-    const hit = this.#repository.findDocument(site, documentId);
+    const hit = await this.#repository.findDocument(repositoryContext, documentId);
     if (!hit) throw new McpEditingError("CONTENT_NOT_FOUND", "Content item was not found in the authorized site");
-    const content = this.getContent(context, hit.revisionId) as Record<string, unknown>;
+    const content = await this.getContent(context, hit.revisionId) as Record<string, unknown>;
     return safe({
       id: `document:${hit.id}`,
       title: hit.title,
@@ -64,9 +110,9 @@ export class McpEditingService {
     });
   }
 
-  public getContent(context: McpRequestContext, revisionId: string): object {
-    const site = this.requireSite(context, "content:read");
-    const revision = this.#repository.getRevision(site, revisionId);
+  public async getContent(context: McpRequestContext, revisionId: string): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    const revision = await this.#repository.getRevision(repositoryContext, revisionId);
     const truncated = revision.source.length > MCP_LIMITS.maxMarkdownCharacters;
     return safe({
       revisionId: revision.id,
@@ -87,10 +133,10 @@ export class McpEditingService {
     });
   }
 
-  public listDrafts(context: McpRequestContext, requestedLimit?: number): object {
-    const site = this.requireSite(context, "content:read");
+  public async listDrafts(context: McpRequestContext, requestedLimit?: number): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
     const limit = boundedLimit(requestedLimit);
-    const drafts = this.#repository.listDrafts(site, limit);
+    const drafts = await this.#repository.listDrafts(repositoryContext, limit);
     return safe({ drafts, count: drafts.length, limit });
   }
 
@@ -103,9 +149,9 @@ export class McpEditingService {
     readonly metadata?: Readonly<Record<string, unknown>> | undefined;
     readonly idempotencyKey: string;
   }): Promise<object> {
-    const site = this.requireSite(context, "content:draft");
-    return this.idempotent(`${site.tenantId}:${site.siteId}`, "draft_create", input.idempotencyKey, input, async () => {
-      const draft = this.#repository.createDraft({
+    const { site } = await this.requireSite(context, "content:draft");
+    return this.idempotent({ tenantId: site.tenantId, siteId: site.siteId, principalId: context.authorization.principal.id }, "draft_create", input.idempotencyKey, input, async () => {
+      const draft = await this.#repository.createDraft({
         site,
         typeName: input.typeName,
         slug: input.slug,
@@ -131,9 +177,9 @@ export class McpEditingService {
     readonly operations: readonly StructuralPatchOperation[];
     readonly idempotencyKey: string;
   }): Promise<object> {
-    const site = this.requireSite(context, "content:draft");
-    return this.idempotent(`${site.tenantId}:${site.siteId}`, "revision_patch", input.idempotencyKey, input, async () => {
-      const result = this.#repository.patchDraft({
+    const { site } = await this.requireSite(context, "content:draft");
+    return this.idempotent({ tenantId: site.tenantId, siteId: site.siteId, principalId: context.authorization.principal.id }, "revision_patch", input.idempotencyKey, input, async () => {
+      const result = await this.#repository.patchDraft({
         site,
         revisionId: input.revisionId,
         baseSourceHash: input.baseSourceHash,
@@ -151,54 +197,75 @@ export class McpEditingService {
     });
   }
 
-  public compare(context: McpRequestContext, fromRevisionId: string, toRevisionId: string): object {
-    const site = this.requireSite(context, "content:read");
-    return safe({ fromRevisionId, toRevisionId, diff: boundDiff(this.#repository.compare(site, fromRevisionId, toRevisionId)) });
+  public async compare(context: McpRequestContext, fromRevisionId: string, toRevisionId: string): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    return safe({ fromRevisionId, toRevisionId, diff: boundDiff(await this.#repository.compare(repositoryContext, fromRevisionId, toRevisionId)) });
   }
 
-  public preparePreview(context: McpRequestContext, revisionId: string): PreviewPreparation {
-    const site = this.requireSite(context, "content:read");
-    const revision = this.#repository.getRevision(site, revisionId);
+  public async preparePreview(context: McpRequestContext, revisionId: string): Promise<PreviewPreparation> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    const revision = await this.#repository.getRevision(repositoryContext, revisionId);
     return safe({
       status: "ready-for-workflow",
       revisionId: revision.id,
       sourceHash: revision.sourceHash,
-      workflow: this.#repository.workflowFor(site, revision.id),
+      workflow: await this.#repository.workflowFor(repositoryContext, revision.id),
       previewUrl: null,
       nextStep: "enqueue-protected-preview",
       note: "Sprint 5 only binds the immutable revision. Protected preview execution and URLs arrive in Sprint 7."
     });
   }
 
-  private requireSite(context: McpRequestContext, permission: "content:read" | "content:draft") {
+  private async requireSite(context: McpRequestContext, permission: "content:read" | "content:draft"): Promise<RepositoryContext> {
     requirePermission(context.authorization, permission, {
       tenantId: context.authorization.tenantId,
       siteId: context.authorization.siteId
     });
-    const site = this.#repository.getSite(context.authorization.tenantId, context.authorization.siteId);
+    const site = await this.#repository.getSite({
+      tenantId: context.authorization.tenantId,
+      siteId: context.authorization.siteId,
+      principalId: context.authorization.principal.id
+    });
     if (!site) throw new McpEditingError("SITE_NOT_REGISTERED", "Authorized site is not registered");
-    return site;
+    return Object.freeze({ site, principalId: context.authorization.principal.id });
   }
 
   private async idempotent<T>(
-    scope: string,
+    scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string },
     operation: string,
     key: string,
     input: unknown,
     create: () => Promise<T>
   ): Promise<T> {
-    const identity = `${scope}:${operation}:${key}`;
     const fingerprint = inputFingerprint(input);
-    const existing = this.#idempotency.get(identity);
-    if (existing) {
-      if (existing.fingerprint !== fingerprint) {
+    let reservation: IdempotencyReservation<T>;
+    try {
+      reservation = await this.#idempotency.reserve<T>(scope, operation, key, fingerprint);
+    } catch (error) {
+      if (error instanceof Error && error.message === "IDEMPOTENCY_KEY_REUSED") {
         throw new McpEditingError("IDEMPOTENCY_KEY_REUSED", "Idempotency key was reused with different input");
       }
-      return existing.value as T;
+      throw error;
     }
-    const value = await create();
-    this.#idempotency.set(identity, { fingerprint, value });
-    return value;
+    if (reservation.status === "completed") return reservation.value as T;
+    if (reservation.status !== "reserved") {
+      throw new McpEditingError("IDEMPOTENCY_INCOMPLETE", "A previous attempt is pending or requires reconciliation");
+    }
+    try {
+      const value = await create();
+      await this.#idempotency.complete(scope, operation, key, fingerprint, value);
+      return value;
+    } catch (error) {
+      const errorCode = error instanceof McpEditingError || (error !== null && typeof error === "object" && "code" in error)
+        ? String((error as { code: unknown }).code)
+        : "REQUEST_FAILED";
+      try {
+        await this.#idempotency.fail(scope, operation, key, fingerprint, errorCode);
+      } catch {
+        // Preserve the original failure; an incomplete reservation fails closed on retry.
+      }
+      throw error;
+    }
   }
 
   private async appendEvent(
