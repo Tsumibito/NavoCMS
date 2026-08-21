@@ -107,7 +107,7 @@ Gate: P4.
 
 ## Sprint 6 — Production runtime and deployment foundation
 
-**Status:** In progress.
+**Status:** Completed and accepted in [PR #13](https://github.com/Tsumibito/NavoCMS/pull/13).
 
 - Neon production/staging topology with scale-to-zero, direct migration and pooled runtime
   identities, durable MCP persistence, event ledger and idempotency, Docker image, health/readiness,
