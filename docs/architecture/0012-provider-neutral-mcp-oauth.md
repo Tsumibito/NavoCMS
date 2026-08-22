@@ -16,7 +16,10 @@ their own tenant or site.
 
 Keep the NavoCMS resource server issuer-neutral. The reference deployment uses WorkOS AuthKit because
 it currently implements the MCP authorization profile, while Auth0 and compatible issuers remain
-supported adapters. OAuth proves `issuer + subject`, audience, expiry, signature, and scopes.
+supported adapters. OAuth proves `issuer + subject`, audience, expiry, signature, and scopes. The
+verifier accepts authority from the standard space-delimited `scope` claim and an optional validated
+`permissions` string array used by some OIDC issuers. Both remain untrusted inputs until intersected
+with NavoCMS's known permission vocabulary and persisted membership authority.
 
 Each deployed MCP resource is configured with exactly one tenant and site. PostgreSQL resolves the
 verified `issuer + subject` to an internal identity and site membership through a narrow
