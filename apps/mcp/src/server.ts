@@ -8,6 +8,7 @@ import {
 } from "@navocms/persistence-postgres";
 
 import { createMcpHttpServer } from "./http.js";
+import { environmentInteger } from "./config.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider, InMemoryReleaseWorkflowRepository } from "./release-repository.js";
@@ -22,7 +23,7 @@ const databaseUrl = process.env.NAVOCMS_DATABASE_URL;
 const database = databaseUrl ? new PostgresDatabase({
   connectionString: requireDatabaseUrl(databaseUrl),
   applicationName: `navocms-mcp-${process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode}`,
-  maxConnections: integer("NAVOCMS_DATABASE_POOL_MAX", 8)
+  maxConnections: environmentInteger("NAVOCMS_DATABASE_POOL_MAX", 8, 100)
 }) : undefined;
 const deploymentScope = Object.freeze({
   tenantId: database ? required("NAVOCMS_TENANT_ID") : required("NAVOCMS_DEVELOPMENT_TENANT_ID"),
@@ -41,7 +42,7 @@ if (database) {
     {
       environmentKey: process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode,
       previewBaseUrl: process.env.NAVOCMS_PREVIEW_BASE_URL ?? new URL(resource).origin,
-      previewTtlSeconds: integer("NAVOCMS_PREVIEW_TTL_SECONDS", 3600)
+      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800)
     }
   );
 } else {
@@ -63,7 +64,7 @@ if (database) {
     {
       environmentKey: process.env.NAVOCMS_ENVIRONMENT ?? "development",
       previewBaseUrl: process.env.NAVOCMS_PREVIEW_BASE_URL ?? new URL(resource).origin,
-      previewTtlSeconds: integer("NAVOCMS_PREVIEW_TTL_SECONDS", 3600)
+      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800)
     }
   );
 }
@@ -100,12 +101,4 @@ function required(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required`);
   return value;
-}
-
-function integer(name: string, fallback: number): number {
-  const value = process.env[name];
-  if (!value) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) throw new Error(`${name} must be an integer from 1 to 100`);
-  return parsed;
 }
