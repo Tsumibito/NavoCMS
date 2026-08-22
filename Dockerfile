@@ -24,7 +24,7 @@ ENV NAVOCMS_HOST=0.0.0.0
 ENV PORT=8788
 
 RUN apt-get update && \
-  apt-get install --yes --no-install-recommends tini ca-certificates && \
+  apt-get install --yes --no-install-recommends tini ca-certificates curl && \
   rm -rf /var/lib/apt/lists/* && \
   npm install --global @dotenvx/dotenvx@2.15.1 --no-audit --no-fund && \
   npm cache clean --force && \
