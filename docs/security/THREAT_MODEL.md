@@ -55,13 +55,14 @@
 
 ## Open security work
 
-- Select identity provider and specify OAuth 2.1 resource/authorization metadata and PKCE behavior.
+- Complete WorkOS staging/production configuration and retain issuer compatibility tests described
+  in [ADR 0012](../architecture/0012-provider-neutral-mcp-oauth.md).
 - Define plugin provenance, signing, trusted publisher, and revocation policy.
 - Prototype database roles and RLS across migrations, backup, restore, and background workers.
 - Implement production secret-provider adapters, short-lived leases, rotation, and access auditing
   under the [secret management policy](SECRETS.md).
-- Maintain the no-network/no-device MCP Apps policy from Sprint 5; define the separate origin and CSP
-  policy required by protected previews before P6.
+- Maintain the no-network/no-device MCP Apps policy and the capability-preview noindex, no-store,
+  expiry, CSP, and referrer controls introduced for P6.
 - Define event integrity/checkpoint and redaction test strategy.
 - Commission an external security review before hosted external tenants.
 

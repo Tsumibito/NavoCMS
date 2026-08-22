@@ -8,8 +8,9 @@ The trusted NavoCMS microkernel currently provides:
 - reverse-order cleanup after activation failure or shutdown;
 - append-only Event Store interface and in-memory reference implementation;
 - strict trajectory projection;
-- OpenTelemetry span correlation from domain events.
+- OpenTelemetry span correlation from domain events;
+- deterministic release manifests, exact artifact hashing, legal state transitions, and a
+  provider-neutral publication/verification/rollback interface.
 
-The kernel intentionally has no HTTP framework, site-specific content semantics, concrete plugins,
-or production persistence. PostgreSQL implementations and tenant identity arrive behind these
-interfaces in later gated sprints.
+The kernel intentionally has no HTTP framework, site-specific content semantics, concrete delivery
+provider, or production persistence. PostgreSQL and transport adapters remain outside it.

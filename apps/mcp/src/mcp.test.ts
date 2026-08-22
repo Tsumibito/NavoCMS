@@ -25,7 +25,7 @@ const site = Object.freeze({
 
 describe("MCP editing service", () => {
   it("creates an idempotent draft, applies a stable patch, and binds preview to the new hash", async () => {
-    const { service, context } = fixture("editor");
+    const { service, context } = fixture("publisher");
     const input = {
       typeName: "article",
       slug: "agent-editing",
@@ -53,11 +53,30 @@ describe("MCP editing service", () => {
     }) as PatchResult;
     expect(patched.draft.revisionNumber).toBe(2);
     expect(patched.diff.lines.some((line) => line.kind === "add" && line.line.includes("Reviewed"))).toBe(true);
-    await expect(service.preparePreview(context, patched.draft.revisionId)).resolves.toMatchObject({
-      status: "ready-for-workflow",
+    const preview = await service.preparePreview(context, patched.draft.revisionId, "preview-agent-editing-001");
+    expect(preview).toMatchObject({
+      status: "previewed",
       sourceHash: patched.draft.sourceHash,
-      previewUrl: null,
-      nextStep: "enqueue-protected-preview"
+      nextStep: "approve-exact-release"
+    });
+    expect(preview.previewUrl).toMatch(/^https:\/\/preview\.example\.test\/previews\/[A-Za-z0-9_-]{43}$/);
+    await expect(service.approveRelease(context, {
+      releaseId: preview.releaseId,
+      releaseHash: "0".repeat(64),
+      idempotencyKey: "approve-stale-release-001"
+    })).rejects.toMatchObject({ code: "STALE_RELEASE_APPROVAL" });
+    await service.approveRelease(context, {
+      releaseId: preview.releaseId,
+      releaseHash: preview.releaseHash,
+      idempotencyKey: "approve-agent-editing-001"
+    });
+    await expect(service.publishRelease(context, {
+      releaseId: preview.releaseId,
+      releaseHash: preview.releaseHash,
+      idempotencyKey: "publish-agent-editing-001"
+    })).resolves.toMatchObject({
+      release: { status: "published", artifactHash: preview.artifactHash },
+      publication: { artifactHash: preview.artifactHash, status: "applied" }
     });
   });
 
@@ -140,7 +159,16 @@ describe("MCP editing service", () => {
 
 describe("MCP protocol and agent evaluations", () => {
   it("publishes OAuth resource metadata and rejects an unauthenticated MCP request", async () => {
-    const { service } = fixture("editor");
+    const { service, context } = fixture("editor");
+    const draft = await service.createDraft(context, {
+      typeName: "article",
+      slug: "protected-preview",
+      locale: "en",
+      title: "Protected preview",
+      markdown: "# Protected preview\n\nPrivate proof.\n",
+      idempotencyKey: "protected-preview-draft-001"
+    }) as DraftResult;
+    const preview = await service.preparePreview(context, draft.draft.revisionId, "protected-preview-create-001");
     const http = createMcpHttpServer({
       service,
       verifier: { verify: async () => { throw new Error("not called"); } },
@@ -160,6 +188,12 @@ describe("MCP protocol and agent evaluations", () => {
       const rejected = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: "POST", body: "{}" });
       expect(rejected.status).toBe(401);
       expect(rejected.headers.get("www-authenticate")).toContain("resource_metadata=");
+      const previewToken = preview.previewUrl.split("/").at(-1)!;
+      const rendered = await fetch(`http://127.0.0.1:${address.port}/previews/${previewToken}`);
+      expect(rendered.status).toBe(200);
+      expect(rendered.headers.get("x-robots-tag")).toContain("noindex");
+      expect(rendered.headers.get("cache-control")).toContain("no-store");
+      expect(await rendered.text()).toContain(preview.releaseHash);
     } finally {
       await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
     }
@@ -177,7 +211,8 @@ describe("MCP protocol and agent evaluations", () => {
     expect(names).toEqual(expect.arrayContaining([
       "sites_list", "content_search", "content_get", "draft_create", "revision_patch",
       "revision_compare", "preview_prepare", "search", "fetch", "review_markdown",
-      "review_diff", "review_drafts", "review_preview_handoff"
+      "review_diff", "review_drafts", "review_preview_handoff", "release_status",
+      "release_approve", "release_publish", "release_reconcile", "release_rollback"
     ]));
     expect(tools.tools.find(({ name }) => name === "draft_create")?.annotations).toMatchObject({
       readOnlyHint: false,

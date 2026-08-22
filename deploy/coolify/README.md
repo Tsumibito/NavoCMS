@@ -42,14 +42,19 @@ NAVOCMS_RUNTIME_MODE=production
 NAVOCMS_ENVIRONMENT=staging
 NAVOCMS_DATABASE_URL=<pooled runtime-role URL; prefer sslmode=verify-full>
 NAVOCMS_DATABASE_POOL_MAX=8
+NAVOCMS_TENANT_ID=<deployment-bound tenant UUID>
+NAVOCMS_SITE_ID=<deployment-bound site UUID>
 NAVOCMS_MCP_RESOURCE=https://staging-cms.navocms.com/mcp
+NAVOCMS_PREVIEW_BASE_URL=https://staging-cms.navocms.com
+NAVOCMS_PREVIEW_TTL_SECONDS=3600
 NAVOCMS_OIDC_ISSUER=<authorization server issuer>
 NAVOCMS_OIDC_JWKS_URL=<authorization server JWKS URL>
 PORT=8788
 ```
 
-Use `production` and the production resource URL in the production file. The OIDC access token must
-contain UUID `tenant_id`, `site_id`, and `principal_id` claims plus the allowed NavoCMS scopes.
+Use `production` and the production resource URL in the production file. The OIDC token must contain
+the resource audience, stable subject, and requested NavoCMS scopes. PostgreSQL maps issuer and
+subject to the internal principal and site membership; custom NavoCMS UUID claims are not required.
 
 ## Migration gate
 
