@@ -53,6 +53,7 @@ export interface JwtClaims extends Record<string, unknown> {
   readonly exp: number;
   readonly nbf?: number;
   readonly scope?: string;
+  readonly permissions?: readonly string[];
   readonly tenant_id?: string;
   readonly site_id?: string;
   readonly principal_kind?: "human" | "agent" | "service";
@@ -197,7 +198,7 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
     if (typeof rawClaims.nbf === "number" && rawClaims.nbf > this.#now() + this.#tolerance) {
       throw new SecurityError("OAUTH_TOKEN_NOT_ACTIVE", "Access token is not active yet");
     }
-    const scopes = typeof rawClaims.scope === "string" ? rawClaims.scope.split(/\s+/).filter(Boolean) : [];
+    const scopes = effectiveScopes(rawClaims);
     const missingScope = requiredScopes.find((scope) => !scopes.includes(scope));
     if (missingScope) throw new SecurityError("OAUTH_SCOPE_INSUFFICIENT", `Access token lacks scope ${missingScope}`);
     const kind = rawClaims.principal_kind;
@@ -215,6 +216,26 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
       scopes: Object.freeze(scopes)
     });
   }
+}
+
+function effectiveScopes(claims: Record<string, unknown>): readonly string[] {
+  const scopeClaim = claims.scope;
+  if (scopeClaim !== undefined && typeof scopeClaim !== "string") {
+    throw new SecurityError("OAUTH_CLAIM_INVALID", "Access token has an invalid scope");
+  }
+  const permissionsClaim = claims.permissions;
+  if (
+    permissionsClaim !== undefined &&
+    (!Array.isArray(permissionsClaim) || permissionsClaim.some((permission) => typeof permission !== "string" || permission.length === 0))
+  ) {
+    throw new SecurityError("OAUTH_CLAIM_INVALID", "Access token has invalid permissions");
+  }
+  return Object.freeze([
+    ...new Set([
+      ...(scopeClaim?.split(/\s+/).filter(Boolean) ?? []),
+      ...((permissionsClaim as string[] | undefined) ?? [])
+    ])
+  ]);
 }
 
 function optionalString(claims: Record<string, unknown>, name: string): string | undefined {

@@ -113,4 +113,49 @@ describe("MCP OAuth resource server", () => {
       principal: { id: `${issuer}|workos-user-1`, subject: "workos-user-1" }
     });
   });
+
+  it("accepts permission-array claims alongside the standard scope claim", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const publicJwk = publicKey.export({ format: "jwk" });
+    const verifier = new OidcJwtVerifier({
+      issuer,
+      audience: resource,
+      deploymentScope: { tenantId: "tenant-from-resource", siteId: "site-from-resource" },
+      jwks: async () => ({ keys: [{ ...publicJwk, kty: "RSA", kid: "test-key" }] }),
+      now: () => 100
+    });
+    const token = jwt({
+      iss: issuer,
+      sub: "provider-user-1",
+      aud: resource,
+      exp: 200,
+      scope: "openid content:read",
+      permissions: ["content:draft", "content:publish", "content:read"]
+    }, privateKey);
+
+    await expect(verifier.verify(token, ["content:read", "content:publish"])).resolves.toMatchObject({
+      scopes: ["openid", "content:read", "content:draft", "content:publish"]
+    });
+  });
+
+  it("rejects a malformed permission-array claim", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const publicJwk = publicKey.export({ format: "jwk" });
+    const verifier = new OidcJwtVerifier({
+      issuer,
+      audience: resource,
+      deploymentScope: { tenantId: "tenant-from-resource", siteId: "site-from-resource" },
+      jwks: async () => ({ keys: [{ ...publicJwk, kty: "RSA", kid: "test-key" }] }),
+      now: () => 100
+    });
+    const token = jwt({
+      iss: issuer,
+      sub: "provider-user-1",
+      aud: resource,
+      exp: 200,
+      permissions: ["content:read", 42]
+    }, privateKey);
+
+    await expect(verifier.verify(token)).rejects.toMatchObject({ code: "OAUTH_CLAIM_INVALID" });
+  });
 });
