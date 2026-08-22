@@ -118,6 +118,8 @@ artifact that production will run.
 
 ## Sprint 7 — Durable workflow, preview, release, and rollback
 
+**Status:** Completed and accepted in [PR #15](https://github.com/Tsumibito/NavoCMS/pull/15).
+
 - workflow provider abstraction, checkpointed editorial flow, protected noindex preview, exact-hash
   approval, idempotent publication, verification, reconciliation, and tested rollback.
 
