@@ -1,0 +1,133 @@
+import type {
+  ReleaseProvider,
+  ReleaseProviderPublication,
+  ReleaseProviderPublishInput
+} from "@navocms/kernel";
+import { InMemoryEventStore } from "@navocms/kernel";
+import { NAVOCMS_PERMISSIONS, siteRoleAuthority, type AuthorizationContext } from "@navocms/security";
+import { describe, expect, it } from "vitest";
+
+import { InMemoryReleaseWorkflowRepository } from "./release-repository.js";
+import { InMemoryEditingRepository } from "./repository.js";
+import { McpEditingService } from "./service.js";
+
+const site = Object.freeze({
+  tenantId: "11111111-1111-4111-8111-111111111111",
+  siteId: "22222222-2222-4222-8222-222222222222",
+  name: "Release proving site",
+  primaryLocale: "en",
+  locales: ["en"]
+});
+
+describe("durable release workflow", () => {
+  it("reconciles a partial verification without duplicate publish and rolls back", async () => {
+    const provider = new RecoverableProvider();
+    const repository = new InMemoryEditingRepository();
+    repository.registerSite(site);
+    const service = new McpEditingService(
+      repository,
+      new InMemoryEventStore(),
+      undefined,
+      new InMemoryReleaseWorkflowRepository(),
+      provider
+    );
+    const context = requestContext();
+
+    const first = await draftPreviewApprove(service, context, "first-release", "First release", "first");
+    await service.publishRelease(context, {
+      releaseId: first.releaseId,
+      releaseHash: first.releaseHash,
+      idempotencyKey: "publish-first-release-001"
+    });
+
+    const second = await draftPreviewApprove(service, context, "second-release", "Second release", "second");
+    provider.verifyLive = false;
+    await expect(service.publishRelease(context, {
+      releaseId: second.releaseId,
+      releaseHash: second.releaseHash,
+      idempotencyKey: "publish-second-release-001"
+    })).rejects.toMatchObject({ code: "LIVE_VERIFICATION_FAILED" });
+    expect(provider.publishCount).toBe(2);
+
+    provider.verifyLive = true;
+    await expect(service.reconcileRelease(context, {
+      releaseId: second.releaseId,
+      releaseHash: second.releaseHash,
+      idempotencyKey: "reconcile-second-release-001"
+    })).resolves.toMatchObject({ release: { status: "published" } });
+    expect(provider.publishCount).toBe(2);
+
+    await expect(service.rollbackRelease(context, {
+      releaseId: second.releaseId,
+      releaseHash: second.releaseHash,
+      idempotencyKey: "rollback-second-release-001"
+    })).resolves.toMatchObject({
+      release: { status: "rolled_back" },
+      restoredPublication: { releaseId: first.releaseId, artifactHash: first.artifactHash }
+    });
+    expect(provider.rollbackCount).toBe(1);
+  });
+});
+
+class RecoverableProvider implements ReleaseProvider {
+  public readonly key = "test.recoverable.v1";
+  public publishCount = 0;
+  public rollbackCount = 0;
+  public verifyLive = true;
+
+  public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
+    this.publishCount += 1;
+    return {
+      providerKey: this.key,
+      providerReference: `test:${input.releaseHash}:${input.artifact.hash}`,
+      artifactHash: input.artifact.hash
+    };
+  }
+
+  public async verify(): Promise<boolean> {
+    return this.verifyLive;
+  }
+
+  public async rollback(): Promise<void> {
+    this.rollbackCount += 1;
+  }
+}
+
+async function draftPreviewApprove(
+  service: McpEditingService,
+  context: { authorization: AuthorizationContext },
+  slug: string,
+  title: string,
+  key: string
+) {
+  const created = await service.createDraft(context, {
+    typeName: "article",
+    slug,
+    locale: "en",
+    title,
+    markdown: `# ${title}\n`,
+    idempotencyKey: `draft-${key}-release-001`
+  }) as { draft: { revisionId: string } };
+  const preview = await service.preparePreview(context, created.draft.revisionId, `preview-${key}-release-001`);
+  await service.approveRelease(context, {
+    releaseId: preview.releaseId,
+    releaseHash: preview.releaseHash,
+    idempotencyKey: `approve-${key}-release-001`
+  });
+  return preview;
+}
+
+function requestContext(): { authorization: AuthorizationContext } {
+  return {
+    authorization: {
+      tenantId: site.tenantId,
+      siteId: site.siteId,
+      principal: { id: "user-publisher", kind: "human", issuer: "https://identity.example", subject: "publisher" },
+      layers: [
+        { name: "principal", permissions: NAVOCMS_PERMISSIONS },
+        siteRoleAuthority("publisher"),
+        { name: "operation", permissions: NAVOCMS_PERMISSIONS }
+      ]
+    }
+  };
+}

@@ -53,8 +53,8 @@ export interface JwtClaims extends Record<string, unknown> {
   readonly exp: number;
   readonly nbf?: number;
   readonly scope?: string;
-  readonly tenant_id: string;
-  readonly site_id: string;
+  readonly tenant_id?: string;
+  readonly site_id?: string;
   readonly principal_kind?: "human" | "agent" | "service";
   readonly principal_id?: string;
 }
@@ -94,6 +94,7 @@ export interface OidcJwtVerifierOptions {
   readonly jwks: () => Promise<JsonWebKeySet>;
   readonly now?: () => number;
   readonly clockToleranceSeconds?: number;
+  readonly deploymentScope?: Readonly<{ readonly tenantId: string; readonly siteId: string }>;
 }
 
 interface JwtHeader {
@@ -128,6 +129,7 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
   readonly #jwks: () => Promise<JsonWebKeySet>;
   readonly #now: () => number;
   readonly #tolerance: number;
+  readonly #deploymentScope: Readonly<{ readonly tenantId: string; readonly siteId: string }> | undefined;
 
   public constructor(options: OidcJwtVerifierOptions) {
     this.#issuer = canonicalHttpsUrl(options.issuer, "issuer");
@@ -135,6 +137,7 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
     this.#jwks = options.jwks;
     this.#now = options.now ?? (() => Math.floor(Date.now() / 1000));
     this.#tolerance = options.clockToleranceSeconds ?? 30;
+    this.#deploymentScope = options.deploymentScope;
   }
 
   public async verify(token: string, requiredScopes: readonly string[] = []): Promise<VerifiedAccessToken> {
@@ -166,8 +169,19 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
 
     const issuer = requireString(rawClaims, "iss");
     const subject = requireString(rawClaims, "sub");
-    const tenantId = requireString(rawClaims, "tenant_id");
-    const siteId = requireString(rawClaims, "site_id");
+    const claimTenantId = optionalString(rawClaims, "tenant_id");
+    const claimSiteId = optionalString(rawClaims, "site_id");
+    if (claimTenantId && this.#deploymentScope && claimTenantId !== this.#deploymentScope.tenantId) {
+      throw new SecurityError("OAUTH_CLAIM_INVALID", "Access token tenant scope conflicts with this resource");
+    }
+    if (claimSiteId && this.#deploymentScope && claimSiteId !== this.#deploymentScope.siteId) {
+      throw new SecurityError("OAUTH_CLAIM_INVALID", "Access token site scope conflicts with this resource");
+    }
+    const tenantId = claimTenantId ?? this.#deploymentScope?.tenantId;
+    const siteId = claimSiteId ?? this.#deploymentScope?.siteId;
+    if (!tenantId || !siteId) {
+      throw new SecurityError("OAUTH_CLAIM_INVALID", "Access token or resource configuration must supply tenant and site scope");
+    }
     const audience = rawClaims.aud;
     const expiresAt = rawClaims.exp;
     if (issuer !== this.#issuer) throw new SecurityError("OAUTH_ISSUER_INVALID", "Access token issuer is invalid");
@@ -201,6 +215,15 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
       scopes: Object.freeze(scopes)
     });
   }
+}
+
+function optionalString(claims: Record<string, unknown>, name: string): string | undefined {
+  const value = claims[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new SecurityError("OAUTH_CLAIM_INVALID", `Access token has an invalid ${name}`);
+  }
+  return value;
 }
 
 export function createRemoteJwksProvider(jwksUrl: string, fetcher: typeof fetch = fetch): () => Promise<JsonWebKeySet> {

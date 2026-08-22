@@ -23,6 +23,7 @@ export interface McpHttpOptions {
   readonly authorizationServers: readonly string[];
   readonly documentationUrl?: string;
   readonly readiness?: () => Promise<boolean>;
+  readonly resolveAuthorization?: (token: VerifiedAccessToken) => Promise<AuthorizationContext>;
 }
 
 export function createMcpHttpServer(options: McpHttpOptions) {
@@ -51,6 +52,19 @@ export function createMcpHttpServer(options: McpHttpOptions) {
     if (request.method === "GET" && request.url === metadataPath) {
       return sendJson(response, 200, metadata);
     }
+    if (request.method === "GET" && request.url?.startsWith("/previews/")) {
+      const token = request.url.slice("/previews/".length);
+      const preview = await options.service.resolvePreview(token);
+      if (!preview) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
+      response.statusCode = 200;
+      response.setHeader("content-type", preview.mediaType);
+      response.setHeader("cache-control", "private, no-store, max-age=0");
+      response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
+      response.setHeader("referrer-policy", "no-referrer");
+      response.setHeader("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+      response.end(preview.body);
+      return;
+    }
     if (request.url !== resourceUrl.pathname) return sendJson(response, 404, { error: "NOT_FOUND" });
 
     const token = bearerToken(request.headers.authorization);
@@ -67,7 +81,14 @@ export function createMcpHttpServer(options: McpHttpOptions) {
       return sendJson(response, 401, { error: "ACCESS_TOKEN_REJECTED" });
     }
 
-    const context = authorizationContext(verified);
+    let context: AuthorizationContext;
+    try {
+      context = options.resolveAuthorization
+        ? await options.resolveAuthorization(verified)
+        : authorizationContext(verified);
+    } catch {
+      return sendJson(response, 403, { error: "SITE_MEMBERSHIP_REQUIRED" });
+    }
     const server = createMcpServer(options.service, { authorization: context });
     const transport = new StreamableHTTPServerTransport();
     response.on("close", () => {

@@ -89,4 +89,28 @@ describe("MCP OAuth resource server", () => {
     );
     await expect(verifier.verify(token)).rejects.toMatchObject({ code: "OAUTH_AUDIENCE_INVALID" });
   });
+
+  it("binds a standard OIDC token to the deployment resource scope", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const publicJwk = publicKey.export({ format: "jwk" });
+    const verifier = new OidcJwtVerifier({
+      issuer,
+      audience: resource,
+      deploymentScope: { tenantId: "tenant-from-resource", siteId: "site-from-resource" },
+      jwks: async () => ({ keys: [{ ...publicJwk, kty: "RSA", kid: "test-key" }] }),
+      now: () => 100
+    });
+    const token = jwt({
+      iss: issuer,
+      sub: "workos-user-1",
+      aud: resource,
+      exp: 200,
+      scope: "content:read"
+    }, privateKey);
+    await expect(verifier.verify(token)).resolves.toMatchObject({
+      tenantId: "tenant-from-resource",
+      siteId: "site-from-resource",
+      principal: { id: `${issuer}|workos-user-1`, subject: "workos-user-1" }
+    });
+  });
 });

@@ -1,8 +1,15 @@
-import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
+import {
+  PostgresDatabase,
+  PostgresEventStore,
+  PostgresIdentityResolver,
+  PostgresIdempotencyStore
+} from "@navocms/persistence-postgres";
 import { NAVOCMS_PERMISSIONS, type AuthorizationContext } from "@navocms/security";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { PostgresEditingRepository } from "./postgres-repository.js";
+import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
+import { EmbeddedReleaseProvider } from "./release-repository.js";
 import { McpEditingService, type IdempotencyStore } from "./service.js";
 
 const databaseUrl = process.env.NAVOCMS_INTEGRATION_DATABASE_URL;
@@ -41,13 +48,66 @@ integration("Neon production persistence", () => {
     });
     await expect(database!.ready()).resolves.toBe(true);
   });
+
+  it("persists exact release approval, publication checkpoints, and preview capability", async () => {
+    const releaseService = service();
+    const created = await releaseService.createDraft(context(), {
+      typeName: "article",
+      slug: "sprint-seven-release-check",
+      locale: "en",
+      title: "Sprint seven release check",
+      markdown: "# Sprint seven release check\n\nImmutable release proof.\n",
+      idempotencyKey: "sprint-seven-neon-draft-0001"
+    }) as { draft: { revisionId: string } };
+    const preview = await releaseService.preparePreview(context(), created.draft.revisionId, "sprint-seven-neon-preview-0001");
+    const token = preview.previewUrl.split("/").at(-1)!;
+    await expect(releaseService.resolvePreview(token)).resolves.toMatchObject({ body: expect.stringContaining(preview.releaseHash) });
+    await releaseService.approveRelease(context(), {
+      releaseId: preview.releaseId,
+      releaseHash: preview.releaseHash,
+      idempotencyKey: "sprint-seven-neon-approve-0001"
+    });
+    await expect(releaseService.publishRelease(context(), {
+      releaseId: preview.releaseId,
+      releaseHash: preview.releaseHash,
+      idempotencyKey: "sprint-seven-neon-publish-0001"
+    })).resolves.toMatchObject({ release: { status: "published", artifactHash: preview.artifactHash } });
+  });
+
+  it("maps a standard issuer subject to persisted site membership", async () => {
+    const resolver = new PostgresIdentityResolver(database!, { tenantId, siteId });
+    await expect(resolver.resolve({
+      claims: {
+        iss: "urn:navocms:integration",
+        sub: "sprint-6",
+        aud: "https://staging-cms.navocms.test/mcp",
+        exp: Math.floor(Date.now() / 1000) + 60
+      },
+      principal: {
+        id: "urn:navocms:integration|sprint-6",
+        kind: "human",
+        issuer: "urn:navocms:integration",
+        subject: "sprint-6"
+      },
+      tenantId,
+      siteId,
+      scopes: ["content:read", "content:draft", "content:publish"]
+    })).resolves.toMatchObject({
+      tenantId,
+      siteId,
+      principal: { id: principalId, subject: "sprint-6" }
+    });
+  });
 });
 
 function service(): McpEditingService {
   return new McpEditingService(
     new PostgresEditingRepository(database!),
     new PostgresEventStore(database!),
-    new PostgresIdempotencyStore(database!) as IdempotencyStore
+    new PostgresIdempotencyStore(database!) as IdempotencyStore,
+    new PostgresReleaseWorkflowRepository(database!),
+    new EmbeddedReleaseProvider(),
+    { environmentKey: "staging", previewBaseUrl: "https://staging-cms.navocms.test" }
   );
 }
 

@@ -1,11 +1,13 @@
 # NavoCMS MCP application
 
 This application is the agent-facing editorial boundary for NavoCMS. It exposes authenticated,
-site-scoped tools for discovery, Markdown drafts, stable patches, diffs, and preview preparation,
-plus an optional MCP Apps review surface.
+site-scoped tools for discovery, Markdown drafts, stable patches, diffs, protected preview, exact
+approval, publication verification, reconciliation, and rollback, plus an optional MCP Apps review
+surface.
 
-It is currently an executable Sprint 5 reference adapter backed by the in-memory content engine. It
-does not deploy a site, issue a preview URL, publish content, or provide production persistence.
+Development can use the in-memory adapters. Production uses PostgreSQL for content, event,
+idempotency, identity, workflow, preview, approval, and publication state. The embedded release
+provider proves the protocol; a public-site renderer/deployer is a Sprint 8 capability.
 
 ## Development
 
@@ -24,6 +26,7 @@ NAVOCMS_OIDC_ISSUER=https://identity.example.test \
 NAVOCMS_OIDC_JWKS_URL=https://identity.example.test/.well-known/jwks.json \
 NAVOCMS_DEVELOPMENT_TENANT_ID=11111111-1111-4111-8111-111111111111 \
 NAVOCMS_DEVELOPMENT_SITE_ID=22222222-2222-4222-8222-222222222222 \
+NAVOCMS_DEVELOPMENT_ENVIRONMENT_ID=33333333-3333-4333-8333-333333333333 \
 pnpm --filter @navocms/mcp dev
 ```
 

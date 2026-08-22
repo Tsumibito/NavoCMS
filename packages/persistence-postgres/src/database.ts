@@ -39,7 +39,9 @@ export class PostgresDatabase {
 
   public async ready(): Promise<boolean> {
     const result = await this.#pool.query<{ schema_ready: boolean }>(
-      "SELECT to_regclass('navocms.content_revisions') IS NOT NULL AS schema_ready"
+      `SELECT to_regclass('navocms.content_revisions') IS NOT NULL
+          AND to_regclass('navocms.release_candidates') IS NOT NULL
+          AND to_regclass('navocms.workflow_checkpoints') IS NOT NULL AS schema_ready`
     );
     return result.rows[0]?.schema_ready === true;
   }

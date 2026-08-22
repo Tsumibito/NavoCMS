@@ -1,11 +1,26 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import type { StructuralPatchOperation } from "@navocms/content";
-import { DomainEventFactory, InMemoryEventStore, type EventStore } from "@navocms/kernel";
+import {
+  createReleaseManifest,
+  DomainEventFactory,
+  InMemoryEventStore,
+  renderMarkdownProofArtifact,
+  sha256,
+  type EventStore,
+  type ReleaseProvider
+} from "@navocms/kernel";
 import { assertSafeProjection, requirePermission } from "@navocms/security";
 
 import { McpEditingError } from "./errors.js";
 import { MCP_LIMITS, type McpRequestContext, type PreviewPreparation } from "./model.js";
+import {
+  EmbeddedReleaseProvider,
+  InMemoryReleaseWorkflowRepository,
+  type PublicationRecord,
+  type ReleaseWorkflowRepository,
+  type StoredRelease
+} from "./release-repository.js";
 import { inputFingerprint, type EditingRepository, type RepositoryContext } from "./repository.js";
 
 interface IdempotentRecord<T> {
@@ -58,15 +73,36 @@ export class McpEditingService {
   readonly #repository: EditingRepository;
   readonly #events: EventStore;
   readonly #idempotency: IdempotencyStore;
+  readonly #releases: ReleaseWorkflowRepository;
+  readonly #releaseProvider: ReleaseProvider;
+  readonly #releaseConfig: Readonly<{
+    environmentKey: string;
+    previewBaseUrl: string;
+    previewTtlSeconds: number;
+  }>;
 
   public constructor(
     repository: EditingRepository,
     events: EventStore = new InMemoryEventStore(),
-    idempotency: IdempotencyStore = new InMemoryIdempotencyStore()
+    idempotency: IdempotencyStore = new InMemoryIdempotencyStore(),
+    releases: ReleaseWorkflowRepository = new InMemoryReleaseWorkflowRepository(),
+    releaseProvider: ReleaseProvider = new EmbeddedReleaseProvider(),
+    releaseConfig: {
+      readonly environmentKey?: string;
+      readonly previewBaseUrl?: string;
+      readonly previewTtlSeconds?: number;
+    } = {}
   ) {
     this.#repository = repository;
     this.#events = events;
     this.#idempotency = idempotency;
+    this.#releases = releases;
+    this.#releaseProvider = releaseProvider;
+    this.#releaseConfig = Object.freeze({
+      environmentKey: releaseConfig.environmentKey ?? "development",
+      previewBaseUrl: (releaseConfig.previewBaseUrl ?? "https://preview.example.test").replace(/\/$/, ""),
+      previewTtlSeconds: releaseConfig.previewTtlSeconds ?? 3600
+    });
   }
 
   public async listSites(context: McpRequestContext): Promise<readonly object[]> {
@@ -202,21 +238,168 @@ export class McpEditingService {
     return safe({ fromRevisionId, toRevisionId, diff: boundDiff(await this.#repository.compare(repositoryContext, fromRevisionId, toRevisionId)) });
   }
 
-  public async preparePreview(context: McpRequestContext, revisionId: string): Promise<PreviewPreparation> {
+  public async preparePreview(context: McpRequestContext, revisionId: string, idempotencyKey: string): Promise<PreviewPreparation> {
     const repositoryContext = await this.requireSite(context, "content:read");
-    const revision = await this.#repository.getRevision(repositoryContext, revisionId);
-    return safe({
-      status: "ready-for-workflow",
-      revisionId: revision.id,
-      sourceHash: revision.sourceHash,
-      workflow: await this.#repository.workflowFor(repositoryContext, revision.id),
-      previewUrl: null,
-      nextStep: "enqueue-protected-preview",
-      note: "Sprint 5 only binds the immutable revision. Protected preview execution and URLs arrive in Sprint 7."
+    return this.idempotent({
+      tenantId: repositoryContext.site.tenantId,
+      siteId: repositoryContext.site.siteId,
+      principalId: context.authorization.principal.id
+    }, "preview_create", idempotencyKey, { revisionId }, async () => {
+      const revision = await this.#repository.getRevision(repositoryContext, revisionId);
+      const workflow = await this.#repository.workflowFor(repositoryContext, revision.id);
+      const environmentId = await this.#releases.environmentId(repositoryContext, this.#releaseConfig.environmentKey);
+      const { manifest, releaseHash } = createReleaseManifest({
+        tenantId: repositoryContext.site.tenantId,
+        siteId: repositoryContext.site.siteId,
+        environmentId,
+        revisionId: revision.id,
+        sourceHash: revision.sourceHash,
+        workflow
+      });
+      const title = typeof revision.metadata.title === "string" ? revision.metadata.title
+        : typeof revision.metadata.name === "string" ? revision.metadata.name : "Untitled";
+      const locale = typeof revision.metadata.locale === "string" ? revision.metadata.locale : repositoryContext.site.primaryLocale;
+      const artifact = renderMarkdownProofArtifact({ releaseHash, title, locale, markdown: revision.source });
+      const token = randomBytes(32).toString("base64url");
+      const expiresAt = new Date(Date.now() + this.#releaseConfig.previewTtlSeconds * 1000).toISOString();
+      const release = await this.#releases.createPreview({
+        context: repositoryContext,
+        environmentKey: this.#releaseConfig.environmentKey,
+        revisionId: revision.id,
+        workflow,
+        manifest,
+        releaseHash,
+        artifact,
+        previewTokenHash: sha256(token),
+        previewExpiresAt: expiresAt
+      });
+      await this.appendEvent(context, "io.navocms.release.preview.created.v1", release.id, idempotencyKey, {
+        phase: "verified",
+        releaseId: release.id,
+        releaseHash,
+        artifactHash: artifact.hash,
+        revisionId: revision.id,
+        expiresAt
+      });
+      return safe({
+        status: "previewed",
+        releaseId: release.id,
+        releaseHash,
+        revisionId: revision.id,
+        sourceHash: revision.sourceHash,
+        artifactHash: artifact.hash,
+        workflow,
+        previewUrl: `${this.#releaseConfig.previewBaseUrl}/previews/${token}`,
+        expiresAt,
+        nextStep: "approve-exact-release"
+      });
     });
   }
 
-  private async requireSite(context: McpRequestContext, permission: "content:read" | "content:draft"): Promise<RepositoryContext> {
+  public async releaseStatus(context: McpRequestContext, releaseId: string): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    return safe({ release: releaseProjection(await this.#releases.getRelease(repositoryContext, releaseId)) });
+  }
+
+  public async approveRelease(context: McpRequestContext, input: {
+    readonly releaseId: string;
+    readonly releaseHash: string;
+    readonly idempotencyKey: string;
+  }): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:publish");
+    return this.idempotent({ ...scope(repositoryContext), principalId: context.authorization.principal.id }, "release_approve", input.idempotencyKey, input, async () => {
+      const release = await this.#releases.approve(repositoryContext, input.releaseId, input.releaseHash);
+      await this.appendEvent(context, "io.navocms.release.approved.v1", release.id, input.idempotencyKey, {
+        phase: "applied", releaseId: release.id, releaseHash: release.releaseHash, artifactHash: release.artifactHash
+      });
+      return safe({ release: releaseProjection(release), nextStep: "publish-exact-release" });
+    });
+  }
+
+  public async publishRelease(context: McpRequestContext, input: {
+    readonly releaseId: string;
+    readonly releaseHash: string;
+    readonly idempotencyKey: string;
+  }): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:publish");
+    return this.idempotent({ ...scope(repositoryContext), principalId: context.authorization.principal.id }, "release_publish", input.idempotencyKey, input, async () => {
+      const publication = await this.applyAndVerify(repositoryContext, input.releaseId, input.releaseHash);
+      await this.appendEvent(context, "io.navocms.release.published.v1", input.releaseId, input.idempotencyKey, {
+        phase: "verified", releaseId: input.releaseId, releaseHash: input.releaseHash,
+        artifactHash: publication.artifactHash, providerKey: publication.providerKey
+      });
+      return safe({ release: releaseProjection(await this.#releases.getRelease(repositoryContext, input.releaseId)), publication });
+    });
+  }
+
+  public async reconcileRelease(context: McpRequestContext, input: {
+    readonly releaseId: string;
+    readonly releaseHash: string;
+    readonly idempotencyKey: string;
+  }): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:publish");
+    return this.idempotent({ ...scope(repositoryContext), principalId: context.authorization.principal.id }, "release_reconcile", input.idempotencyKey, input, async () => {
+      const state = await this.#releases.reconcile(repositoryContext, input.releaseId);
+      if (state.release.releaseHash !== input.releaseHash) throw new McpEditingError("STALE_RELEASE_APPROVAL", "Release hash does not match the previewed candidate");
+      let publication = state.publication;
+      if (state.release.status === "publishing" && !publication) {
+        publication = await this.applyAndVerify(repositoryContext, input.releaseId, input.releaseHash);
+      } else if (publication && (state.release.status === "verification_failed" || publication.status === "verification_failed")) {
+        const valid = await this.#releaseProvider.verify(publication);
+        if (!valid) throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider still does not expose the previewed artifact");
+        await this.#releases.markVerified(repositoryContext, input.releaseId, publication.id);
+      }
+      const release = await this.#releases.getRelease(repositoryContext, input.releaseId);
+      await this.appendEvent(context, "io.navocms.release.reconciled.v1", release.id, input.idempotencyKey, {
+        phase: "verified", releaseId: release.id, releaseHash: release.releaseHash, status: release.status
+      });
+      return safe({ release: releaseProjection(release), ...(publication ? { publication } : {}) });
+    });
+  }
+
+  public async rollbackRelease(context: McpRequestContext, input: {
+    readonly releaseId: string;
+    readonly releaseHash: string;
+    readonly idempotencyKey: string;
+  }): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:publish");
+    return this.idempotent({ ...scope(repositoryContext), principalId: context.authorization.principal.id }, "release_rollback", input.idempotencyKey, input, async () => {
+      const prepared = await this.#releases.rollback(repositoryContext, input.releaseId, input.releaseHash);
+      await this.#releaseProvider.rollback(prepared.current, prepared.target);
+      const release = await this.#releases.completeRollback(repositoryContext, input.releaseId, prepared.current.id, prepared.target.id);
+      await this.appendEvent(context, "io.navocms.release.rolled-back.v1", release.id, input.idempotencyKey, {
+        phase: "verified", releaseId: release.id, releaseHash: release.releaseHash,
+        restoredPublicationId: prepared.target.id, restoredArtifactHash: prepared.target.artifactHash
+      });
+      return safe({ release: releaseProjection(release), restoredPublication: prepared.target });
+    });
+  }
+
+  public async resolvePreview(token: string): Promise<{ readonly mediaType: string; readonly body: string } | undefined> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+    const preview = await this.#releases.resolvePreview(sha256(token));
+    return preview ? Object.freeze({ mediaType: preview.mediaType, body: preview.body }) : undefined;
+  }
+
+  private async applyAndVerify(repositoryContext: RepositoryContext, releaseId: string, releaseHash: string): Promise<PublicationRecord> {
+    const prepared = await this.#releases.beginPublication(repositoryContext, releaseId, releaseHash);
+    const applied = await this.#releaseProvider.publish({
+      releaseId,
+      releaseHash,
+      artifact: prepared.release.artifact,
+      ...(prepared.previous ? { previousProviderReference: prepared.previous.providerReference } : {})
+    });
+    const publication = await this.#releases.completePublication(repositoryContext, releaseId, applied);
+    const valid = await this.#releaseProvider.verify(publication);
+    if (!valid) {
+      await this.#releases.markVerificationFailed(repositoryContext, releaseId, publication.id);
+      throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider did not expose the previewed artifact hash");
+    }
+    await this.#releases.markVerified(repositoryContext, releaseId, publication.id);
+    return publication;
+  }
+
+  private async requireSite(context: McpRequestContext, permission: "content:read" | "content:draft" | "content:publish"): Promise<RepositoryContext> {
     requirePermission(context.authorization, permission, {
       tenantId: context.authorization.tenantId,
       siteId: context.authorization.siteId
@@ -308,4 +491,24 @@ function boundDiff(diff: { readonly fromHash: string; readonly toHash: string; r
 function safe<T>(value: T): T {
   assertSafeProjection(value);
   return Object.freeze(value);
+}
+
+function scope(context: RepositoryContext) {
+  return { tenantId: context.site.tenantId, siteId: context.site.siteId };
+}
+
+function releaseProjection(release: StoredRelease): object {
+  return Object.freeze({
+    id: release.id,
+    environmentId: release.environmentId,
+    revisionId: release.revisionId,
+    workflow: release.workflow,
+    releaseHash: release.releaseHash,
+    artifactHash: release.artifactHash,
+    status: release.status,
+    createdAt: release.createdAt,
+    updatedAt: release.updatedAt,
+    ...(release.approvedAt ? { approvedAt: release.approvedAt } : {}),
+    ...(release.publishedAt ? { publishedAt: release.publishedAt } : {})
+  });
 }

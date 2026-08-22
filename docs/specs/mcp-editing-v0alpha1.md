@@ -7,9 +7,12 @@ database interface.
 ## Connection and authority
 
 - Remote HTTP uses Streamable HTTP at the configured resource URL.
-- Every request requires a verified OAuth access token with issuer, audience, expiry, tenant, site,
-  principal, and scopes.
-- An MCP server instance is bound to the token's single tenant/site scope. `sites_list` therefore
+- Every request requires a verified OAuth access token with issuer, audience, expiry, subject, and
+  scopes. The deployed resource supplies its immutable tenant/site binding; matching token claims are
+  accepted but never required.
+- PostgreSQL resolves `issuer + subject` to an internal identity and site membership. Token scopes,
+  persisted role, optional restrictions, and operation authority are intersected.
+- An MCP server instance is bound to one tenant/site scope. `sites_list` therefore
   returns at most that authorized site; it cannot enumerate a tenant by inference.
 - Read tools require `content:read`. Draft and patch tools require `content:draft`.
 - UI resources receive only the structured result selected for display. They receive no database,
@@ -26,7 +29,12 @@ database interface.
 | `draft_create` | Create an immutable first draft revision | `content:draft` | G1, idempotent |
 | `revision_patch` | Apply stable structural operations to an exact hash | `content:draft` | G1, idempotent |
 | `revision_compare` | Compare two revisions of one variant | `content:read` | Read only |
-| `preview_prepare` | Bind revision, hash, and workflow for future preview | `content:read` | Read only |
+| `preview_prepare` | Create an expiring exact-hash preview | `content:read` | G1, idempotent |
+| `release_status` | Inspect durable release state and hashes | `content:read` | Read only |
+| `release_approve` | Approve the exact previewed release hash | `content:publish` | G1, idempotent |
+| `release_publish` | Apply and verify the identical artifact | `content:publish` | G1, idempotent |
+| `release_reconcile` | Resume or verify an incomplete effect | `content:publish` | G1, idempotent |
+| `release_rollback` | Restore the previous verified artifact | `content:publish` | G2, idempotent |
 | `search` | Standard connector search alias | `content:read` | Read only |
 | `fetch` | Standard connector fetch alias | `content:read` | Read only |
 
@@ -54,7 +62,7 @@ calling the underlying data tool and presenting its result.
 
 ## Mutation semantics
 
-`draft_create` and `revision_patch` require an 8–128 character idempotency key. Repeating the same
+Every mutating tool requires an 8–128 character idempotency key. Repeating the same
 operation, site, key, and input returns the original result. Reusing a key with different input
 fails closed.
 
@@ -69,24 +77,29 @@ hashes, phase, and operation count only. It never records full Markdown or agent
 `revision_patch` accepts `replaceText`, `replaceNode`, `insertAfter`, and `remove`. The content engine
 rejects stale hashes, invalid targets, overlapping operations, unsafe Markdown, and invalid metadata.
 
-## Preview boundary
+## Preview and release boundary
 
-`preview_prepare` is intentionally not a preview deployment. It verifies that a revision exists in
-the authorized site and returns:
+`preview_prepare` assembles a canonical release manifest, renders one immutable proof artifact, and
+returns an expiring 256-bit capability URL. The response contains revision, source, release, and
+artifact hashes. Preview responses set `X-Robots-Tag: noindex, nofollow, noarchive`, a matching HTML
+robots directive, `Cache-Control: private, no-store`, a restrictive CSP, and no referrer policy.
 
-- exact revision ID and source hash;
-- selected workflow ID;
-- `ready-for-workflow` status;
-- `enqueue-protected-preview` as the next step;
-- `previewUrl: null`.
+Approval stores the exact release hash. Publication fails closed if the supplied hash or provider's
+artifact hash differs. Workflow runs and step outputs are checkpointed in PostgreSQL. Verification
+is distinct from provider application; an interrupted or failed verification is resumed through
+`release_reconcile` without repeating a completed effect. Rollback targets only the previous recorded
+publication and preserves both histories.
 
-Sprint 7 will add durable execution, protected noindex URLs, exact-hash approval, release creation,
-publication, verification, and rollback. An MCP client must not interpret a Sprint 5 handoff as an
-approval or publication.
+Release providers must treat the release hash as their idempotency key. If a process stops after the
+provider applies an artifact but before NavoCMS records its reference, reconciliation may repeat the
+provider call; it must return the same effect instead of creating a second publication.
+
+The embedded provider proves the release protocol but is not a public-site renderer. Astro,
+Cloudflare, and alternative delivery providers arrive behind the same interface in Sprint 8.
 
 ## Compatibility note
 
-This adds a new v0alpha1 application contract and does not change released JSON Schemas. Tool names,
-input fields, and structured result fields may evolve before v0.1; breaking changes require a new
-tool or resource version and an explicit migration note. The review URI includes `v1` so a later UI
-can coexist without changing existing tool results.
+Sprint 7 changes the v0alpha1 `preview_prepare` input by requiring `idempotencyKey` and replaces the
+Sprint 5 handoff fields with a real capability URL and release/artifact hashes. It also adds the five
+release tools above. No released JSON Schema changes. The review URI remains `v1` because the widget
+continues to consume a backwards-compatible workflow-shaped projection.

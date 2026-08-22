@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/ext-apps/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ContentError } from "@navocms/content";
+import { KernelError } from "@navocms/kernel";
 import { SecurityError } from "@navocms/security";
 import { z } from "zod";
 
@@ -111,11 +112,51 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
   )));
 
   server.registerTool("preview_prepare", {
-    title: "Prepare a protected preview handoff",
-    description: "Validate and bind the exact immutable revision and workflow for a future protected preview. Sprint 5 deliberately returns no URL and performs no deployment.",
-    inputSchema: { revisionId: z.string().min(1) },
+    title: "Create a protected immutable preview",
+    description: "Build an expiring noindex capability URL and bind it to the exact release and artifact hashes. This does not publish.",
+    inputSchema: { revisionId: z.string().min(1), idempotencyKey: z.string().min(8).max(128) },
+    annotations: writeAnnotations()
+  }, safeTool(async ({ revisionId, idempotencyKey }) => result("Protected preview created; nothing was published", await service.preparePreview(context, revisionId, idempotencyKey))));
+
+  server.registerTool("release_status", {
+    title: "Read release status",
+    description: "Read the immutable hashes and current durable workflow state for one release.",
+    inputSchema: { releaseId: z.string().uuid() },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ revisionId }) => result("Revision is ready for the protected preview workflow", await service.preparePreview(context, revisionId))));
+  }, safeTool(async ({ releaseId }) => result("Release status loaded", await service.releaseStatus(context, releaseId))));
+
+  server.registerTool("release_approve", {
+    title: "Approve an exact previewed release",
+    description: "Approve only the supplied release hash. A stale or changed hash fails closed. Requires content:publish.",
+    inputSchema: exactReleaseInput(),
+    annotations: writeAnnotations()
+  }, safeTool(async (input) => result("Exact release approved; it is not published yet", await service.approveRelease(context, input))));
+
+  server.registerTool("release_publish", {
+    title: "Publish and verify an approved release",
+    description: "Publish the identical previewed artifact, verify its hash, and checkpoint the durable workflow. Requires content:publish.",
+    inputSchema: exactReleaseInput(),
+    annotations: writeAnnotations()
+  }, safeTool(async (input) => result("Approved release published and verified", await service.publishRelease(context, input))));
+
+  server.registerTool("release_reconcile", {
+    title: "Reconcile an incomplete publication",
+    description: "Resume or verify a partially completed publication without duplicating an already checkpointed effect.",
+    inputSchema: exactReleaseInput(),
+    annotations: writeAnnotations()
+  }, safeTool(async (input) => result("Release workflow reconciled", await service.reconcileRelease(context, input))));
+
+  server.registerTool("release_rollback", {
+    title: "Roll back to the previous verified publication",
+    description: "Restore the prior verified artifact and retain the full audit trail. Requires exact hash and content:publish.",
+    inputSchema: exactReleaseInput(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false
+    }
+  }, safeTool(async (input) => result("Release rolled back to the previous verified publication", await service.rollbackRelease(context, input))));
 
   registerStandardTools(server, service, context);
   registerReviewTools(server, service, context);
@@ -208,17 +249,29 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
   registerAppTool(server, "review_preview_handoff", {
     title: "Show preview handoff",
     description: "Render whether an immutable revision is safely bound and ready for the protected preview workflow.",
-    inputSchema: { revisionId: z.string().min(1) },
-    annotations: readOnlyAnnotations(),
+    inputSchema: { revisionId: z.string().min(1), idempotencyKey: z.string().min(8).max(128) },
+    annotations: writeAnnotations(),
     _meta: appMeta
-  }, safeTool(async ({ revisionId }) => result("Preview handoff opened", {
+  }, safeTool(async ({ revisionId, idempotencyKey }) => result("Protected preview opened", {
     view: "workflow",
-    ...await service.preparePreview(context, revisionId)
+    ...await service.preparePreview(context, revisionId, idempotencyKey)
   })));
 }
 
 function readOnlyAnnotations() {
   return { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
+}
+
+function writeAnnotations() {
+  return { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
+}
+
+function exactReleaseInput() {
+  return {
+    releaseId: z.string().uuid(),
+    releaseHash: z.string().regex(/^[a-f0-9]{64}$/),
+    idempotencyKey: z.string().min(8).max(128)
+  };
 }
 
 function result(message: string, structuredContent: object) {
@@ -236,7 +289,7 @@ function safeTool<TArgs extends Record<string, unknown>>(
     try {
       return await handler(args);
     } catch (error) {
-      const code = error instanceof SecurityError || error instanceof ContentError || error instanceof McpEditingError
+      const code = error instanceof SecurityError || error instanceof ContentError || error instanceof KernelError || error instanceof McpEditingError
         ? error.code
         : "REQUEST_REJECTED";
       return {

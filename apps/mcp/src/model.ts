@@ -29,13 +29,16 @@ export interface DraftSummary extends ContentHit {
 }
 
 export interface PreviewPreparation {
-  readonly status: "ready-for-workflow";
+  readonly status: "previewed";
+  readonly releaseId: string;
+  readonly releaseHash: string;
   readonly revisionId: string;
   readonly sourceHash: string;
+  readonly artifactHash: string;
   readonly workflow: string;
-  readonly previewUrl: null;
-  readonly nextStep: "enqueue-protected-preview";
-  readonly note: string;
+  readonly previewUrl: string;
+  readonly expiresAt: string;
+  readonly nextStep: "approve-exact-release";
 }
 
 export const MCP_LIMITS = Object.freeze({
