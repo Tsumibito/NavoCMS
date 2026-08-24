@@ -30,6 +30,21 @@ describe("public contract validators", () => {
     ))).rejects.toThrow(/exactly match tenant, site, and SHA-256/);
   });
 
+  it("binds variant storage keys to the exact site and variant identity", async () => {
+    const media = contracts.mediaAsset.parse(await fixture("media/verified-image.media-asset.json"));
+    const invalid = {
+      ...media,
+      spec: {
+        ...media.spec,
+        variants: media.spec.variants.map((variant) => ({
+          ...variant,
+          storageKey: variant.storageKey.replace(media.metadata.siteId, "99999999-9999-4999-8999-999999999999")
+        }))
+      }
+    };
+    expect(() => contracts.mediaAsset.parse(invalid)).toThrowError(/variant key must exactly match/);
+  });
+
   it("rejects partially specified original dimensions", async () => {
     const media = contracts.mediaAsset.parse(await fixture("media/verified-image.media-asset.json"));
     const { height: _height, ...widthOnly } = media.spec.original!;

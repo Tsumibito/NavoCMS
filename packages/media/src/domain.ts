@@ -32,6 +32,33 @@ export interface MediaAssetReview extends MediaAssetSummary {
   readonly provenance: Readonly<Record<string, unknown>>;
   readonly rights: Readonly<Record<string, unknown>>;
   readonly references: readonly MediaReferenceSummary[];
+  readonly variants: readonly MediaVariantSummary[];
+}
+
+export type VariantMediaType = "image/avif" | "image/webp" | "image/jpeg";
+export interface MediaVariantSummary {
+  readonly id: string;
+  readonly variantIdentity: string;
+  readonly sha256: string;
+  readonly storageKey: string;
+  readonly byteSize: number;
+  readonly mediaType: VariantMediaType;
+  readonly width: number;
+  readonly height: number;
+  readonly presetId: string;
+  readonly presetVersion: string;
+  readonly transform: Readonly<Record<string, unknown>>;
+}
+
+export interface GenerateMediaVariantInput {
+  readonly assetId: string;
+  readonly idempotencyKey: string;
+  readonly presetId: string;
+  readonly presetVersion: string;
+  readonly width: number;
+  readonly format: VariantMediaType;
+  readonly crop?: "center" | "focal";
+  readonly focalPoint?: Readonly<{ x: number; y: number }>;
 }
 
 export interface MediaAssetPage {
@@ -128,4 +155,5 @@ export interface MediaRepository {
   restore(scope: MediaScope, input: MediaLifecycleInput): Promise<MediaAssetSummary>;
   reclaim(scope: MediaScope, input: MediaLifecycleInput): Promise<void>;
   reconcile(scope: MediaScope, input: ReconcileMediaInput): Promise<MediaReconciliationResult>;
+  generateVariant(scope: MediaScope, input: GenerateMediaVariantInput): Promise<MediaVariantSummary>;
 }

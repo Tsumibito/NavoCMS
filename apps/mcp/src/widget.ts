@@ -31,6 +31,7 @@ function renderMedia(data: ViewData): void {
   const provenance = object(data.provenance);
   const rights = object(data.rights);
   const references = Array.isArray(data.references) ? data.references : [];
+  const variants = Array.isArray(data.variants) ? data.variants : [];
   const rows = [
     ["State", value(data.state, "—")], ["SHA-256", value(data.sha256, "pending")], ["MIME", value(data.mediaType, "—")],
     ["Bytes", value(data.byteSize, "—")], ["Dimensions", data.width && data.height ? `${value(data.width, "?")} × ${value(data.height, "?")}` : "—"],
@@ -44,9 +45,13 @@ function renderMedia(data: ViewData): void {
     const reference = object(item);
     return `<li><strong>${escapeHtml(value(reference.ownerType, "reference"))}</strong> · ${escapeHtml(value(reference.purpose, "—"))}<br><code>${escapeHtml(value(reference.ownerId, "unknown owner"))}</code> · ${escapeHtml(value(reference.createdAt, "unknown date"))}</li>`;
   }).join("");
+  const variantRows = variants.map((item) => {
+    const variant = object(item);
+    return `<li><strong>${escapeHtml(value(variant.presetId, "preset"))}@${escapeHtml(value(variant.presetVersion, "—"))}</strong> · ${escapeHtml(value(variant.mediaType, "—"))}<br>${escapeHtml(value(variant.width, "?"))} × ${escapeHtml(value(variant.height, "?"))} · ${escapeHtml(value(variant.byteSize, "?"))} bytes<br>Identity: <code>${escapeHtml(value(variant.variantIdentity, "—"))}</code><br>SHA-256: <code>${escapeHtml(value(variant.sha256, "—"))}</code><br>Storage: <code>${escapeHtml(value(variant.storageKey, "—"))}</code></li>`;
+  }).join("");
   root.innerHTML = shell(
     "Media review", value(data.state, "—"), shortHash(data.sha256),
-    `<section class="proof"><h1>Asset integrity</h1><dl>${rows}</dl><h2>References</h2><ul>${referenceRows || "<li>None</li>"}</ul></section>`,
+    `<section class="proof"><h1>Asset integrity</h1><dl>${rows}</dl><h2>Variants</h2><ul>${variantRows || "<li>None</li>"}</ul><h2>References</h2><ul>${referenceRows || "<li>None</li>"}</ul></section>`,
     "Read-only site-scoped media metadata"
   );
 }

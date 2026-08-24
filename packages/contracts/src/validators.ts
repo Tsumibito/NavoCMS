@@ -219,6 +219,10 @@ function mediaAssetSemantics(asset: MediaAsset): string[] {
     const expectedKey = `tenants/${asset.metadata.tenantId}/sites/${asset.metadata.siteId}/originals/${asset.spec.original.sha256}`;
     if (asset.spec.original.storageKey !== expectedKey) issues.push("original key must exactly match tenant, site, and SHA-256");
   }
+  for (const variant of asset.spec.variants) {
+    const expectedKey = `tenants/${asset.metadata.tenantId}/sites/${asset.metadata.siteId}/variants/${variant.variantIdentity}`;
+    if (variant.storageKey !== expectedKey) issues.push("variant key must exactly match tenant, site, and variant identity");
+  }
   return issues;
 }
 
