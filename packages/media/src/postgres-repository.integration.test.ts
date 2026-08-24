@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import type { EventStore } from "@navocms/kernel";
 import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
+import sharp from "sharp";
 import { afterAll, describe, expect, it } from "vitest";
 
-import type { FinalizeUploadInput, MediaScope, UploadIntentResult } from "./domain.js";
+import type { FinalizeUploadInput, GenerateMediaVariantInput, MediaScope, MediaVariantSummary, UploadIntentResult } from "./domain.js";
 import { PostgresMediaRepository } from "./postgres-repository.js";
 import { LocalDeterministicMediaStorage, originalKey, type MediaStorage } from "./storage.js";
 
@@ -324,6 +326,152 @@ integration("atomic media repository", () => {
     });
   });
 
+  it("persists deterministic AVIF, WebP, and JPEG variants and replays the exact artifact", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const repository = new PostgresMediaRepository(database!, storage);
+    const key = `media-variant-happy-${randomUUID()}`;
+    const { asset } = await verifiedSharpAsset(repository, storage, key);
+    const formats = ["image/avif", "image/webp", "image/jpeg"] as const;
+    const generated: MediaVariantSummary[] = [];
+    for (const format of formats) {
+      generated.push(await repository.generateVariant(scope, variantInput(asset.id, `${key}-${format}`, format)));
+    }
+    const replayed = await repository.generateVariant(scope, variantInput(asset.id, `${key}-${formats[0]}`, formats[0]));
+    expect(replayed).toEqual(generated[0]);
+    expect(generated.map(({ mediaType }) => mediaType)).toEqual(formats);
+    for (const variant of generated) {
+      expect(variant).toMatchObject({
+        variantIdentity: expect.stringMatching(/^[a-f0-9]{64}$/),
+        storageKey: `tenants/${scope.tenantId}/sites/${scope.siteId}/variants/${variant.variantIdentity}`,
+        byteSize: expect.any(Number), presetId: "thumbnail", presetVersion: "v1"
+      });
+      await expect(storage.head(variant.storageKey)).resolves.toMatchObject({
+        byteSize: variant.byteSize, sha256: variant.sha256, mediaType: variant.mediaType
+      });
+    }
+    await expect(repository.getAssetReview(scope, asset.id, 10)).resolves.toMatchObject({
+      variants: expect.arrayContaining(generated.map(({ variantIdentity }) => expect.objectContaining({ variantIdentity })))
+    });
+    await expect(repository.generateVariant(scope, {
+      ...variantInput(asset.id, `${key}-${formats[0]}`, formats[0]), format: "image/jpeg"
+    })).rejects.toThrow("IDEMPOTENCY_KEY_REUSED");
+    await expect(repository.generateVariant(scope, {
+      ...variantInput(asset.id, `${key}-unknown-preset`, "image/webp"), presetVersion: "v2"
+    })).rejects.toThrow("PRESET_UNKNOWN");
+  });
+
+  it("serializes concurrent generation of one variant without a raw unique conflict", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const repository = new PostgresMediaRepository(database!, storage);
+    const key = `media-variant-concurrent-${randomUUID()}`;
+    const { asset } = await verifiedSharpAsset(repository, storage, key);
+    const outcomes = await Promise.all([
+      repository.generateVariant(scope, variantInput(asset.id, `${key}-first`, "image/webp")),
+      repository.generateVariant(scope, variantInput(asset.id, `${key}-second`, "image/webp"))
+    ]);
+    expect(outcomes[0]).toEqual(outcomes[1]);
+    const counts = await variantCounts(asset.id, outcomes[0].variantIdentity);
+    expect(counts).toMatchObject({ variants: "1", checkpoints: "1", completed: "1" });
+  });
+
+  it("recovers a crash after the variant storage effect and rejects invalid transforms before effects", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const normal = new PostgresMediaRepository(database!, storage);
+    const key = `media-variant-crash-${randomUUID()}`;
+    const { asset } = await verifiedSharpAsset(normal, storage, key);
+    let crash = true;
+    const interrupted: MediaStorage = {
+      putImmutable: async (object) => {
+        await storage.putImmutable(object);
+        if (object.key.includes("/variants/") && crash) { crash = false; throw new Error("injected post-storage crash"); }
+      },
+      head: storage.head.bind(storage), read: storage.read.bind(storage),
+      deleteRecoverable: storage.deleteRecoverable.bind(storage), restore: storage.restore.bind(storage),
+      reclaim: storage.reclaim.bind(storage), inventory: storage.inventory.bind(storage)
+    };
+    const input = variantInput(asset.id, `${key}-generate`, "image/webp");
+    await expect(new PostgresMediaRepository(database!, interrupted).generateVariant(scope, input)).rejects.toThrow("post-storage crash");
+    const pending = await variantCheckpointForAsset(asset.id);
+    expect(pending).toMatchObject({ status: "effect_pending", variants: "0" });
+    const recovered = await normal.generateVariant(scope, input);
+    expect(await variantCheckpointForAsset(asset.id)).toMatchObject({ status: "completed", variants: "1" });
+    expect(await storage.head(recovered.storageKey)).toBeDefined();
+
+    const invalidAsset = randomUUID();
+    await expect(normal.generateVariant(scope, {
+      ...variantInput(invalidAsset, `${key}-invalid-focal`, "image/webp"), crop: "center", focalPoint: { x: 0.5, y: 0.5 }
+    })).rejects.toThrow("FOCAL_INVALID");
+    await expect(normal.generateVariant(scope, {
+      ...variantInput(invalidAsset, `${key}-invalid-responsive`, "image/webp"), presetId: "responsive", width: 320, crop: "focal", focalPoint: { x: 0.5, y: 0.5 }
+    })).rejects.toThrow("CROP_INVALID");
+    expect(await variantCounts(invalidAsset)).toMatchObject({ variants: "0", checkpoints: "0" });
+  });
+
+  it("fails closed on source/storage mismatch and rolls final Ledger/outbox mutation back", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const normal = new PostgresMediaRepository(database!, storage);
+    const key = `media-variant-failure-${randomUUID()}`;
+    const { asset } = await verifiedSharpAsset(normal, storage, key);
+    const mismatchingSource: MediaStorage = {
+      putImmutable: storage.putImmutable.bind(storage),
+      head: async (storageKey) => {
+        const value = await storage.head(storageKey);
+        return value && storageKey.includes("/originals/") ? { ...value, sha256: "0".repeat(64) } : value;
+      },
+      read: storage.read.bind(storage), deleteRecoverable: storage.deleteRecoverable.bind(storage),
+      restore: storage.restore.bind(storage), reclaim: storage.reclaim.bind(storage), inventory: storage.inventory.bind(storage)
+    };
+    await expect(new PostgresMediaRepository(database!, mismatchingSource).generateVariant(
+      scope, variantInput(asset.id, `${key}-source-mismatch`, "image/webp")
+    )).rejects.toThrow("SOURCE_MISMATCH");
+    expect(await variantCounts(asset.id)).toMatchObject({ variants: "0", checkpoints: "0" });
+
+    const outputAsset = await verifiedSharpAsset(normal, storage, `${key}-output`);
+    const lyingOutput: MediaStorage = {
+      putImmutable: storage.putImmutable.bind(storage), head: storage.head.bind(storage),
+      read: async (storageKey, maxBytes) => {
+        const object = await storage.read(storageKey, maxBytes);
+        if (!object || !storageKey.includes("/variants/")) return object;
+        const bytes = new Uint8Array(object.bytes);
+        bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 1;
+        return { ...object, bytes };
+      },
+      deleteRecoverable: storage.deleteRecoverable.bind(storage), restore: storage.restore.bind(storage),
+      reclaim: storage.reclaim.bind(storage), inventory: storage.inventory.bind(storage)
+    };
+    await expect(new PostgresMediaRepository(database!, lyingOutput).generateVariant(
+      scope, variantInput(outputAsset.asset.id, `${key}-output-mismatch`, "image/webp")
+    )).rejects.toThrow("STORAGE_MISMATCH");
+    expect(await variantCounts(outputAsset.asset.id)).toMatchObject({ variants: "0", checkpoints: "1", completed: "0" });
+
+    const store = new PostgresEventStore(database!);
+    const failingEvents: EventStore = {
+      append: async (event) => {
+        const record = await store.append(event);
+        if (event.type === "io.navocms.media.variant.generated.v1") throw new Error("injected variant event failure");
+        return record;
+      },
+      query: (query: Parameters<PostgresEventStore["query"]>[0]) => store.query(query)
+    };
+    const input = variantInput(asset.id, `${key}-rollback`, "image/webp");
+    const failing = new PostgresMediaRepository(database!, storage, new PostgresIdempotencyStore(database!), failingEvents);
+    await expect(failing.generateVariant(scope, input)).rejects.toThrow("variant event failure");
+    const rolledBack = await database!.withScope(scope, async (client) => (
+      await client.query<{ variants: string; pending: string; final_idempotency: string; ledger: string; outbox: string }>(
+        `SELECT
+          (SELECT count(*) FROM navocms.media_variants WHERE asset_id = $1) AS variants,
+          (SELECT count(*) FROM navocms.media_variant_checkpoints WHERE asset_id = $1 AND status = 'effect_pending') AS pending,
+          (SELECT count(*) FROM navocms.idempotency_records WHERE operation = 'media_variant_generate' AND idempotency_key = $2) AS final_idempotency,
+          (SELECT count(*) FROM navocms.event_ledger WHERE correlation_id = $1 AND event_type = 'io.navocms.media.variant.generated.v1') AS ledger,
+          (SELECT count(*) FROM navocms.domain_outbox WHERE correlation_id = $1 AND event_type = 'io.navocms.media.variant.generated.v1') AS outbox`,
+        [asset.id, input.idempotencyKey]
+      )).rows[0]!
+    );
+    expect(rolledBack).toEqual({ variants: "0", pending: "1", final_idempotency: "0", ledger: "0", outbox: "0" });
+    await expect(normal.generateVariant(scope, input)).resolves.toMatchObject({ mediaType: "image/webp" });
+    await expect(normal.generateVariant({ ...scope, siteId: randomUUID() }, variantInput(asset.id, `${key}-foreign`, "image/webp"))).rejects.toThrow("SOURCE_NOT_FOUND");
+  });
+
   it("blocks live references, persists a recoverable lifecycle, and never reclaims before grace", async () => {
     const storage = new LocalDeterministicMediaStorage();
     const repository = new PostgresMediaRepository(database!, storage);
@@ -477,6 +625,46 @@ async function verifiedAsset(repository: PostgresMediaRepository, storage: Local
   const intent = uploadIntent(await repository.createUploadIntent(scope, createInput(key)));
   const asset = await finalize(repository, storage, intent, key);
   return { asset, intent };
+}
+
+async function verifiedSharpAsset(repository: PostgresMediaRepository, storage: LocalDeterministicMediaStorage, key: string) {
+  const sourceColor = `#${createHash("sha256").update(key).digest("hex").slice(0, 6)}`;
+  const bytes = new Uint8Array(await sharp({ create: { width: 80, height: 60, channels: 3, background: sourceColor } }).png().toBuffer());
+  const intent = uploadIntent(await repository.createUploadIntent(scope, createInput(key, "image/png", bytes)));
+  await storage.putImmutable({ key: intent.storageKey, bytes, mediaType: "image/png" });
+  const asset = await repository.finalizeUpload(scope, finalizeInput(intent, key));
+  return { asset, intent };
+}
+
+function variantInput(assetId: string, idempotencyKey: string, format: GenerateMediaVariantInput["format"]): GenerateMediaVariantInput {
+  return {
+    assetId, idempotencyKey, presetId: "thumbnail", presetVersion: "v1", width: 160,
+    format, crop: "focal", focalPoint: { x: 0.5, y: 0.5 }
+  };
+}
+
+async function variantCounts(assetId: string, variantIdentity?: string) {
+  return database!.withScope(scope, async (client) => (
+    await client.query<{ variants: string; checkpoints: string; completed: string }>(
+      `SELECT
+        (SELECT count(*) FROM navocms.media_variants WHERE asset_id = $1 AND ($2::text IS NULL OR variant_identity = $2)) AS variants,
+        (SELECT count(*) FROM navocms.media_variant_checkpoints WHERE asset_id = $1 AND ($2::text IS NULL OR variant_identity = $2)) AS checkpoints,
+        (SELECT count(*) FROM navocms.media_variant_checkpoints WHERE asset_id = $1 AND ($2::text IS NULL OR variant_identity = $2) AND status = 'completed') AS completed`,
+      [assetId, variantIdentity ?? null]
+    )).rows[0]!
+  );
+}
+
+async function variantCheckpointForAsset(assetId: string) {
+  return database!.withScope(scope, async (client) => (
+    await client.query<{ status: string; variants: string }>(
+      `SELECT checkpoint.status,
+          (SELECT count(*) FROM navocms.media_variants WHERE asset_id = $1) AS variants
+         FROM navocms.media_variant_checkpoints checkpoint
+        WHERE checkpoint.asset_id = $1 ORDER BY checkpoint.created_at DESC LIMIT 1`,
+      [assetId]
+    )).rows[0]!
+  );
 }
 
 async function putUpload(storage: LocalDeterministicMediaStorage, key: string, value: string): Promise<void> {

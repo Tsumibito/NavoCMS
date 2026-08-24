@@ -67,12 +67,13 @@ function repository(): MediaRepository {
   return {
     createUploadIntent: async () => ({ kind: "upload-intent", asset, intentId: "22222222-2222-4222-8222-222222222222", storageKey: "pending", expiresAt: "2026-01-01T00:01:00.000Z" }),
     finalizeUpload: async () => asset, getAsset: async () => asset,
-    getAssetReview: async () => ({ ...asset, provenance: {}, rights: {}, references: [] }),
+    getAssetReview: async () => ({ ...asset, provenance: {}, rights: {}, references: [], variants: [] }),
     listAssets: async () => ({ assets: [asset] }), listReferences: async () => ({ references: [] }),
     createReference: async () => ({ id: "33333333-3333-4333-8333-333333333333" }), removeReference: async () => undefined, rejectAsset: async () => ({ ...asset, state: "rejected" as const, rejectionReason: "rejected" }),
     scheduleDelete: async () => ({ ...asset, state: "deleted" as const }), recoverableDelete: async () => undefined,
     restore: async () => ({ ...asset, state: "verified" as const }), reclaim: async () => undefined,
-    reconcile: async () => ({ inspected: 0, orphanedStorageObjects: 0, missingStorageObjects: 0 })
+    reconcile: async () => ({ inspected: 0, orphanedStorageObjects: 0, missingStorageObjects: 0 }),
+    generateVariant: async () => ({ id: "44444444-4444-4444-8444-444444444444", variantIdentity: "a".repeat(64), sha256: "b".repeat(64), storageKey: `tenants/${site.tenantId}/sites/${site.siteId}/variants/${"a".repeat(64)}`, byteSize: 123, mediaType: "image/webp" as const, width: 320, height: 200, presetId: "thumbnail", presetVersion: "v1", transform: {} })
   };
 }
 

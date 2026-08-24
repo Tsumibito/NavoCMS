@@ -19,10 +19,14 @@ import type {
   ScheduleMediaDeleteInput,
   MediaLifecycleInput,
   ReconcileMediaInput,
-  MediaReconciliationResult
+  MediaReconciliationResult,
+  GenerateMediaVariantInput,
+  MediaVariantSummary
 } from "./domain.js";
-import { assertOriginalKey, originalKey, originalPrefix, sha256, type MediaStorage } from "./storage.js";
+import { assertOriginalKey, originalKey, originalPrefix, sha256, variantIdentity, variantKey, type MediaStorage } from "./storage.js";
 import { inspectMedia, MEDIA_LIMITS, verifyUpload } from "./validation.js";
+import { resolvePreset } from "./presets.js";
+import { assertVariantTransform, PinnedMediaProcessor, type MediaProcessor } from "./processor.js";
 
 interface AssetRow extends Record<string, unknown> {
   readonly id: string;
@@ -75,6 +79,42 @@ interface OriginalInventoryRow extends Record<string, unknown> {
   readonly state: MediaAssetSummary["state"];
 }
 
+interface VariantOriginalRow extends Record<string, unknown> {
+  readonly asset_id: string;
+  readonly sha256: string;
+  readonly byte_size: string | number;
+  readonly media_type: "image/jpeg" | "image/png";
+  readonly storage_key: string;
+}
+
+interface VariantRow extends Record<string, unknown> {
+  readonly id: string;
+  readonly variant_identity: string;
+  readonly sha256: string;
+  readonly storage_key: string;
+  readonly byte_size: string | number;
+  readonly media_type: MediaVariantSummary["mediaType"];
+  readonly width: number;
+  readonly height: number;
+  readonly preset_id: string;
+  readonly preset_version: string;
+  readonly transform_json: Readonly<Record<string, unknown>>;
+}
+
+interface VariantCheckpointRow extends Record<string, unknown> {
+  readonly checkpoint_id: string;
+  readonly storage_key: string;
+  readonly original_sha256: string;
+  readonly output_sha256: string;
+  readonly byte_size: string | number;
+  readonly media_type: MediaVariantSummary["mediaType"];
+  readonly width: number;
+  readonly height: number;
+  readonly preset_id: string;
+  readonly preset_version: string;
+  readonly transform_json: Readonly<Record<string, unknown>>;
+}
+
 const MAX_INTENT_TTL_MS = 15 * 60 * 1000;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const MAX_METADATA_BYTES = 8 * 1024;
@@ -91,17 +131,20 @@ export class PostgresMediaRepository implements MediaRepository {
   readonly #storage: MediaStorage | undefined;
   readonly #idempotency: PostgresIdempotencyStore;
   readonly #events: EventStore;
+  readonly #processor: MediaProcessor;
 
   public constructor(
     database: PostgresDatabase,
     storage?: MediaStorage,
     idempotency: PostgresIdempotencyStore = new PostgresIdempotencyStore(database),
-    events: EventStore = new PostgresEventStore(database)
+    events: EventStore = new PostgresEventStore(database),
+    processor: MediaProcessor = new PinnedMediaProcessor()
   ) {
     this.#database = database;
     this.#storage = storage;
     this.#idempotency = idempotency;
     this.#events = events;
+    this.#processor = processor;
   }
 
   public async createUploadIntent(scope: MediaScope, input: CreateUploadIntentInput): Promise<CreateUploadResult> {
@@ -290,7 +333,14 @@ export class PostgresMediaRepository implements MediaRepository {
     );
     if (!row) return undefined;
     const referencePage = await this.listReferences(scope, assetId, referenceLimit);
-    return Object.freeze({ ...toAsset(row), provenance: Object.freeze({ ...row.provenance_json }), rights: Object.freeze({ ...row.rights_json }), references: referencePage.references });
+    const variants = await this.#database.withScope(scope, async (client) => (
+      await client.query<VariantRow>(
+        `SELECT id, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json
+           FROM navocms.media_variants WHERE tenant_id = $1 AND site_id = $2 AND asset_id = $3
+           ORDER BY created_at, id LIMIT 100`, [scope.tenantId, scope.siteId, assetId]
+      )).rows
+    );
+    return Object.freeze({ ...toAsset(row), provenance: Object.freeze({ ...row.provenance_json }), rights: Object.freeze({ ...row.rights_json }), references: referencePage.references, variants: Object.freeze(variants.map(toVariant)) });
   }
 
   public async listAssets(scope: MediaScope, limit: number, cursor?: string): Promise<MediaAssetPage> {
@@ -383,6 +433,99 @@ export class PostgresMediaRepository implements MediaRepository {
         assetId: asset.id, reason: input.reason
       });
       return asset;
+    });
+  }
+
+  public async generateVariant(scope: MediaScope, input: GenerateMediaVariantInput): Promise<MediaVariantSummary> {
+    assertIdempotencyKey(input.idempotencyKey);
+    const preset = resolvePreset(input.presetId, input.presetVersion);
+    const crop = input.crop ?? "center";
+    assertVariantTransform(preset, input.width, input.format, crop, input.focalPoint);
+    const transform = Object.freeze({ presetId: preset.presetId, presetVersion: preset.presetVersion, width: input.width, format: input.format, crop, ...(input.focalPoint ? { focalPoint: { x: input.focalPoint.x, y: input.focalPoint.y } } : {}) });
+    const original = await this.variantOriginal(scope, input.assetId);
+    assertOriginalKey(scope, original.storage_key, original.sha256);
+    const identity = variantIdentity(original.sha256, preset.presetVersion, transform);
+    const existing = await this.#idempotency.lookup<MediaVariantSummary>(scope, "media_variant_generate", input.idempotencyKey, fingerprintOf(input));
+    if (existing?.status === "completed") return existing.value;
+    if (existing) throw new Error("MEDIA_IDEMPOTENCY_INCOMPLETE");
+    if (!this.#storage) throw new Error("MEDIA_STORAGE_UNAVAILABLE");
+    const header = await this.#storage.head(original.storage_key);
+    if (!header || header.sha256 !== original.sha256 || header.mediaType !== original.media_type || header.byteSize !== Number(original.byte_size) || header.byteSize > MEDIA_LIMITS.maxBytes) throw new Error("MEDIA_VARIANT_SOURCE_MISMATCH");
+    const source = await this.#storage.read(original.storage_key, Number(original.byte_size));
+    if (!source || source.key !== original.storage_key || source.mediaType !== original.media_type || source.bytes.byteLength !== header.byteSize || sha256(source.bytes) !== original.sha256) throw new Error("MEDIA_VARIANT_SOURCE_MISMATCH");
+    inspectMedia(source.bytes, original.media_type);
+    const processed = await this.#processor.process({ bytes: source.bytes, mediaType: original.media_type, preset, width: input.width, format: input.format, crop, ...(input.focalPoint ? { focalPoint: input.focalPoint } : {}) });
+    if (processed.bytes.byteLength < 1 || processed.bytes.byteLength > MEDIA_LIMITS.maxBytes ||
+      processed.mediaType !== input.format || !Number.isSafeInteger(processed.width) || !Number.isSafeInteger(processed.height) ||
+      processed.width < 1 || processed.height < 1 || processed.width > input.width ||
+      processed.width > MEDIA_LIMITS.maxDimension || processed.height > MEDIA_LIMITS.maxDimension ||
+      processed.width * processed.height > MEDIA_LIMITS.maxPixels ||
+      (preset.maxHeight !== undefined && processed.height > preset.maxHeight)) throw new Error("MEDIA_VARIANT_OUTPUT_INVALID");
+    const outputSha = sha256(processed.bytes);
+    const checkpoint = await this.idempotent(scope, "media_variant_prepare", input.idempotencyKey, { assetId: input.assetId, identity, transform }, async () => {
+      const storageKey = variantKey(scope, identity);
+      return this.#database.withScope(scope, async (client) => {
+        const row = await client.query<VariantCheckpointRow>(
+          `INSERT INTO navocms.media_variant_checkpoints
+             (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, storage_key,
+              output_sha256, byte_size, media_type, width, height, preset_id, preset_version,
+              transform_json, operation_key, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,'effect_pending')
+           ON CONFLICT (tenant_id, site_id, variant_identity) DO UPDATE
+             SET updated_at = media_variant_checkpoints.updated_at
+           RETURNING id AS checkpoint_id, storage_key, original_sha256, output_sha256, byte_size,
+             media_type, width, height, preset_id, preset_version, transform_json`,
+          [randomUUID(), scope.tenantId, scope.siteId, input.assetId, original.sha256, identity, storageKey,
+            outputSha, processed.bytes.byteLength, processed.mediaType, processed.width, processed.height,
+            preset.presetId, preset.presetVersion, JSON.stringify(transform), eventOperationKey("media_variant_generate", input.idempotencyKey)]
+        );
+        const checkpoint = row.rows[0];
+        if (!checkpoint) throw new Error("MEDIA_VARIANT_CHECKPOINT_INVALID");
+        assertVariantCheckpoint(checkpoint, original.sha256, outputSha, processed, preset.presetId, preset.presetVersion, transform);
+        await this.append(scope, "media_variant_prepare", input.assetId, input.idempotencyKey, "io.navocms.media.variant.prepared.v1", { assetId: input.assetId, variantIdentity: identity });
+        return Object.freeze({ checkpointId: checkpoint.checkpoint_id, storageKey: checkpoint.storage_key });
+      });
+    });
+    await this.#storage.putImmutable({ key: checkpoint.storageKey, bytes: processed.bytes, mediaType: processed.mediaType });
+    const storedHead = await this.#storage.head(checkpoint.storageKey);
+    if (!storedHead || storedHead.byteSize !== processed.bytes.byteLength || storedHead.sha256 !== outputSha || storedHead.mediaType !== processed.mediaType) throw new Error("MEDIA_VARIANT_STORAGE_MISMATCH");
+    const stored = await this.#storage.read(checkpoint.storageKey, processed.bytes.byteLength);
+    if (!stored || stored.key !== checkpoint.storageKey || stored.mediaType !== processed.mediaType || stored.bytes.byteLength !== processed.bytes.byteLength || sha256(stored.bytes) !== outputSha) throw new Error("MEDIA_VARIANT_STORAGE_MISMATCH");
+    return this.idempotent(scope, "media_variant_generate", input.idempotencyKey, input, async () => {
+      const row = await this.#database.withScope(scope, async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${scope.tenantId}:${scope.siteId}:${identity}`]);
+        const present = (await client.query<VariantRow>(
+          `SELECT id, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json
+             FROM navocms.media_variants WHERE tenant_id = $1 AND site_id = $2 AND variant_identity = $3`,
+          [scope.tenantId, scope.siteId, identity]
+        )).rows[0];
+        if (present) {
+          assertVariantRow(present, checkpoint.storageKey, outputSha, processed, preset.presetId, preset.presetVersion, transform);
+          return present;
+        }
+        const inserted = (await client.query<VariantRow>(
+          `INSERT INTO navocms.media_variants
+             (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+           RETURNING id, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json`,
+          [randomUUID(), scope.tenantId, scope.siteId, input.assetId, original.sha256, identity, outputSha, checkpoint.storageKey, processed.bytes.byteLength, processed.mediaType, processed.width, processed.height, preset.presetId, preset.presetVersion, JSON.stringify(transform)]
+        )).rows[0]!;
+        const completed = await client.query(
+          `UPDATE navocms.media_variant_checkpoints SET status = 'completed', completed_at = now(), updated_at = now()
+            WHERE tenant_id = $1 AND site_id = $2 AND variant_identity = $3 AND status = 'effect_pending'`,
+          [scope.tenantId, scope.siteId, identity]
+        );
+        if ((completed.rowCount ?? 0) !== 1) throw new Error("MEDIA_VARIANT_CHECKPOINT_INVALID");
+        return inserted;
+      });
+      const variant = toVariant(row);
+      await this.append(scope, "media_variant_generate", input.assetId, input.idempotencyKey, "io.navocms.media.variant.generated.v1", {
+        assetId: input.assetId, variantIdentity: identity, storageKey: variant.storageKey,
+        sha256: variant.sha256, byteSize: variant.byteSize, mediaType: variant.mediaType,
+        width: variant.width, height: variant.height, presetId: variant.presetId,
+        presetVersion: variant.presetVersion
+      });
+      return variant;
     });
   }
 
@@ -637,6 +780,20 @@ export class PostgresMediaRepository implements MediaRepository {
     return row;
   }
 
+  private async variantOriginal(scope: MediaScope, assetId: string): Promise<VariantOriginalRow> {
+    const row = await this.#database.withScope(scope, async (client) => (
+      await client.query<VariantOriginalRow>(
+        `SELECT o.asset_id, o.sha256, o.byte_size, o.media_type, o.storage_key
+           FROM navocms.media_originals o JOIN navocms.media_assets a
+             ON a.tenant_id = o.tenant_id AND a.site_id = o.site_id AND a.id = o.asset_id
+          WHERE o.tenant_id = $1 AND o.site_id = $2 AND o.asset_id = $3
+            AND a.state IN ('verified', 'ready')`, [scope.tenantId, scope.siteId, assetId]
+      )).rows[0]
+    );
+    if (!row) throw new Error("MEDIA_VARIANT_SOURCE_NOT_FOUND");
+    return row;
+  }
+
   private async originalExists(scope: MediaScope, storageKey: string): Promise<boolean> {
     return this.#database.withScope(scope, async (client) => {
       const row = await client.query<{ present: boolean }>(
@@ -772,6 +929,47 @@ function eventOperationKey(operation: string, clientKey: string): string {
 
 function toReference(row: ReferenceRow): MediaReferenceSummary {
   return Object.freeze({ id: row.id, ownerType: row.owner_type, ownerId: row.owner_id, purpose: row.purpose, createdAt: new Date(row.created_at).toISOString() });
+}
+
+function toVariant(row: VariantRow): MediaVariantSummary {
+  return Object.freeze({ id: row.id, variantIdentity: row.variant_identity, sha256: row.sha256,
+    storageKey: row.storage_key, byteSize: Number(row.byte_size), mediaType: row.media_type,
+    width: row.width, height: row.height, presetId: row.preset_id, presetVersion: row.preset_version,
+    transform: Object.freeze({ ...row.transform_json }) });
+}
+
+function assertVariantRow(
+  row: VariantRow,
+  storageKey: string,
+  outputSha: string,
+  processed: Readonly<{ bytes: Uint8Array; mediaType: MediaVariantSummary["mediaType"]; width: number; height: number }>,
+  presetId: string,
+  presetVersion: string,
+  transform: Readonly<Record<string, unknown>>
+): void {
+  if (row.storage_key !== storageKey || row.sha256 !== outputSha || Number(row.byte_size) !== processed.bytes.byteLength ||
+    row.media_type !== processed.mediaType || row.width !== processed.width || row.height !== processed.height ||
+    row.preset_id !== presetId || row.preset_version !== presetVersion ||
+    fingerprintOf(row.transform_json) !== fingerprintOf(transform)) {
+    throw new Error("MEDIA_VARIANT_PERSISTED_MISMATCH");
+  }
+}
+
+function assertVariantCheckpoint(
+  row: VariantCheckpointRow,
+  originalSha: string,
+  outputSha: string,
+  processed: Readonly<{ bytes: Uint8Array; mediaType: MediaVariantSummary["mediaType"]; width: number; height: number }>,
+  presetId: string,
+  presetVersion: string,
+  transform: Readonly<Record<string, unknown>>
+): void {
+  if (row.original_sha256 !== originalSha || row.output_sha256 !== outputSha ||
+    Number(row.byte_size) !== processed.bytes.byteLength || row.media_type !== processed.mediaType ||
+    row.width !== processed.width || row.height !== processed.height || row.preset_id !== presetId ||
+    row.preset_version !== presetVersion || fingerprintOf(row.transform_json) !== fingerprintOf(transform)) {
+    throw new Error("MEDIA_VARIANT_CHECKPOINT_MISMATCH");
+  }
 }
 
 function toAsset(row: AssetRow): MediaAssetSummary {

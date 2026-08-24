@@ -53,6 +53,7 @@ footer { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--rule);
 .handoff p { max-width: 64ch; color: var(--muted); line-height: 1.5; }
 dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; }
 dd { margin: 0; font: 13px/1.4 ui-monospace, "SFMono-Regular", monospace; overflow-wrap: anywhere; }
+.proof li code { overflow-wrap: anywhere; word-break: break-word; }
 .empty { display: flex; flex-direction: column; gap: 7px; padding: 26px; color: var(--muted); font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; }
 .empty strong { color: var(--ink); }
 @media (max-width: 520px) {

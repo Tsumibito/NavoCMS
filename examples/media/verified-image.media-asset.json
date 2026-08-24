@@ -18,7 +18,19 @@
       "height": 30,
       "frames": 1
     },
-    "variants": [],
+    "variants": [{
+      "id": "85555555-5555-4555-8555-555555555555",
+      "variantIdentity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "storageKey": "tenants/82222222-2222-4222-8222-222222222222/sites/83333333-3333-4333-8333-333333333333/variants/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "byteSize": 800,
+      "mediaType": "image/webp",
+      "width": 40,
+      "height": 30,
+      "presetId": "thumbnail",
+      "presetVersion": "v1",
+      "transform": { "width": 160, "format": "image/webp", "crop": "center" }
+    }],
     "provenance": { "kind": "upload", "receivedAt": "2026-08-24T00:00:00.000Z", "receivedBy": "84444444-4444-4444-8444-444444444444" },
     "rights": { "license": "CC-BY-4.0", "restricted": false }
   }

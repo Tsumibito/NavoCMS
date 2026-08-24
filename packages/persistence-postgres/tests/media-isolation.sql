@@ -17,13 +17,15 @@ INSERT INTO media_originals (id, tenant_id, site_id, asset_id, sha256, byte_size
   ('81400000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', repeat('a', 64), 1, 'image/jpeg', concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/originals/', repeat('a', 64)), now()),
   ('81400000-0000-4000-8000-000000000002', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000002', repeat('e', 64), 1, 'image/png', concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/originals/', repeat('e', 64)), now()),
   ('82400000-0000-4000-8000-000000000002', '82000000-0000-4000-8000-000000000002', '82200000-0000-4000-8000-000000000002', '82300000-0000-4000-8000-000000000002', repeat('b', 64), 1, 'image/jpeg', concat('tenants/82000000-0000-4000-8000-000000000002/sites/82200000-0000-4000-8000-000000000002/originals/', repeat('b', 64)), now());
-INSERT INTO media_variants (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, sha256, storage_key, media_type, width, height, preset_version, transform_json) VALUES
-  ('81500000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', repeat('a', 64), repeat('c', 64), repeat('d', 64), concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/variants/', repeat('c', 64)), 'image/webp', 1, 1, 'v1', '{}');
+INSERT INTO media_variants (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json) VALUES
+  ('81500000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', repeat('a', 64), repeat('c', 64), repeat('d', 64), concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/variants/', repeat('c', 64)), 1, 'image/webp', 1, 1, 'thumbnail', 'v1', '{}');
 INSERT INTO media_references (id, tenant_id, site_id, asset_id, owner_type, owner_id, purpose) VALUES ('81600000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', 'content.document', '81700000-0000-4000-8000-000000000001', 'hero');
 INSERT INTO media_upload_intents (id, tenant_id, site_id, asset_id, operation_key, expected_sha256, expected_size, storage_key, expires_at) VALUES ('81800000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', 'media-upload-one', repeat('a', 64), 1, 'tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/pending/81800000-0000-4000-8000-000000000001', now() + interval '1 hour');
 INSERT INTO media_gc_candidates (id, tenant_id, site_id, asset_id, recoverable_until) VALUES ('81900000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', now() + interval '1 day');
 INSERT INTO media_lifecycle_checkpoints (id, tenant_id, site_id, asset_id, storage_key, operation, operation_key, status, grace_until) VALUES
   ('81900000-0000-4000-8000-000000000002', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/originals/', repeat('a', 64)), 'schedule_delete', 'media-isolation-checkpoint-0001', 'scheduled', now() + interval '1 day');
+INSERT INTO media_variant_checkpoints (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, storage_key, output_sha256, byte_size, media_type, width, height, preset_id, preset_version, transform_json, operation_key, status) VALUES
+  ('81900000-0000-4000-8000-000000000003', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', repeat('a', 64), repeat('7', 64), concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/variants/', repeat('7', 64)), repeat('6', 64), 1, 'image/webp', 1, 1, 'thumbnail', 'v1', '{}', 'media-variant-isolation-0001', 'effect_pending');
 INSERT INTO media_lifecycle_checkpoints (id, tenant_id, site_id, asset_id, storage_key, operation, operation_key, status) VALUES
   ('81900000-0000-4000-8000-000000000003', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000002', concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/originals/', repeat('e', 64)), 'reconcile_missing', 'media-isolation-missing-0001', 'storage_missing');
 
@@ -34,7 +36,7 @@ SELECT set_config('navocms.principal_id', '81000000-0000-4000-8000-000000000001'
 DO $assertions$
 DECLARE table_name text; visible_count integer; expected_count integer;
 BEGIN
-  FOREACH table_name IN ARRAY ARRAY['media_assets', 'media_originals', 'media_variants', 'media_references', 'media_upload_intents', 'media_gc_candidates', 'media_lifecycle_checkpoints'] LOOP
+  FOREACH table_name IN ARRAY ARRAY['media_assets', 'media_originals', 'media_variants', 'media_references', 'media_upload_intents', 'media_gc_candidates', 'media_lifecycle_checkpoints', 'media_variant_checkpoints'] LOOP
     EXECUTE format('SELECT count(*) FROM navocms.%I', table_name) INTO visible_count;
     expected_count := CASE WHEN table_name IN ('media_assets', 'media_originals', 'media_lifecycle_checkpoints') THEN 2 ELSE 1 END;
     IF visible_count <> expected_count THEN
@@ -51,6 +53,12 @@ BEGIN
       VALUES ('82500000-0000-4000-8000-000000000002', '82000000-0000-4000-8000-000000000002', '82200000-0000-4000-8000-000000000002', '82300000-0000-4000-8000-000000000002', concat('tenants/82000000-0000-4000-8000-000000000002/sites/82200000-0000-4000-8000-000000000002/originals/', repeat('b', 64)), 'schedule_delete', 'media-foreign-checkpoint-0001', 'scheduled', now() + interval '1 day');
     RAISE EXCEPTION 'foreign lifecycle write unexpectedly succeeded';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN
+    INSERT INTO navocms.media_variant_checkpoints
+      (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, storage_key, output_sha256, byte_size, media_type, width, height, preset_id, preset_version, transform_json, operation_key, status)
+      VALUES ('82500000-0000-4000-8000-000000000003', '82000000-0000-4000-8000-000000000002', '82200000-0000-4000-8000-000000000002', '82300000-0000-4000-8000-000000000002', repeat('b', 64), repeat('5', 64), concat('tenants/82000000-0000-4000-8000-000000000002/sites/82200000-0000-4000-8000-000000000002/variants/', repeat('5', 64)), repeat('4', 64), 1, 'image/webp', 1, 1, 'thumbnail', 'v1', '{}', 'media-variant-foreign-0001', 'effect_pending');
+    RAISE EXCEPTION 'foreign variant checkpoint write unexpectedly succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
 END
 $assertions$;
 RESET ROLE;
@@ -64,13 +72,19 @@ BEGIN
     IF SQLERRM <> 'verified media originals are immutable' THEN RAISE; END IF;
   END;
   BEGIN
-    INSERT INTO media_variants (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, sha256, storage_key, media_type, width, height, preset_version, transform_json)
-      VALUES ('82800000-0000-4000-8000-000000000002', '82000000-0000-4000-8000-000000000002', '82200000-0000-4000-8000-000000000002', '81300000-0000-4000-8000-000000000001', repeat('a', 64), repeat('e', 64), repeat('f', 64), concat('tenants/82000000-0000-4000-8000-000000000002/sites/82200000-0000-4000-8000-000000000002/variants/', repeat('e', 64)), 'image/webp', 1, 1, 'v1', '{}');
+    UPDATE media_variants SET preset_version = 'v2' WHERE id = '81500000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'immutable variant update unexpectedly succeeded';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'verified media variants are immutable' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO media_variants (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json)
+      VALUES ('82800000-0000-4000-8000-000000000002', '82000000-0000-4000-8000-000000000002', '82200000-0000-4000-8000-000000000002', '81300000-0000-4000-8000-000000000001', repeat('a', 64), repeat('e', 64), repeat('f', 64), concat('tenants/82000000-0000-4000-8000-000000000002/sites/82200000-0000-4000-8000-000000000002/variants/', repeat('e', 64)), 1, 'image/webp', 1, 1, 'thumbnail', 'v1', '{}');
     RAISE EXCEPTION 'cross-site foreign key unexpectedly succeeded';
   EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   BEGIN
-    INSERT INTO media_variants (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, sha256, storage_key, media_type, width, height, preset_version, transform_json)
-      VALUES ('82900000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', repeat('e', 64), repeat('9', 64), repeat('8', 64), concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/variants/', repeat('9', 64)), 'image/webp', 1, 1, 'v1', '{}');
+    INSERT INTO media_variants (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json)
+      VALUES ('82900000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000001', repeat('e', 64), repeat('9', 64), repeat('8', 64), concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/variants/', repeat('9', 64)), 1, 'image/webp', 1, 1, 'thumbnail', 'v1', '{}');
     RAISE EXCEPTION 'asset A and original B combination unexpectedly succeeded';
   EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   BEGIN
@@ -107,6 +121,12 @@ BEGIN
     INSERT INTO media_lifecycle_checkpoints (id, tenant_id, site_id, asset_id, storage_key, operation, operation_key, status, grace_until)
       VALUES ('83600000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', NULL, concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/originals/', repeat('7', 64)), 'reconcile_orphan', 'media-orphan-short-grace-0001', 'effect_pending', now() + interval '23 hours');
     RAISE EXCEPTION 'sub-24-hour orphan grace unexpectedly succeeded';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+  BEGIN
+    INSERT INTO media_variant_checkpoints
+      (id, tenant_id, site_id, asset_id, original_sha256, variant_identity, storage_key, output_sha256, byte_size, media_type, width, height, preset_id, preset_version, transform_json, operation_key, status)
+      VALUES ('83700000-0000-4000-8000-000000000001', '81000000-0000-4000-8000-000000000001', '81100000-0000-4000-8000-000000000001', '81300000-0000-4000-8000-000000000002', repeat('e', 64), repeat('3', 64), concat('tenants/81000000-0000-4000-8000-000000000001/sites/81100000-0000-4000-8000-000000000001/variants/', repeat('3', 64)), repeat('2', 64), 1, 'image/webp', 1, 1, 'thumbnail', 'v1', '{}', 'media-completed-without-time-0001', 'completed');
+    RAISE EXCEPTION 'completed checkpoint without timestamp unexpectedly succeeded';
   EXCEPTION WHEN check_violation THEN NULL; END;
 END
 $integrity$;

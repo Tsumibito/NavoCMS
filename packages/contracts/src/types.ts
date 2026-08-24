@@ -120,11 +120,14 @@ export interface MediaOriginal {
 
 export interface MediaVariant {
   readonly id: string;
+  readonly variantIdentity: string;
   readonly sha256: string;
   readonly storageKey: string;
+  readonly byteSize: number;
   readonly mediaType: "image/avif" | "image/webp" | "image/jpeg";
   readonly width: number;
   readonly height: number;
+  readonly presetId: string;
   readonly presetVersion: string;
   readonly transform: Readonly<Record<string, unknown>>;
 }
