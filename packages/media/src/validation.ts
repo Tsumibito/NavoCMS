@@ -44,7 +44,7 @@ export function inspectMedia(bytes: Uint8Array, mediaType = sniffMediaType(bytes
 export function assertSafeRemoteUrl(value: string): URL {
   let url: URL;
   try { url = new URL(value); } catch { throw reject("REMOTE_URL_INVALID", "Remote media URL is invalid"); }
-  if (url.protocol !== "https:" || url.username || url.password || url.port) throw reject("REMOTE_URL_FORBIDDEN", "Remote ingest only permits HTTPS default-port URLs");
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) throw reject("REMOTE_URL_FORBIDDEN", "Remote ingest only permits HTTPS default-port URLs without credentials or fragments");
   return url;
 }
 
@@ -75,20 +75,24 @@ function isGlobalIpv4(address: string): boolean {
   const parts = address.split(".").map(Number); const [a = -1, b = -1, c = -1] = parts;
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
   if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
-  if ((a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 0 || b === 168 || b === 2)) || (a === 198 && (b === 18 || b === 19 || b === 51)) || (a === 203 && b === 0 && c === 113)) return false;
+  if ((a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && ((b === 0 && (c === 0 || c === 2)) || b === 168 || (b === 88 && c === 99))) ||
+    (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113)) return false;
   return true;
 }
 
 function isGlobalIpv6(address: string): boolean {
   const groups = ipv6Groups(address);
   if (!groups) return false;
-  const [first = 0, second = 0] = groups;
+  const [first = 0, second = 0, third = 0] = groups;
   const mapped = groups.slice(0, 6).every((value, index) => value === (index === 5 ? 0xffff : 0));
   if (mapped) return isGlobalIpv4(`${groups[6]! >> 8}.${groups[6]! & 0xff}.${groups[7]! >> 8}.${groups[7]! & 0xff}`);
   // Global-unicast is 2000::/3. Everything else is unspecified, loopback,
   // link-local, ULA, multicast, documentation, or otherwise non-global.
   if (first < 0x2000 || first >= 0x4000) return false;
-  if (first === 0x2001 && second === 0x0db8) return false;
+  if (first === 0x2001 && (second === 0 || (second === 2 && third === 0) || second === 0x0db8)) return false;
+  if (first === 0x2002) return isGlobalIpv4(`${second >> 8}.${second & 0xff}.${third >> 8}.${third & 0xff}`);
+  if (first === 0x3fff && second < 0x1000) return false;
   return true;
 }
 
