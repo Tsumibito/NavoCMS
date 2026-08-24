@@ -628,7 +628,8 @@ async function verifiedAsset(repository: PostgresMediaRepository, storage: Local
 }
 
 async function verifiedSharpAsset(repository: PostgresMediaRepository, storage: LocalDeterministicMediaStorage, key: string) {
-  const bytes = new Uint8Array(await sharp({ create: { width: 80, height: 60, channels: 3, background: "#2468ac" } }).png().toBuffer());
+  const sourceColor = `#${createHash("sha256").update(key).digest("hex").slice(0, 6)}`;
+  const bytes = new Uint8Array(await sharp({ create: { width: 80, height: 60, channels: 3, background: sourceColor } }).png().toBuffer());
   const intent = uploadIntent(await repository.createUploadIntent(scope, createInput(key, "image/png", bytes)));
   await storage.putImmutable({ key: intent.storageKey, bytes, mediaType: "image/png" });
   const asset = await repository.finalizeUpload(scope, finalizeInput(intent, key));

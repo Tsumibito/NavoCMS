@@ -496,7 +496,7 @@ export class PostgresMediaRepository implements MediaRepository {
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${scope.tenantId}:${scope.siteId}:${identity}`]);
         const present = (await client.query<VariantRow>(
           `SELECT id, variant_identity, sha256, storage_key, byte_size, media_type, width, height, preset_id, preset_version, transform_json
-             FROM navocms.media_variants WHERE tenant_id = $1 AND site_id = $2 AND variant_identity = $3 FOR UPDATE`,
+             FROM navocms.media_variants WHERE tenant_id = $1 AND site_id = $2 AND variant_identity = $3`,
           [scope.tenantId, scope.siteId, identity]
         )).rows[0];
         if (present) {
