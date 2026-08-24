@@ -2,8 +2,10 @@
 
 ## Status
 
-Implementation is pending PostgreSQL CI and code review. This document does
-not declare the Sprint 8A.3 gate closed.
+The Sprint 8A.3 code gate is accepted. The retained PostgreSQL CI run applied
+all eight migrations, executed every test without skips, passed the media RLS
+and integrity suite, and built the production container. No provider or
+staging operational gate is claimed by this package.
 
 ## Implemented boundary
 
@@ -65,9 +67,10 @@ not declare the Sprint 8A.3 gate closed.
   79 passed, 20 PostgreSQL tests skipped locally, 5 visual tests passed.
 - Current full local `pnpm check`: 80 passed, 24 PostgreSQL tests skipped
   locally, 5 visual tests passed.
-- Required before acceptance: a retained GitHub Actions run with PostgreSQL
-  provisioning, migration `0008`, lifecycle integration tests, and isolation
-  suites all green with no skipped PostgreSQL tests.
+- Retained GitHub Actions evidence: [run 32750922886](https://github.com/Tsumibito/NavoCMS/actions/runs/32750922886)
+  passed with all 8 migrations applied, 27 test files and 104 tests passed
+  with no skips, 5 visual tests passed, Media isolation checks passed, and the
+  production container built.
 
 ## Deliberately not included
 
