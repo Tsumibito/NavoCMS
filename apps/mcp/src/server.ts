@@ -11,6 +11,8 @@ import {
 import { createMcpHttpServer } from "./http.js";
 import { environmentInteger } from "./config.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
+import { PostgresMediaRepository } from "@navocms/media";
+import { McpMediaService } from "./media-service.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider, InMemoryReleaseWorkflowRepository } from "./release-repository.js";
 import { InMemoryEditingRepository } from "./repository.js";
@@ -42,6 +44,10 @@ const database = databaseUrl ? new PostgresDatabase({
   } : {})
 }) : undefined;
 const identityResolver = database ? new PostgresIdentityResolver(database, deploymentScope) : undefined;
+// The pinned production profile deliberately has no media storage provider.
+// Read-only media review can still use PostgreSQL; upload tools require an
+// explicit future storage capability injection.
+const media = database ? new McpMediaService(new PostgresMediaRepository(database), { storageInjected: false }) : undefined;
 
 let service: McpEditingService;
 if (database) {
@@ -93,6 +99,7 @@ const verifier = new OidcJwtVerifier({
 });
 const server = createMcpHttpServer({
   service,
+  ...(media ? { media } : {}),
   verifier,
   resource,
   authorizationServers: [issuer],

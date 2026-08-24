@@ -32,4 +32,8 @@ describe("pinned embedded production profile", () => {
       manifest: { ...EMBEDDED_RELEASE_MANIFEST, metadata: { ...EMBEDDED_RELEASE_MANIFEST.metadata, version: "0.1.1" } }
     })).rejects.toMatchObject({ code: "PLUGIN_VERSION_MISMATCH" });
   });
+
+  it("does not activate a media storage provider in the pinned production profile", () => {
+    expect(EMBEDDED_PRODUCTION_PROFILE.spec.bindings.some(({ capability }) => capability === "media.storage")).toBe(false);
+  });
 });

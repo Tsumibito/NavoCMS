@@ -8,7 +8,11 @@ import type {
   CreateUploadResult,
   FinalizeUploadInput,
   MediaAssetSummary,
+  MediaAssetReview,
+  MediaAssetPage,
   MediaReferenceInput,
+  MediaReferencePage,
+  MediaReferenceSummary,
   MediaRepository,
   MediaScope,
   RejectMediaAssetInput
@@ -26,6 +30,19 @@ interface AssetRow extends Record<string, unknown> {
   readonly media_type: "image/jpeg" | "image/png" | null;
   readonly width: number | null;
   readonly height: number | null;
+}
+
+interface ReviewRow extends AssetRow {
+  readonly provenance_json: Readonly<Record<string, unknown>>;
+  readonly rights_json: Readonly<Record<string, unknown>>;
+}
+
+interface ReferenceRow extends Record<string, unknown> {
+  readonly id: string;
+  readonly owner_type: string;
+  readonly owner_id: string;
+  readonly purpose: string;
+  readonly created_at: Date | string;
 }
 
 interface IntentRow extends Record<string, unknown> {
@@ -51,13 +68,13 @@ const MAX_EVENT_IDEMPOTENCY_KEY_LENGTH = 200;
  */
 export class PostgresMediaRepository implements MediaRepository {
   readonly #database: PostgresDatabase;
-  readonly #storage: MediaStorage;
+  readonly #storage: MediaStorage | undefined;
   readonly #idempotency: PostgresIdempotencyStore;
   readonly #events: EventStore;
 
   public constructor(
     database: PostgresDatabase,
-    storage: MediaStorage,
+    storage?: MediaStorage,
     idempotency: PostgresIdempotencyStore = new PostgresIdempotencyStore(database),
     events: EventStore = new PostgresEventStore(database)
   ) {
@@ -125,6 +142,7 @@ export class PostgresMediaRepository implements MediaRepository {
     }
     if (new Date(preflight.expires_at).getTime() <= Date.now()) throw new Error("MEDIA_INTENT_EXPIRED");
     if (preflight.storage_key !== input.uploadedStorageKey) throw new Error("MEDIA_FINALIZATION_MISMATCH");
+    if (!this.#storage) throw new Error("MEDIA_STORAGE_UNAVAILABLE");
     const header = await this.#storage.head(input.uploadedStorageKey);
     if (!header) throw new Error("MEDIA_UPLOAD_OBJECT_NOT_FOUND");
     if (header.byteSize !== Number(preflight.expected_size) || header.byteSize > MEDIA_LIMITS.maxBytes) throw new Error("MEDIA_STORAGE_SIZE_MISMATCH");
@@ -242,12 +260,58 @@ export class PostgresMediaRepository implements MediaRepository {
     return rows[0] ? toAsset(rows[0]) : undefined;
   }
 
-  public async listAssets(scope: MediaScope, limit: number): Promise<readonly MediaAssetSummary[]> {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("MEDIA_LIST_LIMIT_INVALID");
+  public async getAssetReview(scope: MediaScope, assetId: string, referenceLimit: number): Promise<MediaAssetReview | undefined> {
+    assertReadLimit(referenceLimit);
+    const row = await this.#database.withScope(scope, async (client) => (
+      await client.query<ReviewRow>(
+        `${assetSelect("a.provenance_json, a.rights_json")} WHERE a.tenant_id = $1 AND a.site_id = $2 AND a.id = $3`,
+        [scope.tenantId, scope.siteId, assetId]
+      )).rows[0]
+    );
+    if (!row) return undefined;
+    const referencePage = await this.listReferences(scope, assetId, referenceLimit);
+    return Object.freeze({ ...toAsset(row), provenance: Object.freeze({ ...row.provenance_json }), rights: Object.freeze({ ...row.rights_json }), references: referencePage.references });
+  }
+
+  public async listAssets(scope: MediaScope, limit: number, cursor?: string): Promise<MediaAssetPage> {
+    assertReadLimit(limit);
+    assertCursor(cursor);
     const rows = await this.#database.withScope(scope, async (client) => (
-      await client.query<AssetRow>(`${assetSelect()} WHERE a.tenant_id = $1 AND a.site_id = $2 ORDER BY a.created_at DESC LIMIT $3`, [scope.tenantId, scope.siteId, limit])
+      await client.query<AssetRow>(
+        `${assetSelect()}
+          WHERE a.tenant_id = $1 AND a.site_id = $2
+            AND ($4::uuid IS NULL OR (a.created_at, a.id) < (
+              SELECT cursor_asset.created_at, cursor_asset.id FROM navocms.media_assets cursor_asset
+               WHERE cursor_asset.tenant_id = $1 AND cursor_asset.site_id = $2 AND cursor_asset.id = $4
+            ))
+          ORDER BY a.created_at DESC, a.id DESC LIMIT $3`,
+        [scope.tenantId, scope.siteId, limit + 1, cursor ?? null]
+      )
     ).rows);
-    return Object.freeze(rows.map(toAsset));
+    const assets = rows.slice(0, limit).map(toAsset);
+    return Object.freeze({ assets: Object.freeze(assets), ...(rows.length > limit ? { nextCursor: assets.at(-1)!.id } : {}) });
+  }
+
+  public async listReferences(scope: MediaScope, assetId: string, limit: number, cursor?: string): Promise<MediaReferencePage> {
+    assertReadLimit(limit);
+    assertCursor(cursor);
+    const rows = await this.#database.withScope(scope, async (client) => (
+      await client.query<ReferenceRow>(
+        `SELECT reference.id, reference.owner_type, reference.owner_id, reference.purpose, reference.created_at
+           FROM navocms.media_references reference
+          WHERE reference.tenant_id = $1 AND reference.site_id = $2 AND reference.asset_id = $3
+            AND reference.deleted_at IS NULL
+            AND ($5::uuid IS NULL OR (reference.created_at, reference.id) < (
+              SELECT cursor_reference.created_at, cursor_reference.id FROM navocms.media_references cursor_reference
+               WHERE cursor_reference.tenant_id = $1 AND cursor_reference.site_id = $2
+                 AND cursor_reference.asset_id = $3 AND cursor_reference.id = $5
+            ))
+          ORDER BY reference.created_at DESC, reference.id DESC LIMIT $4`,
+        [scope.tenantId, scope.siteId, assetId, limit + 1, cursor ?? null]
+      )).rows
+    );
+    const references = rows.slice(0, limit).map(toReference);
+    return Object.freeze({ references: Object.freeze(references), ...(rows.length > limit ? { nextCursor: references.at(-1)!.id } : {}) });
   }
 
   public async createReference(scope: MediaScope, input: MediaReferenceInput): Promise<{ readonly id: string }> {
@@ -350,10 +414,24 @@ export class PostgresMediaRepository implements MediaRepository {
   }
 }
 
-function assetSelect(): string {
-  return `SELECT a.id, a.state, a.created_at, a.rejection_reason, o.sha256, o.byte_size, o.media_type, o.width, o.height
+function assetSelect(extra = ""): string {
+  return `SELECT a.id, a.state, a.created_at, a.rejection_reason, o.sha256, o.byte_size, o.media_type, o.width, o.height${extra ? `, ${extra}` : ""}
     FROM navocms.media_assets a LEFT JOIN navocms.media_originals o
       ON o.tenant_id = a.tenant_id AND o.site_id = a.site_id AND o.asset_id = a.id`;
+}
+
+function assertReadLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("MEDIA_LIST_LIMIT_INVALID");
+}
+
+function assertCursor(cursor: string | undefined): void {
+  if (cursor !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cursor)) {
+    throw new Error("MEDIA_CURSOR_INVALID");
+  }
+}
+
+function toReference(row: ReferenceRow): MediaReferenceSummary {
+  return Object.freeze({ id: row.id, ownerType: row.owner_type, ownerId: row.owner_id, purpose: row.purpose, createdAt: new Date(row.created_at).toISOString() });
 }
 
 function toAsset(row: AssetRow): MediaAssetSummary {

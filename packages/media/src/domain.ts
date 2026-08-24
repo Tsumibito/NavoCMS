@@ -20,6 +20,30 @@ export interface MediaAssetSummary {
   readonly createdAt: string;
 }
 
+export interface MediaReferenceSummary {
+  readonly id: string;
+  readonly ownerType: string;
+  readonly ownerId: string;
+  readonly purpose: string;
+  readonly createdAt: string;
+}
+
+export interface MediaAssetReview extends MediaAssetSummary {
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly rights: Readonly<Record<string, unknown>>;
+  readonly references: readonly MediaReferenceSummary[];
+}
+
+export interface MediaAssetPage {
+  readonly assets: readonly MediaAssetSummary[];
+  readonly nextCursor?: string;
+}
+
+export interface MediaReferencePage {
+  readonly references: readonly MediaReferenceSummary[];
+  readonly nextCursor?: string;
+}
+
 export interface CreateUploadIntentInput {
   readonly idempotencyKey: string;
   readonly expectedSha256: string;
@@ -70,7 +94,9 @@ export interface MediaRepository {
   createUploadIntent(scope: MediaScope, input: CreateUploadIntentInput): Promise<CreateUploadResult>;
   finalizeUpload(scope: MediaScope, input: FinalizeUploadInput): Promise<MediaAssetSummary>;
   getAsset(scope: MediaScope, assetId: string): Promise<MediaAssetSummary | undefined>;
-  listAssets(scope: MediaScope, limit: number): Promise<readonly MediaAssetSummary[]>;
+  getAssetReview(scope: MediaScope, assetId: string, referenceLimit: number): Promise<MediaAssetReview | undefined>;
+  listAssets(scope: MediaScope, limit: number, cursor?: string): Promise<MediaAssetPage>;
+  listReferences(scope: MediaScope, assetId: string, limit: number, cursor?: string): Promise<MediaReferencePage>;
   createReference(scope: MediaScope, input: MediaReferenceInput): Promise<{ readonly id: string }>;
   removeReference(scope: MediaScope, referenceId: string, idempotencyKey: string): Promise<void>;
   rejectAsset(scope: MediaScope, input: RejectMediaAssetInput): Promise<MediaAssetSummary>;

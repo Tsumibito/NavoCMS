@@ -85,6 +85,9 @@ importers:
       '@navocms/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+      '@navocms/media':
+        specifier: workspace:*
+        version: link:../../packages/media
       '@navocms/persistence-postgres':
         specifier: workspace:*
         version: link:../../packages/persistence-postgres
