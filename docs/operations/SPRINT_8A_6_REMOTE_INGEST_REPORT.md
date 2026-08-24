@@ -37,6 +37,8 @@ from the production profile and MCP discovery.
 - [GitHub run 32767769045](https://github.com/Tsumibito/NavoCMS/actions/runs/32767769045)
   passed on code head `7c6fc5b`: 30/30 test files and 133/133 tests with no
   skipped PostgreSQL scenarios, plus 5/5 visual tests;
+- post-merge [run 32768204792](https://github.com/Tsumibito/NavoCMS/actions/runs/32768204792)
+  passed on `main` merge commit `1aaf23f`;
 - PostgreSQL tenant RLS and media isolation suites passed;
 - the production container build passed;
 - no external storage or remote-ingest production activation was introduced.

@@ -2,7 +2,11 @@
 
 ## Status
 
-Green PostgreSQL CI evidence is retained in [Quality checks run 32764058586](https://github.com/Tsumibito/NavoCMS/actions/runs/32764058586): provider and PostgreSQL integration tests ran without skips, the media RLS isolation suite passed, and the production container built. The PR head is being revalidated after recording this evidence; this report does not independently close the Sprint 8A.5 gate.
+Accepted. [PR #27](https://github.com/Tsumibito/NavoCMS/pull/27) and post-merge
+[run 32765051398](https://github.com/Tsumibito/NavoCMS/actions/runs/32765051398)
+are green: 29 test files / 123 tests ran without skips, PostgreSQL tenant and
+media isolation passed, and the production container built. No external
+storage provider was activated in the production profile.
 
 ## First package
 
@@ -33,7 +37,7 @@ server-side; no such enforcement is claimed. Finalize's bounded
 body/checksum/MIME/size/dimensions validation is the only authoritative
 acceptance point.
 
-## Required evidence before closure
+## Closure evidence
 
 - retained GitHub PostgreSQL CI with no skipped provider/integration tests;
 - production-container build;
