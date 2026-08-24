@@ -207,11 +207,14 @@ export class PostgresEditingRepository implements EditingRepository {
       const provenance: RevisionProvenance = Object.freeze({
         kind: "agent", actorId: input.actorId, note: "Patched through MCP"
       });
+      const metadata = typeof base.metadata.body === "string"
+        ? Object.freeze({ ...base.metadata, body: patched.source })
+        : base.metadata;
       const revision: ContentRevision = Object.freeze({
         id: randomUUID(), tenantId: input.site.tenantId, siteId: input.site.siteId,
         documentId: base.documentId, variantId: base.variantId, number: nextNumber,
         parentRevisionId: base.id, source: patched.source, sourceHash: patched.sourceHash,
-        ast: patched.ast, metadata: base.metadata, provenance,
+        ast: patched.ast, metadata, provenance,
         createdAt: new Date().toISOString()
       });
       await insertRevision(client, revision, input.actorId);

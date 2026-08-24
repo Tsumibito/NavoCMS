@@ -14,6 +14,7 @@ import type {
   CreateReleaseInput,
   PreviewDocument,
   PublicationRecord,
+  ReleaseApprovalInput,
   ReleaseWorkflowRepository,
   StoredRelease
 } from "./release-repository.js";
@@ -25,6 +26,7 @@ interface ReleaseRow extends Record<string, unknown> {
   readonly workflow_key: string;
   readonly release_hash: string;
   readonly artifact_hash: string;
+  readonly correlation_id: string;
   readonly manifest_json: StoredRelease["manifest"];
   readonly artifact_json: StoredRelease["artifact"];
   readonly status: ReleaseStatus;
@@ -75,15 +77,15 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
       const result = await client.query<ReleaseRow>(
         `INSERT INTO navocms.release_candidates (
            id, tenant_id, site_id, environment_id, revision_id, workflow_key,
-           release_hash, artifact_hash, manifest_json, artifact_json, status,
+           release_hash, artifact_hash, correlation_id, manifest_json, artifact_json, status,
            created_by, created_at, updated_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'previewed',$11,$12,$12)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,'previewed',$12,$13,$13)
          ON CONFLICT (tenant_id, site_id, release_hash) DO UPDATE
            SET updated_at = navocms.release_candidates.updated_at
-         RETURNING id, environment_id, revision_id, workflow_key, release_hash,
+        RETURNING id, environment_id, revision_id, workflow_key, release_hash, correlation_id,
                    artifact_hash, manifest_json, artifact_json, status, created_at, updated_at`,
         [releaseId, input.context.site.tenantId, input.context.site.siteId, environmentId,
-          input.revisionId, input.workflow, input.releaseHash, input.artifact.hash,
+          input.revisionId, input.workflow, input.releaseHash, input.artifact.hash, input.correlationId,
           JSON.stringify(input.manifest), JSON.stringify(input.artifact), uuidOrNull(input.context.principalId), now]
       );
       const release = result.rows[0]!;
@@ -125,9 +127,14 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
     return this.#database.withScope(databaseScope(context), async (client) => toRelease(await requireRelease(client, context, releaseId)));
   }
 
-  public async approve(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<StoredRelease> {
+  public async approve(context: RepositoryContext, releaseId: string, releaseHash: string, approval: ReleaseApprovalInput): Promise<StoredRelease> {
     return this.#database.withScope(databaseScope(context), async (client) => {
       const release = await requireExactRelease(client, context, releaseId, releaseHash, true);
+      if (approval.actorKind !== "human" || approval.scope.tenantId !== context.site.tenantId ||
+        approval.scope.siteId !== context.site.siteId || approval.scope.environmentId !== release.environment_id ||
+        new Date(approval.expiresAt).getTime() <= Date.now() || !isUuid(context.principalId)) {
+        throw new McpEditingError("RELEASE_APPROVAL_INVALID", "Approval must be current, human, and scoped to this exact release");
+      }
       if (release.status !== "approved") {
         releaseTransition(release.status, "approved");
         await client.query(
@@ -137,9 +144,12 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
         );
         await client.query(
           `INSERT INTO navocms.release_approvals (
-             id, tenant_id, site_id, release_id, release_hash, approved_by
-           ) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-          [randomUUID(), context.site.tenantId, context.site.siteId, releaseId, releaseHash, uuidOrNull(context.principalId)]
+             id, tenant_id, site_id, release_id, release_hash, approved_by,
+             actor_kind, policy_version, evidence_json, scope_json, expires_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,'human',$7,$8::jsonb,$9::jsonb,$10) ON CONFLICT DO NOTHING`,
+          [randomUUID(), context.site.tenantId, context.site.siteId, releaseId, releaseHash,
+            uuidOrNull(context.principalId), approval.policyVersion, JSON.stringify(approval.evidence),
+            JSON.stringify(approval.scope), approval.expiresAt]
         );
       }
       return toRelease(await requireRelease(client, context, releaseId, false, true));
@@ -149,6 +159,7 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
   public async beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string) {
     return this.#database.withScope(databaseScope(context), async (client) => {
       const release = await requireExactRelease(client, context, releaseId, releaseHash, true);
+      await requireCurrentHumanApproval(client, context, release);
       if (release.status !== "publishing") {
         releaseTransition(release.status, "publishing");
         await client.query(
@@ -313,7 +324,7 @@ async function requireRelease(client: SqlClient, context: RepositoryContext, rel
   if (!isUuid(releaseId)) throw new McpEditingError("RELEASE_NOT_FOUND", "Release was not found in the authorized site");
   const row = (await client.query<ReleaseRow>(
     `SELECT c.id, c.environment_id, c.revision_id, c.workflow_key, c.release_hash,
-            c.artifact_hash, c.manifest_json, c.artifact_json, c.status,
+            c.artifact_hash, c.correlation_id, c.manifest_json, c.artifact_json, c.status,
             c.created_at, c.updated_at
             ${withTimes ? ", a.approved_at, p.verified_at AS published_at" : ""}
        FROM navocms.release_candidates c
@@ -329,6 +340,21 @@ async function requireExactRelease(client: SqlClient, context: RepositoryContext
   const release = await requireRelease(client, context, releaseId, lock);
   if (release.release_hash !== releaseHash) throw new McpEditingError("STALE_RELEASE_APPROVAL", "Release hash does not match the previewed candidate");
   return release;
+}
+
+async function requireCurrentHumanApproval(client: SqlClient, context: RepositoryContext, release: ReleaseRow): Promise<void> {
+  const approval = (await client.query<{ present: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1 FROM navocms.release_approvals
+        WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND release_hash = $4
+          AND actor_kind = 'human' AND revoked_at IS NULL AND expires_at > now()
+          AND scope_json->>'environmentId' = $5
+     ) AS present`,
+    [context.site.tenantId, context.site.siteId, release.id, release.release_hash, release.environment_id]
+  )).rows[0];
+  if (!approval?.present) {
+    throw new McpEditingError("RELEASE_APPROVAL_EXPIRED", "A current human approval is required before publication");
+  }
 }
 
 async function activePublication(client: SqlClient, context: RepositoryContext, environmentId: string): Promise<PublicationRow | undefined> {
@@ -427,6 +453,7 @@ function toRelease(row: ReleaseRow): StoredRelease {
     workflow: row.workflow_key,
     releaseHash: row.release_hash,
     artifactHash: row.artifact_hash,
+    correlationId: row.correlation_id,
     status: row.status,
     manifest: Object.freeze(row.manifest_json),
     artifact: Object.freeze(row.artifact_json),

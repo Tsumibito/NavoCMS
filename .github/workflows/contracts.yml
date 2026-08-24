@@ -47,7 +47,39 @@ jobs:
       - name: Install catalogue browser
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Validate contracts, boundaries, build, and tests
+      - name: Provision the PostgreSQL persistence suite
+        env:
+          NODE_ENV: test
+          NAVOCMS_ALLOW_INSECURE_TEST_DATABASE: "true"
+          NAVOCMS_MIGRATION_DATABASE_URL: postgresql://postgres:navocms_test@127.0.0.1:5432/navocms_test?sslmode=disable
+          NAVOCMS_RUNTIME_DATABASE_PASSWORD: navocms_ci_runtime_password_0123456789
+          NAVOCMS_BOOTSTRAP_TENANT_ID: a2af348f-58b8-4efe-b873-8bd032ecbc5c
+          NAVOCMS_BOOTSTRAP_TENANT_SLUG: sprint-seven
+          NAVOCMS_BOOTSTRAP_TENANT_NAME: Sprint Seven Integration
+          NAVOCMS_BOOTSTRAP_SITE_ID: 2e0bcd4f-6780-470c-844b-d72abb6737ca
+          NAVOCMS_BOOTSTRAP_SITE_SLUG: persistence-suite
+          NAVOCMS_BOOTSTRAP_SITE_NAME: Persistence suite
+          NAVOCMS_BOOTSTRAP_PRIMARY_LOCALE: en
+          NAVOCMS_BOOTSTRAP_LOCALES: en
+          NAVOCMS_BOOTSTRAP_ENVIRONMENT_ID: 7b0c4135-7015-4afd-9d6c-1ee4b2d974f1
+          NAVOCMS_BOOTSTRAP_ENVIRONMENT_KIND: staging
+          NAVOCMS_BOOTSTRAP_ENVIRONMENT_KEY: default
+          NAVOCMS_BOOTSTRAP_PRINCIPAL_ID: 016ef382-bf28-406b-9321-1fc580b6ea00
+          NAVOCMS_BOOTSTRAP_PRINCIPAL_ISSUER: urn:navocms:integration
+          NAVOCMS_BOOTSTRAP_PRINCIPAL_SUBJECT: sprint-6
+          NAVOCMS_BOOTSTRAP_PRINCIPAL_KIND: human
+          NAVOCMS_BOOTSTRAP_SITE_ROLE: owner
+        run: |
+          pnpm db:migrate
+          pnpm db:provision-runtime
+          pnpm db:bootstrap-site
+
+      - name: Validate contracts, production wiring, and all test suites
+        env:
+          NODE_ENV: test
+          NAVOCMS_ALLOW_INSECURE_TEST_DATABASE: "true"
+          NAVOCMS_INTEGRATION_DATABASE_URL: postgresql://navocms_runtime:navocms_ci_runtime_password_0123456789@127.0.0.1:5432/navocms_test?sslmode=disable
+          NAVOCMS_INTEGRATION_ADMIN_DATABASE_URL: postgresql://postgres:navocms_test@127.0.0.1:5432/navocms_test?sslmode=disable
         run: pnpm check
 
       - name: Verify PostgreSQL tenant isolation
@@ -55,17 +87,13 @@ jobs:
           PGPASSWORD: navocms_test
         run: |
           psql -h 127.0.0.1 -U postgres -d navocms_test \
-            -f packages/persistence-postgres/migrations/0001_multitenancy_and_rls.sql
-          psql -h 127.0.0.1 -U postgres -d navocms_test \
             -f packages/persistence-postgres/tests/rls-isolation.sql
-          psql -h 127.0.0.1 -U postgres -d navocms_test \
-            -f packages/persistence-postgres/migrations/0002_content_engine.sql
           psql -h 127.0.0.1 -U postgres -d navocms_test \
             -f packages/persistence-postgres/tests/content-isolation.sql
           psql -h 127.0.0.1 -U postgres -d navocms_test \
-            -f packages/persistence-postgres/migrations/0003_runtime_foundation.sql
-          psql -h 127.0.0.1 -U postgres -d navocms_test \
             -f packages/persistence-postgres/tests/runtime-isolation.sql
+          psql -h 127.0.0.1 -U postgres -d navocms_test \
+            -f packages/persistence-postgres/tests/release-workflow-isolation.sql
 
       - name: Build production container
         run: docker build --tag navocms:${{ github.sha }} .

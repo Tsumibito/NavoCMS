@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { canonicalMarkdown, parseMarkdown } from "./markdown.js";
-import { applyStructuralPatch } from "./patches.js";
+import { applyStructuralPatch, compareMarkdown } from "./patches.js";
 
 const directives = [
   { name: "callout", kind: "containerDirective", allowedAttributes: ["tone"] },
@@ -45,5 +45,14 @@ describe("canonical Markdown and structural patches", () => {
         operations: [{ op: "replaceText", nodeId: target!.id, value: "Stale" }]
       })
     ).toThrow(/changed after the patch/);
+  });
+
+  it("bounds adversarial large-document comparisons without a quadratic matrix", () => {
+    const from = Array.from({ length: 30_000 }, (_, index) => `before ${index}`).join("\n");
+    const to = Array.from({ length: 30_000 }, (_, index) => `after ${index}`).join("\n");
+    const started = performance.now();
+    const diff = compareMarkdown(from, to);
+    expect(diff.lines).toHaveLength(60_000);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });

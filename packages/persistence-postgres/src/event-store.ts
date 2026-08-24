@@ -43,12 +43,24 @@ export class PostgresEventStore {
       const result = await client.query<EventRow>(
         `INSERT INTO navocms.event_ledger (
            event_id, tenant_id, site_id, correlation_id, event_type,
-           idempotency_key, event_json, occurred_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+           operation_key, idempotency_key, event_json, occurred_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
          RETURNING sequence, event_json`,
         [event.id, event.navotenantid, event.navositeid, event.navocorrelationid, event.type,
-          event.navoidempotencykey ?? null, JSON.stringify(event), event.time]
+          event.type, event.navoidempotencykey ?? null, JSON.stringify(event), event.time]
       );
+      if (event.navoidempotencykey) {
+        await client.query(
+          `INSERT INTO navocms.domain_outbox (
+             id, tenant_id, site_id, correlation_id, causation_id, operation_key,
+             event_type, consequence, idempotency_key, payload_json
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+           ON CONFLICT (tenant_id, site_id, operation_key, idempotency_key) DO NOTHING`,
+          [event.id, event.navotenantid, event.navositeid, event.navocorrelationid,
+            event.navocausationid ?? null, event.type, event.type, event.navoconsequence,
+            event.navoidempotencykey, JSON.stringify(event)]
+        );
+      }
       const row = result.rows[0]!;
       const stored = contracts.event.parse(row.event_json) as DomainEvent<TData>;
       return Object.freeze({ sequence: Number(row.sequence), event: Object.freeze(stored) });

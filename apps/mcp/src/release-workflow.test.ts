@@ -20,6 +20,27 @@ const site = Object.freeze({
 });
 
 describe("durable release workflow", () => {
+  it("rejects non-human approval even when the caller has publish permission", async () => {
+    const repository = new InMemoryEditingRepository();
+    repository.registerSite(site);
+    const service = new McpEditingService(repository);
+    const human = requestContext();
+    const created = await service.createDraft(human, {
+      typeName: "article", slug: "human-approval", locale: "en", title: "Human approval",
+      markdown: "# Human approval\n", idempotencyKey: "draft-human-approval-001"
+    }) as { draft: { revisionId: string } };
+    const preview = await service.preparePreview(human, created.draft.revisionId, "preview-human-approval-001");
+    const agent = {
+      authorization: {
+        ...human.authorization,
+        principal: { ...human.authorization.principal, kind: "agent" as const }
+      }
+    };
+    await expect(service.approveRelease(agent, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "approve-agent-denied-001"
+    })).rejects.toMatchObject({ code: "HUMAN_APPROVAL_REQUIRED" });
+  });
+
   it("reconciles a partial verification without duplicate publish and rolls back", async () => {
     const provider = new RecoverableProvider();
     const repository = new InMemoryEditingRepository();
