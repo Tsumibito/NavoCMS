@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v0alpha1/media-asset.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "navocms.io/v0alpha1" }, "kind": { "const": "MediaAsset" },
+    "metadata": { "type": "object", "additionalProperties": false, "required": ["id", "tenantId", "siteId", "createdAt"], "properties": { "id": { "type": "string", "format": "uuid" }, "tenantId": { "type": "string", "format": "uuid" }, "siteId": { "type": "string", "format": "uuid" }, "createdAt": { "type": "string", "format": "date-time" } } },
+    "spec": { "type": "object", "additionalProperties": false, "required": ["state", "variants", "provenance", "rights"], "properties": {
+      "state": { "enum": ["pending", "quarantined", "verified", "processing", "ready", "rejected", "deleted"] },
+      "original": { "$ref": "#/$defs/original" }, "variants": { "type": "array", "items": { "$ref": "#/$defs/variant" } },
+      "provenance": { "$ref": "#/$defs/provenance" }, "rights": { "$ref": "#/$defs/rights" },
+      "rejectionReason": { "type": "string", "minLength": 1, "maxLength": 500 }
+    } }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "original": { "type": "object", "additionalProperties": false, "required": ["sha256", "byteSize", "mediaType", "storageKey"], "dependentRequired": { "width": ["height"], "height": ["width"] }, "properties": { "sha256": { "$ref": "#/$defs/sha" }, "byteSize": { "type": "integer", "minimum": 1 }, "mediaType": { "enum": ["image/jpeg", "image/png"] }, "storageKey": { "type": "string", "pattern": "^tenants/[0-9a-f-]+/sites/[0-9a-f-]+/originals/[a-f0-9]{64}$" }, "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1 } } },
+    "variant": { "type": "object", "additionalProperties": false, "required": ["id", "sha256", "storageKey", "mediaType", "width", "height", "presetVersion", "transform"], "properties": { "id": { "type": "string", "format": "uuid" }, "sha256": { "$ref": "#/$defs/sha" }, "storageKey": { "type": "string", "pattern": "^tenants/[0-9a-f-]+/sites/[0-9a-f-]+/variants/[a-f0-9]{64}$" }, "mediaType": { "enum": ["image/avif", "image/webp", "image/jpeg"] }, "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 }, "presetVersion": { "type": "string", "minLength": 1 }, "transform": { "type": "object" } } },
+    "provenance": { "type": "object", "additionalProperties": false, "required": ["kind", "receivedAt", "receivedBy"], "properties": { "kind": { "enum": ["upload", "remote-ingest", "import"] }, "sourceUrl": { "type": "string", "format": "uri" }, "receivedAt": { "type": "string", "format": "date-time" }, "receivedBy": { "type": "string", "format": "uuid" } } },
+    "rights": { "type": "object", "additionalProperties": false, "required": ["license", "restricted"], "properties": { "license": { "type": "string", "minLength": 1, "maxLength": 200 }, "holder": { "type": "string", "maxLength": 200 }, "expiresAt": { "type": "string", "format": "date-time" }, "restricted": { "type": "boolean" } } }
+  }
+}

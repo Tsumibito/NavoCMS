@@ -25,7 +25,8 @@ const ISOLATED_APPLICATION_TABLES = [
   "content_revisions", "content_relations",
   "event_ledger", "idempotency_records", "runtime_jobs", "runtime_leases", "domain_outbox",
   "release_candidates", "release_previews", "release_approvals", "workflow_runs",
-  "workflow_checkpoints", "release_publications", "quota_limits", "kill_switches", "usage_events"
+  "workflow_checkpoints", "release_publications", "quota_limits", "kill_switches", "usage_events",
+  "media_assets", "media_originals", "media_variants", "media_references", "media_upload_intents", "media_gc_candidates"
 ] as const;
 
 export class PostgresDatabase {

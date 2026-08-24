@@ -92,6 +92,65 @@ export interface SiteProfile {
   };
 }
 
+export type MediaAssetState = "pending" | "quarantined" | "verified" | "processing" | "ready" | "rejected" | "deleted";
+
+export interface MediaRights {
+  readonly license: string;
+  readonly holder?: string;
+  readonly expiresAt?: string;
+  readonly restricted: boolean;
+}
+
+export interface MediaProvenance {
+  readonly kind: "upload" | "remote-ingest" | "import";
+  readonly sourceUrl?: string;
+  readonly receivedAt: string;
+  readonly receivedBy: string;
+}
+
+export interface MediaOriginal {
+  readonly sha256: string;
+  readonly byteSize: number;
+  readonly mediaType: "image/jpeg" | "image/png";
+  readonly storageKey: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly frames?: number;
+}
+
+export interface MediaVariant {
+  readonly id: string;
+  readonly sha256: string;
+  readonly storageKey: string;
+  readonly mediaType: "image/avif" | "image/webp" | "image/jpeg";
+  readonly width: number;
+  readonly height: number;
+  readonly presetVersion: string;
+  readonly transform: Readonly<Record<string, unknown>>;
+}
+
+export interface MediaReference {
+  readonly id: string;
+  readonly assetId: string;
+  readonly ownerType: string;
+  readonly ownerId: string;
+  readonly purpose: string;
+}
+
+export interface MediaAsset {
+  readonly apiVersion: NavoApiVersion;
+  readonly kind: "MediaAsset";
+  readonly metadata: { readonly id: string; readonly tenantId: string; readonly siteId: string; readonly createdAt: string };
+  readonly spec: {
+    readonly state: MediaAssetState;
+    readonly original?: MediaOriginal;
+    readonly variants: readonly MediaVariant[];
+    readonly provenance: MediaProvenance;
+    readonly rights: MediaRights;
+    readonly rejectionReason?: string;
+  };
+}
+
 export interface ContentTypeDefinition {
   readonly apiVersion: NavoApiVersion;
   readonly kind: "ContentType";
