@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { DomainEventFactory, type EventStore } from "@navocms/kernel";
-import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
+import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore, type SqlClient } from "@navocms/persistence-postgres";
 
 import type {
   CreateUploadIntentInput,
@@ -15,9 +15,13 @@ import type {
   MediaReferenceSummary,
   MediaRepository,
   MediaScope,
-  RejectMediaAssetInput
+  RejectMediaAssetInput,
+  ScheduleMediaDeleteInput,
+  MediaLifecycleInput,
+  ReconcileMediaInput,
+  MediaReconciliationResult
 } from "./domain.js";
-import { originalKey, sha256, type MediaStorage } from "./storage.js";
+import { assertOriginalKey, originalKey, originalPrefix, sha256, type MediaStorage } from "./storage.js";
 import { inspectMedia, MEDIA_LIMITS, verifyUpload } from "./validation.js";
 
 interface AssetRow extends Record<string, unknown> {
@@ -56,10 +60,26 @@ interface IntentRow extends Record<string, unknown> {
   readonly finalized_at: Date | string | null;
 }
 
+interface LifecycleOriginalRow extends Record<string, unknown> {
+  readonly id: string;
+  readonly state: MediaAssetSummary["state"];
+  readonly storage_key: string;
+  readonly recoverable_until: Date | string | null;
+  readonly deleted_at: Date | string | null;
+}
+
+interface OriginalInventoryRow extends Record<string, unknown> {
+  readonly asset_id: string;
+  readonly sha256: string;
+  readonly storage_key: string;
+  readonly state: MediaAssetSummary["state"];
+}
+
 const MAX_INTENT_TTL_MS = 15 * 60 * 1000;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const MAX_METADATA_BYTES = 8 * 1024;
 const MAX_EVENT_IDEMPOTENCY_KEY_LENGTH = 200;
+const MIN_DELETE_GRACE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Finalization reads and validates the temporary object before it begins the
@@ -366,6 +386,316 @@ export class PostgresMediaRepository implements MediaRepository {
     });
   }
 
+  /**
+   * Marks an unreferenced asset as deleted and persists the mandatory grace
+   * checkpoint before any provider effect.  Recoverable deletion is a second,
+   * retryable operation so SQL never attempts to include object storage in its
+   * transaction.
+   */
+  public async scheduleDelete(scope: MediaScope, input: ScheduleMediaDeleteInput): Promise<MediaAssetSummary> {
+    assertIdempotencyKey(input.idempotencyKey);
+    // Keep a small clock-skew margin above the database-enforced 24-hour floor.
+    const graceUntil = new Date(Date.now() + MIN_DELETE_GRACE_MS + 60_000);
+    return this.idempotent(scope, "media_delete_schedule", input.idempotencyKey, input, async () => {
+      const row = await this.#database.withScope(scope, async (client) => {
+        const original = (await client.query<LifecycleOriginalRow>(
+          `SELECT a.id, a.state, o.storage_key, NULL::timestamptz AS recoverable_until, a.deleted_at
+             FROM navocms.media_assets a JOIN navocms.media_originals o
+               ON o.tenant_id = a.tenant_id AND o.site_id = a.site_id AND o.asset_id = a.id
+            WHERE a.tenant_id = $1 AND a.site_id = $2 AND a.id = $3 FOR UPDATE`,
+          [scope.tenantId, scope.siteId, input.assetId]
+        )).rows[0];
+        if (!original || !["verified", "ready"].includes(original.state)) throw new Error("MEDIA_ASSET_NOT_DELETABLE");
+        const references = await client.query<{ present: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM navocms.media_references
+             WHERE tenant_id = $1 AND site_id = $2 AND asset_id = $3 AND deleted_at IS NULL) AS present`,
+          [scope.tenantId, scope.siteId, input.assetId]
+        );
+        if (references.rows[0]?.present) throw new Error("MEDIA_ASSET_HAS_LIVE_REFERENCES");
+        await client.query(
+          `UPDATE navocms.media_assets SET state = 'deleted', deleted_at = now(), purge_after = $4, updated_at = now()
+            WHERE tenant_id = $1 AND site_id = $2 AND id = $3`,
+          [scope.tenantId, scope.siteId, input.assetId, graceUntil]
+        );
+        await client.query(
+          `INSERT INTO navocms.media_gc_candidates (id, tenant_id, site_id, asset_id, recoverable_until)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [randomUUID(), scope.tenantId, scope.siteId, input.assetId, graceUntil]
+        );
+        await client.query(
+          `INSERT INTO navocms.media_lifecycle_checkpoints
+             (id, tenant_id, site_id, asset_id, storage_key, operation, operation_key, status, grace_until, checkpoint_json)
+           VALUES ($1,$2,$3,$4,$5,'schedule_delete',$6,'scheduled',$7,$8::jsonb)`,
+          [randomUUID(), scope.tenantId, scope.siteId, input.assetId, original.storage_key,
+            eventOperationKey("media_delete_schedule", input.idempotencyKey), graceUntil,
+            JSON.stringify({ priorState: original.state })]
+        );
+        return (await client.query<AssetRow>(`${assetSelect()} WHERE a.tenant_id = $1 AND a.site_id = $2 AND a.id = $3`,
+          [scope.tenantId, scope.siteId, input.assetId])).rows[0]!;
+      });
+      const asset = toAsset(row);
+      await this.append(scope, "media_delete_schedule", asset.id, input.idempotencyKey, "io.navocms.media.asset.delete.scheduled.v1", {
+        assetId: asset.id, graceUntil: graceUntil.toISOString()
+      });
+      return asset;
+    });
+  }
+
+  public async recoverableDelete(scope: MediaScope, input: MediaLifecycleInput): Promise<void> {
+    assertIdempotencyKey(input.idempotencyKey);
+    const existing = await this.#idempotency.lookup<null>(scope, "media_recoverable_delete", input.idempotencyKey, fingerprintOf(input));
+    if (existing?.status === "completed") return;
+    if (existing) throw new Error("MEDIA_IDEMPOTENCY_INCOMPLETE");
+    const original = await this.lifecycleOriginal(scope, input.assetId, true);
+    if (!this.#storage) throw new Error("MEDIA_STORAGE_UNAVAILABLE");
+    await this.prepareLifecycleEffect(scope, input.assetId, original.storage_key, "recoverable_delete", input.idempotencyKey, new Date(original.recoverable_until!));
+    await this.#storage.deleteRecoverable(original.storage_key, new Date(original.recoverable_until!));
+    await this.idempotent(scope, "media_recoverable_delete", input.idempotencyKey, input, async () => {
+      await this.#database.withScope(scope, async (client) => {
+        await this.completeLifecycleEffect(client, scope, "recoverable_delete", input.idempotencyKey);
+      });
+      await this.append(scope, "media_recoverable_delete", input.assetId, input.idempotencyKey, "io.navocms.media.asset.recoverably.deleted.v1", {
+        assetId: input.assetId, graceUntil: new Date(original.recoverable_until!).toISOString()
+      });
+      return null;
+    });
+  }
+
+  public async restore(scope: MediaScope, input: MediaLifecycleInput): Promise<MediaAssetSummary> {
+    assertIdempotencyKey(input.idempotencyKey);
+    const existing = await this.#idempotency.lookup<MediaAssetSummary>(scope, "media_restore", input.idempotencyKey, fingerprintOf(input));
+    if (existing?.status === "completed") return existing.value;
+    if (existing) throw new Error("MEDIA_IDEMPOTENCY_INCOMPLETE");
+    const original = await this.lifecycleOriginal(scope, input.assetId, true);
+    if (new Date(original.recoverable_until!).getTime() <= Date.now()) throw new Error("MEDIA_RESTORE_GRACE_EXPIRED");
+    if (!await this.hasCurrentRecoverableDelete(scope, input.assetId)) throw new Error("MEDIA_RECOVERABLE_DELETE_REQUIRED");
+    if (!this.#storage) throw new Error("MEDIA_STORAGE_UNAVAILABLE");
+    await this.prepareLifecycleEffect(scope, input.assetId, original.storage_key, "restore", input.idempotencyKey, new Date(original.recoverable_until!));
+    const restored = await this.#storage.restore(original.storage_key);
+    if (!restored && !await this.#storage.head(original.storage_key)) throw new Error("MEDIA_RESTORE_STORAGE_MISSING");
+    return this.idempotent(scope, "media_restore", input.idempotencyKey, input, async () => {
+      const row = await this.#database.withScope(scope, async (client) => {
+        const prior = (await client.query<{ checkpoint_json: Readonly<Record<string, unknown>> }>(
+          `SELECT checkpoint_json FROM navocms.media_lifecycle_checkpoints
+            WHERE tenant_id = $1 AND site_id = $2 AND asset_id = $3 AND operation = 'schedule_delete'
+            ORDER BY created_at DESC LIMIT 1`, [scope.tenantId, scope.siteId, input.assetId]
+        )).rows[0];
+        const state = prior?.checkpoint_json.priorState === "ready" ? "ready" : "verified";
+        const updated = await client.query<AssetRow>(
+          `UPDATE navocms.media_assets SET state = $4, deleted_at = NULL, purge_after = NULL, updated_at = now()
+            WHERE tenant_id = $1 AND site_id = $2 AND id = $3 AND state = 'deleted'
+            RETURNING id`,
+          [scope.tenantId, scope.siteId, input.assetId, state]
+        );
+        if (!updated.rows[0]) throw new Error("MEDIA_ASSET_NOT_RESTORABLE");
+        await client.query(`DELETE FROM navocms.media_gc_candidates WHERE tenant_id = $1 AND site_id = $2 AND asset_id = $3`, [scope.tenantId, scope.siteId, input.assetId]);
+        await this.completeLifecycleEffect(client, scope, "restore", input.idempotencyKey);
+        return (await client.query<AssetRow>(`${assetSelect()} WHERE a.tenant_id = $1 AND a.site_id = $2 AND a.id = $3`,
+          [scope.tenantId, scope.siteId, input.assetId])).rows[0]!;
+      });
+      const asset = toAsset(row);
+      await this.append(scope, "media_restore", asset.id, input.idempotencyKey, "io.navocms.media.asset.restored.v1", { assetId: asset.id });
+      return asset;
+    });
+  }
+
+  public async reclaim(scope: MediaScope, input: MediaLifecycleInput): Promise<void> {
+    assertIdempotencyKey(input.idempotencyKey);
+    const existing = await this.#idempotency.lookup<null>(scope, "media_reclaim", input.idempotencyKey, fingerprintOf(input));
+    if (existing?.status === "completed") return;
+    if (existing) throw new Error("MEDIA_IDEMPOTENCY_INCOMPLETE");
+    const original = await this.lifecycleOriginal(scope, input.assetId, true);
+    const graceUntil = new Date(original.recoverable_until!);
+    if (graceUntil.getTime() > Date.now()) throw new Error("MEDIA_RECLAIM_GRACE_NOT_ELAPSED");
+    if (!original.deleted_at || new Date(original.deleted_at).getTime() + MIN_DELETE_GRACE_MS > Date.now()) throw new Error("MEDIA_RECLAIM_GRACE_NOT_ELAPSED");
+    if (!await this.hasCurrentRecoverableDelete(scope, input.assetId)) throw new Error("MEDIA_RECOVERABLE_DELETE_REQUIRED");
+    if (!this.#storage) throw new Error("MEDIA_STORAGE_UNAVAILABLE");
+    await this.prepareLifecycleEffect(scope, input.assetId, original.storage_key, "reclaim", input.idempotencyKey, graceUntil);
+    const reclaimed = await this.#storage.reclaim(original.storage_key, new Date());
+    if (!reclaimed && await this.#storage.head(original.storage_key)) throw new Error("MEDIA_RECLAIM_STORAGE_STILL_LIVE");
+    await this.idempotent(scope, "media_reclaim", input.idempotencyKey, input, async () => {
+      await this.#database.withScope(scope, async (client) => {
+        const updated = await client.query(
+          `UPDATE navocms.media_gc_candidates SET reclaimed_at = now()
+            WHERE tenant_id = $1 AND site_id = $2 AND asset_id = $3 AND reclaimed_at IS NULL`,
+          [scope.tenantId, scope.siteId, input.assetId]
+        );
+        if ((updated.rowCount ?? 0) !== 1) throw new Error("MEDIA_ASSET_NOT_RECLAIMABLE");
+        await this.completeLifecycleEffect(client, scope, "reclaim", input.idempotencyKey);
+      });
+      await this.append(scope, "media_reclaim", input.assetId, input.idempotencyKey, "io.navocms.media.asset.reclaimed.v1", { assetId: input.assetId });
+      return null;
+    });
+  }
+
+  public async reconcile(scope: MediaScope, input: ReconcileMediaInput): Promise<MediaReconciliationResult> {
+    assertIdempotencyKey(input.idempotencyKey);
+    assertReadLimit(input.limit);
+    assertInventoryCursor(scope, input.cursor);
+    if (!this.#storage) throw new Error("MEDIA_STORAGE_UNAVAILABLE");
+    const page = await this.#storage.inventory(originalPrefix(scope), input.limit, input.cursor);
+    assertInventoryCursor(scope, page.nextCursor);
+    const databasePage = await this.#database.withScope(scope, async (client) => (
+      await client.query<OriginalInventoryRow>(
+        `SELECT o.asset_id, o.sha256, o.storage_key, a.state FROM navocms.media_originals o
+          JOIN navocms.media_assets a ON a.tenant_id = o.tenant_id AND a.site_id = o.site_id AND a.id = o.asset_id
+         WHERE o.tenant_id = $1 AND o.site_id = $2 AND a.state IN ('verified', 'ready')
+           AND ($3::text IS NULL OR o.storage_key > $3)
+         ORDER BY o.storage_key LIMIT $4`,
+        [scope.tenantId, scope.siteId, input.cursor ?? null, input.limit + 1]
+      )).rows
+    );
+    const databaseHasMore = databasePage.length > input.limit;
+    const databaseOriginals = databasePage.slice(0, input.limit);
+    const keys = [...new Set([...page.objects.map(({ key }) => key), ...databaseOriginals.map(({ storage_key }) => storage_key)])].sort();
+    const selectedKeys = keys.slice(0, input.limit);
+    const selected = new Set(selectedKeys);
+    const more = keys.length > input.limit || page.nextCursor !== undefined || databaseHasMore;
+    let orphanedStorageObjects = 0;
+    for (const object of page.objects.filter(({ key }) => selected.has(key))) {
+      assertOriginalKey(scope, object.key, object.sha256);
+      const known = await this.originalExists(scope, object.key);
+      if (known) continue;
+      orphanedStorageObjects += 1;
+      // Preserve a small margin above the schema floor, as scheduleDelete does.
+      const graceUntil = new Date(Date.now() + MIN_DELETE_GRACE_MS + 60_000);
+      const operationKey = `media_reconcile_orphan:${object.sha256}`;
+      const prepared = await this.idempotent(scope, "media_reconcile_orphan_prepare", object.sha256, { storageKey: object.key }, async () => {
+        const checkpointId = randomUUID();
+        await this.#database.withScope(scope, async (client) => {
+          await client.query(
+            `INSERT INTO navocms.media_lifecycle_checkpoints
+               (id, tenant_id, site_id, asset_id, storage_key, operation, operation_key, status, grace_until)
+             VALUES ($1,$2,$3,NULL,$4,'reconcile_orphan',$5,'effect_pending',$6)
+             ON CONFLICT (tenant_id, site_id, operation, operation_key) DO NOTHING`,
+            [checkpointId, scope.tenantId, scope.siteId, object.key, operationKey, graceUntil]
+          );
+        });
+        await this.append(scope, "media_reconcile_orphan_prepare", checkpointId, object.sha256, "io.navocms.media.lifecycle.effect.prepared.v1", {
+          storageKey: object.key, operation: "reconcile_orphan", graceUntil: graceUntil.toISOString()
+        });
+        return Object.freeze({ checkpointId, graceUntil: graceUntil.toISOString() });
+      });
+      const preparedGraceUntil = new Date(prepared.graceUntil);
+      await this.#storage.deleteRecoverable(object.key, preparedGraceUntil);
+      await this.idempotent(scope, "media_reconcile_orphan", object.sha256, { storageKey: object.key }, async () => {
+        await this.#database.withScope(scope, async (client) => {
+          await this.completeLifecycleEffect(client, scope, "reconcile_orphan", object.sha256);
+        });
+        await this.append(scope, "media_reconcile_orphan", prepared.checkpointId, object.sha256, "io.navocms.media.storage.orphaned.v1", {
+          storageKey: object.key, sha256: object.sha256, graceUntil: preparedGraceUntil.toISOString()
+        });
+        return null;
+      });
+    }
+    let missingStorageObjects = 0;
+    for (const original of databaseOriginals.filter(({ storage_key }) => selected.has(storage_key))) {
+      if (await this.#storage.head(original.storage_key)) continue;
+      missingStorageObjects += 1;
+      await this.idempotent(scope, "media_reconcile_missing", original.sha256, { assetId: original.asset_id, storageKey: original.storage_key }, async () => {
+        await this.#database.withScope(scope, async (client) => {
+          await client.query(
+            `UPDATE navocms.media_assets SET state = 'quarantined', updated_at = now()
+              WHERE tenant_id = $1 AND site_id = $2 AND id = $3 AND state <> 'deleted'`,
+            [scope.tenantId, scope.siteId, original.asset_id]
+          );
+          await client.query(
+            `INSERT INTO navocms.media_lifecycle_checkpoints
+               (id, tenant_id, site_id, asset_id, storage_key, operation, operation_key, status)
+             VALUES ($1,$2,$3,$4,$5,'reconcile_missing',$6,'storage_missing')
+             ON CONFLICT (tenant_id, site_id, operation, operation_key) DO NOTHING`,
+            [randomUUID(), scope.tenantId, scope.siteId, original.asset_id, original.storage_key,
+              `media_reconcile_missing:${original.sha256}`]
+          );
+        });
+        await this.append(scope, "media_reconcile_missing", original.asset_id, original.sha256, "io.navocms.media.storage.missing.v1", {
+          assetId: original.asset_id, storageKey: original.storage_key
+        });
+        return null;
+      });
+    }
+    return Object.freeze({
+      inspected: selectedKeys.length,
+      orphanedStorageObjects,
+      missingStorageObjects,
+      ...(more && selectedKeys.length > 0 ? { nextCursor: selectedKeys.at(-1)! } : {})
+    });
+  }
+
+  private async lifecycleOriginal(scope: MediaScope, assetId: string, requireDeleted: boolean): Promise<LifecycleOriginalRow> {
+    const row = await this.#database.withScope(scope, async (client) => (
+      await client.query<LifecycleOriginalRow>(
+        `SELECT a.id, a.state, o.storage_key, gc.recoverable_until, a.deleted_at
+           FROM navocms.media_assets a
+           JOIN navocms.media_originals o ON o.tenant_id = a.tenant_id AND o.site_id = a.site_id AND o.asset_id = a.id
+           LEFT JOIN navocms.media_gc_candidates gc ON gc.tenant_id = a.tenant_id AND gc.site_id = a.site_id AND gc.asset_id = a.id
+          WHERE a.tenant_id = $1 AND a.site_id = $2 AND a.id = $3`,
+        [scope.tenantId, scope.siteId, assetId]
+      )).rows[0]
+    );
+    if (!row || (requireDeleted && (row.state !== "deleted" || !row.recoverable_until))) throw new Error("MEDIA_ASSET_NOT_DELETED");
+    return row;
+  }
+
+  private async originalExists(scope: MediaScope, storageKey: string): Promise<boolean> {
+    return this.#database.withScope(scope, async (client) => {
+      const row = await client.query<{ present: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM navocms.media_originals
+          WHERE tenant_id = $1 AND site_id = $2 AND storage_key = $3) AS present`,
+        [scope.tenantId, scope.siteId, storageKey]
+      );
+      return row.rows[0]?.present === true;
+    });
+  }
+
+  /** A completed delete from an older restore/delete cycle is not sufficient. */
+  private async hasCurrentRecoverableDelete(scope: MediaScope, assetId: string): Promise<boolean> {
+    return this.#database.withScope(scope, async (client) => {
+      const row = await client.query<{ present: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM navocms.media_lifecycle_checkpoints recovered
+            WHERE recovered.tenant_id = $1 AND recovered.site_id = $2 AND recovered.asset_id = $3
+              AND recovered.operation = 'recoverable_delete' AND recovered.status = 'completed'
+              AND recovered.created_at >= (
+                SELECT max(scheduled.created_at) FROM navocms.media_lifecycle_checkpoints scheduled
+                 WHERE scheduled.tenant_id = $1 AND scheduled.site_id = $2 AND scheduled.asset_id = $3
+                   AND scheduled.operation = 'schedule_delete'
+              )
+         ) AS present`,
+        [scope.tenantId, scope.siteId, assetId]
+      );
+      return row.rows[0]?.present === true;
+    });
+  }
+
+  private async prepareLifecycleEffect(scope: MediaScope, assetId: string, storageKey: string, operation: "recoverable_delete" | "restore" | "reclaim", clientKey: string, graceUntil: Date): Promise<void> {
+    const prepareOperation = `media_${operation}_prepare`;
+    await this.idempotent(scope, prepareOperation, clientKey, { assetId, storageKey, graceUntil: graceUntil.toISOString() }, async () => {
+      await this.#database.withScope(scope, async (client) => {
+        await client.query(
+          `INSERT INTO navocms.media_lifecycle_checkpoints
+             (id, tenant_id, site_id, asset_id, storage_key, operation, operation_key, status, grace_until)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'effect_pending',$8)
+           ON CONFLICT (tenant_id, site_id, operation, operation_key) DO NOTHING`,
+          [randomUUID(), scope.tenantId, scope.siteId, assetId, storageKey, operation, eventOperationKey(`media_${operation}`, clientKey), graceUntil]
+        );
+      });
+      await this.append(scope, prepareOperation, assetId, clientKey, "io.navocms.media.lifecycle.effect.prepared.v1", {
+        assetId, operation, graceUntil: graceUntil.toISOString()
+      });
+      return null;
+    });
+  }
+
+  private async completeLifecycleEffect(client: SqlClient, scope: MediaScope, operation: "recoverable_delete" | "restore" | "reclaim" | "reconcile_orphan", clientKey: string): Promise<void> {
+    const result = await client.query(
+      `UPDATE navocms.media_lifecycle_checkpoints SET status = 'completed', completed_at = now(), updated_at = now()
+        WHERE tenant_id = $1 AND site_id = $2 AND operation = $3 AND operation_key = $4 AND status = 'effect_pending'`,
+      [scope.tenantId, scope.siteId, operation, eventOperationKey(`media_${operation}`, clientKey)]
+    );
+    if ((result.rowCount ?? 0) !== 1) throw new Error("MEDIA_LIFECYCLE_CHECKPOINT_INVALID");
+  }
+
   private async idempotent<T>(scope: MediaScope, operation: string, key: string, input: unknown, mutation: () => Promise<T>): Promise<T> {
     assertIdempotencyKey(key);
     return this.#database.withScope(scope, async () => {
@@ -428,6 +758,16 @@ function assertCursor(cursor: string | undefined): void {
   if (cursor !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cursor)) {
     throw new Error("MEDIA_CURSOR_INVALID");
   }
+}
+
+function assertInventoryCursor(scope: MediaScope, cursor: string | undefined): void {
+  if (cursor !== undefined && (!cursor.startsWith(originalPrefix(scope)) || cursor.length > 512)) throw new Error("MEDIA_INVENTORY_CURSOR_INVALID");
+}
+
+function eventOperationKey(operation: string, clientKey: string): string {
+  const value = `${operation}:${clientKey}`;
+  if (value.length > MAX_EVENT_IDEMPOTENCY_KEY_LENGTH) throw new Error("MEDIA_EVENT_IDEMPOTENCY_KEY_INVALID");
+  return value;
 }
 
 function toReference(row: ReferenceRow): MediaReferenceSummary {

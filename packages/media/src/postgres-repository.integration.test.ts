@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import type { FinalizeUploadInput, MediaScope, UploadIntentResult } from "./domain.js";
 import { PostgresMediaRepository } from "./postgres-repository.js";
-import { LocalDeterministicMediaStorage, type MediaStorage } from "./storage.js";
+import { LocalDeterministicMediaStorage, originalKey, type MediaStorage } from "./storage.js";
 
 const databaseUrl = process.env.NAVOCMS_INTEGRATION_DATABASE_URL;
 const integration = describe.skipIf(!databaseUrl);
@@ -323,6 +323,123 @@ integration("atomic media repository", () => {
       assets: "0", intents: "0", originals: "0", idempotency: "0", ledger: "0", outbox: "0"
     });
   });
+
+  it("blocks live references, persists a recoverable lifecycle, and never reclaims before grace", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const repository = new PostgresMediaRepository(database!, storage);
+    const key = `media-lifecycle-${randomUUID()}`;
+    const { asset } = await verifiedAsset(repository, storage, key);
+    await repository.createReference(scope, { assetId: asset.id, ownerType: "content.entry", ownerId: randomUUID(), purpose: "hero", idempotencyKey: `${key}-reference` });
+    await expect(repository.scheduleDelete(scope, { assetId: asset.id, idempotencyKey: `${key}-schedule` })).rejects.toThrow("LIVE_REFERENCES");
+    const page = await repository.listReferences(scope, asset.id, 10);
+    await repository.removeReference(scope, page.references[0]!.id, `${key}-remove`);
+    await expect(repository.scheduleDelete(scope, { assetId: asset.id, idempotencyKey: `${key}-schedule` })).resolves.toMatchObject({ state: "deleted" });
+    await expect(repository.restore(scope, { assetId: asset.id, idempotencyKey: `${key}-early-restore` })).rejects.toThrow("RECOVERABLE_DELETE_REQUIRED");
+    await repository.recoverableDelete(scope, { assetId: asset.id, idempotencyKey: `${key}-recover` });
+    const storageKey = originalKey(scope, asset.sha256!);
+    expect(await storage.head(storageKey)).toBeUndefined();
+    await expect(repository.reclaim(scope, { assetId: asset.id, idempotencyKey: `${key}-reclaim` })).rejects.toThrow("GRACE_NOT_ELAPSED");
+    await storage.restore(storageKey); // storage effect succeeds, process crashes before its checkpoint.
+    await expect(repository.restore(scope, { assetId: asset.id, idempotencyKey: `${key}-restore` })).resolves.toMatchObject({ state: "verified" });
+    expect(await storage.head(storageKey)).toBeDefined();
+    await expect(repository.restore(scope, { assetId: asset.id, idempotencyKey: `${key}-restore` })).resolves.toMatchObject({ state: "verified" });
+  });
+
+  it("retries interrupted reclaim and reconciles only the requested site prefix", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const repository = new PostgresMediaRepository(database!, storage);
+    const key = `media-reconcile-${randomUUID()}`;
+    const { asset } = await verifiedAsset(repository, storage, key);
+    const storageKey = originalKey(scope, asset.sha256!);
+    await repository.scheduleDelete(scope, { assetId: asset.id, idempotencyKey: `${key}-schedule` });
+    await repository.recoverableDelete(scope, { assetId: asset.id, idempotencyKey: `${key}-recover` });
+    await database!.withScope(scope, (client) => client.query(
+      `UPDATE navocms.media_assets SET deleted_at = now() - interval '2 days', purge_after = now() - interval '1 second'
+        WHERE tenant_id = $1 AND site_id = $2 AND id = $3`, [scope.tenantId, scope.siteId, asset.id]
+    ));
+    await database!.withScope(scope, (client) => client.query(
+      `UPDATE navocms.media_gc_candidates SET recoverable_until = now() - interval '1 second'
+        WHERE tenant_id = $1 AND site_id = $2 AND asset_id = $3`, [scope.tenantId, scope.siteId, asset.id]
+    ));
+    await storage.restore(storageKey);
+    await expect(repository.reclaim(scope, { assetId: asset.id, idempotencyKey: `${key}-reclaim` })).rejects.toThrow("STORAGE_STILL_LIVE");
+    await storage.deleteRecoverable(storageKey, new Date(Date.now() - 1));
+    await storage.reclaim(storageKey, new Date()); // crash after the storage effect, before the DB checkpoint.
+    await repository.reclaim(scope, { assetId: asset.id, idempotencyKey: `${key}-reclaim` });
+    await repository.reclaim(scope, { assetId: asset.id, idempotencyKey: `${key}-reclaim` });
+
+    const orphanBytes = mediaBytes(`${key}-orphan`);
+    const orphanKey = originalKey(scope, digest(orphanBytes));
+    const foreignScope = { ...scope, tenantId: "b2af348f-58b8-4efe-b873-8bd032ecbc5c", siteId: "3e0bcd4f-6780-470c-844b-d72abb6737ca" };
+    const foreignBytes = mediaBytes(`${key}-foreign`);
+    const foreignKey = originalKey(foreignScope, digest(foreignBytes));
+    await storage.putImmutable({ key: orphanKey, bytes: orphanBytes, mediaType: "image/png" });
+    await storage.putImmutable({ key: foreignKey, bytes: foreignBytes, mediaType: "image/png" });
+    const missing = await verifiedAsset(repository, storage, `${key}-missing`);
+    const missingKey = originalKey(scope, missing.asset.sha256!);
+    await storage.deleteRecoverable(missingKey, new Date(Date.now() - 1));
+    await storage.reclaim(missingKey, new Date());
+    const result = await repository.reconcile(scope, { idempotencyKey: `${key}-batch`, limit: 10 });
+    expect(result).toMatchObject({ orphanedStorageObjects: 1, missingStorageObjects: 1 });
+    expect(await storage.head(orphanKey)).toBeUndefined();
+    expect(await storage.head(foreignKey)).toBeDefined();
+    await expect(repository.getAsset(scope, missing.asset.id)).resolves.toMatchObject({ state: "quarantined" });
+  });
+
+  it("paginates the merged storage and database inventory without skipping missing originals", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const repository = new PostgresMediaRepository(database!, storage);
+    const key = `media-reconcile-pages-${randomUUID()}`;
+    const assets = await Promise.all([0, 1, 2].map((index) => verifiedAsset(repository, storage, `${key}-${index}`)));
+    for (const { asset } of assets) {
+      const storageKey = originalKey(scope, asset.sha256!);
+      await storage.deleteRecoverable(storageKey, new Date(Date.now() - 1));
+      await storage.reclaim(storageKey, new Date());
+    }
+
+    let cursor: string | undefined;
+    let missing = 0;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await repository.reconcile(scope, { idempotencyKey: `${key}-batch`, limit: 1, ...(cursor ? { cursor } : {}) });
+      missing += result.missingStorageObjects;
+      cursor = result.nextCursor;
+      if (!cursor) break;
+    }
+
+    expect(missing).toBe(3);
+    for (const { asset } of assets) {
+      await expect(repository.getAsset(scope, asset.id)).resolves.toMatchObject({ state: "quarantined" });
+    }
+  });
+
+  it("rolls lifecycle state, idempotency, ledger, and outbox back when append fails", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const normal = new PostgresMediaRepository(database!, storage);
+    const key = `media-lifecycle-rollback-${randomUUID()}`;
+    const { asset } = await verifiedAsset(normal, storage, key);
+    const failingEvents = {
+      append: async (event: Parameters<PostgresEventStore["append"]>[0]) => {
+        await new PostgresEventStore(database!).append(event);
+        throw new Error("injected lifecycle event failure");
+      },
+      query: (query: Parameters<PostgresEventStore["query"]>[0]) => new PostgresEventStore(database!).query(query)
+    };
+    const failing = new PostgresMediaRepository(database!, storage, new PostgresIdempotencyStore(database!), failingEvents);
+    const deleteKey = `${key}-schedule`;
+    await expect(failing.scheduleDelete(scope, { assetId: asset.id, idempotencyKey: deleteKey })).rejects.toThrow("injected lifecycle event failure");
+    const state = await database!.withScope(scope, async (client) => (
+      await client.query<{ state: string; candidates: string; checkpoints: string; idempotency: string; ledger: string; outbox: string }>(
+        `SELECT (SELECT state FROM navocms.media_assets WHERE id = $1) AS state,
+          (SELECT count(*) FROM navocms.media_gc_candidates WHERE asset_id = $1) AS candidates,
+          (SELECT count(*) FROM navocms.media_lifecycle_checkpoints WHERE asset_id = $1) AS checkpoints,
+          (SELECT count(*) FROM navocms.idempotency_records WHERE operation = 'media_delete_schedule' AND idempotency_key = $2) AS idempotency,
+          (SELECT count(*) FROM navocms.event_ledger WHERE correlation_id = $1 AND event_type = 'io.navocms.media.asset.delete.scheduled.v1') AS ledger,
+          (SELECT count(*) FROM navocms.domain_outbox WHERE correlation_id = $1 AND event_type = 'io.navocms.media.asset.delete.scheduled.v1') AS outbox`,
+        [asset.id, deleteKey]
+      )).rows[0]!
+    );
+    expect(state).toEqual({ state: "verified", candidates: "0", checkpoints: "0", idempotency: "0", ledger: "0", outbox: "0" });
+  });
 });
 
 function createInput(key: string, expectedMediaType: "image/jpeg" | "image/png" = "image/png", bytes = mediaBytes(key)) {
@@ -342,6 +459,12 @@ function finalizeInput(intent: { readonly intentId: string; readonly storageKey:
 async function finalize(repository: PostgresMediaRepository, storage: LocalDeterministicMediaStorage, intent: { readonly intentId: string; readonly storageKey: string }, key: string) {
   await putUpload(storage, intent.storageKey, key);
   return repository.finalizeUpload(scope, finalizeInput(intent, key));
+}
+
+async function verifiedAsset(repository: PostgresMediaRepository, storage: LocalDeterministicMediaStorage, key: string) {
+  const intent = uploadIntent(await repository.createUploadIntent(scope, createInput(key)));
+  const asset = await finalize(repository, storage, intent, key);
+  return { asset, intent };
 }
 
 async function putUpload(storage: LocalDeterministicMediaStorage, key: string, value: string): Promise<void> {
@@ -403,7 +526,8 @@ function mismatchingKeyStorage(storage: LocalDeterministicMediaStorage): MediaSt
       const object = await storage.read(key, maxBytes);
       return object && { ...object, key: `${key}-mismatch` };
     },
-    deleteRecoverable: storage.deleteRecoverable.bind(storage), restore: storage.restore.bind(storage), reclaim: storage.reclaim.bind(storage)
+    deleteRecoverable: storage.deleteRecoverable.bind(storage), restore: storage.restore.bind(storage),
+    reclaim: storage.reclaim.bind(storage), inventory: storage.inventory.bind(storage)
   };
 }
 
@@ -414,6 +538,7 @@ function fakeStorage(overrides: Pick<MediaStorage, "head" | "read">): MediaStora
     read: overrides.read,
     deleteRecoverable: async () => undefined,
     restore: async () => false,
-    reclaim: async () => []
+    reclaim: async () => false,
+    inventory: async () => ({ objects: [] })
   };
 }

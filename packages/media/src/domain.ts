@@ -90,6 +90,29 @@ export interface RejectMediaAssetInput {
   readonly idempotencyKey: string;
 }
 
+export interface ScheduleMediaDeleteInput {
+  readonly assetId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface MediaLifecycleInput {
+  readonly assetId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ReconcileMediaInput {
+  readonly idempotencyKey: string;
+  readonly limit: number;
+  readonly cursor?: string;
+}
+
+export interface MediaReconciliationResult {
+  readonly inspected: number;
+  readonly orphanedStorageObjects: number;
+  readonly missingStorageObjects: number;
+  readonly nextCursor?: string;
+}
+
 export interface MediaRepository {
   createUploadIntent(scope: MediaScope, input: CreateUploadIntentInput): Promise<CreateUploadResult>;
   finalizeUpload(scope: MediaScope, input: FinalizeUploadInput): Promise<MediaAssetSummary>;
@@ -100,4 +123,9 @@ export interface MediaRepository {
   createReference(scope: MediaScope, input: MediaReferenceInput): Promise<{ readonly id: string }>;
   removeReference(scope: MediaScope, referenceId: string, idempotencyKey: string): Promise<void>;
   rejectAsset(scope: MediaScope, input: RejectMediaAssetInput): Promise<MediaAssetSummary>;
+  scheduleDelete(scope: MediaScope, input: ScheduleMediaDeleteInput): Promise<MediaAssetSummary>;
+  recoverableDelete(scope: MediaScope, input: MediaLifecycleInput): Promise<void>;
+  restore(scope: MediaScope, input: MediaLifecycleInput): Promise<MediaAssetSummary>;
+  reclaim(scope: MediaScope, input: MediaLifecycleInput): Promise<void>;
+  reconcile(scope: MediaScope, input: ReconcileMediaInput): Promise<MediaReconciliationResult>;
 }

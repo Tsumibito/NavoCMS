@@ -14,12 +14,19 @@ export interface MediaStorage {
   read(key: string, maxBytes: number): Promise<StorageObject | undefined>;
   deleteRecoverable(key: string, recoverableUntil: Date): Promise<void>;
   restore(key: string): Promise<boolean>;
-  reclaim(now: Date): Promise<readonly string[]>;
+  /** Reclaims one already recoverably-deleted object, never a provider-wide set. */
+  reclaim(key: string, now: Date): Promise<boolean>;
+  /** Returns only live objects below prefix and never more than limit. */
+  inventory(prefix: string, limit: number, cursor?: string): Promise<Readonly<{ objects: readonly Readonly<{ key: string; byteSize: number; sha256: string; mediaType: string }>[]; nextCursor?: string }>>;
 }
 
 export function originalKey(scope: Pick<MediaScope, "tenantId" | "siteId">, sha256: string): string {
   assertSha256(sha256);
   return `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/${sha256}`;
+}
+
+export function originalPrefix(scope: Pick<MediaScope, "tenantId" | "siteId">): string {
+  return `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/`;
 }
 
 export function assertOriginalKey(scope: Pick<MediaScope, "tenantId" | "siteId">, key: string, digest: string): void {
@@ -80,12 +87,28 @@ export class LocalDeterministicMediaStorage implements MediaStorage {
     return true;
   }
 
-  public async reclaim(now: Date): Promise<readonly string[]> {
-    const reclaimed: string[] = [];
-    for (const [key, deleted] of this.#deleted) {
-      if (deleted.recoverableUntil <= now) { this.#deleted.delete(key); reclaimed.push(key); }
-    }
-    return Object.freeze(reclaimed.sort());
+  public async reclaim(key: string, now: Date): Promise<boolean> {
+    const deleted = this.#deleted.get(key);
+    if (!deleted) return false;
+    if (deleted.recoverableUntil > now) throw new Error("STORAGE_RECLAIM_GRACE_NOT_ELAPSED");
+    this.#deleted.delete(key);
+    return true;
+  }
+
+  public async inventory(prefix: string, limit: number, cursor?: string) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("STORAGE_INVENTORY_LIMIT_INVALID");
+    const keys = [...this.#objects.keys()].filter((key) => key.startsWith(prefix)).sort();
+    // The cursor is an exclusive lexical key. It need not exist in storage:
+    // reconciliation shares the same key-space with DB originals that may be
+    // missing from the provider.
+    const afterCursor = cursor === undefined ? 0 : keys.findIndex((key) => key > cursor);
+    const start = afterCursor < 0 ? keys.length : afterCursor;
+    const selected = keys.slice(start, start + limit + 1);
+    const objects = selected.slice(0, limit).map((key) => {
+      const object = this.#objects.get(key)!;
+      return Object.freeze({ key, byteSize: object.bytes.byteLength, sha256: sha256(object.bytes), mediaType: object.mediaType });
+    });
+    return Object.freeze({ objects: Object.freeze(objects), ...(selected.length > limit ? { nextCursor: objects.at(-1)!.key } : {}) });
   }
 }
 

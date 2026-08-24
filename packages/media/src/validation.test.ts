@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LocalDeterministicMediaStorage, assertOriginalKey, originalKey, sha256, variantIdentity } from "./storage.js";
+import { LocalDeterministicMediaStorage, assertOriginalKey, originalKey, originalPrefix, sha256, variantIdentity } from "./storage.js";
 import { assertPublicAddress, assertSafeRemoteUrl, inspectMedia, sniffMediaType, verifyUpload } from "./validation.js";
 
 describe("media trust boundary", () => {
@@ -51,5 +51,31 @@ describe("media trust boundary", () => {
     const webp = new Uint8Array(12); webp.set(new TextEncoder().encode("RIFF"), 0); webp.set(new TextEncoder().encode("WEBP"), 8);
     expect(() => sniffMediaType(gif)).toThrow(/JPEG and PNG/i);
     expect(() => sniffMediaType(webp)).toThrow(/JPEG and PNG/i);
+  });
+
+  it("reconciles only a bounded scoped inventory and supports recoverable lifecycle effects", async () => {
+    const first = { tenantId: "11111111-1111-4111-8111-111111111111", siteId: "22222222-2222-4222-8222-222222222222" };
+    const second = { tenantId: "33333333-3333-4333-8333-333333333333", siteId: "44444444-4444-4444-8444-444444444444" };
+    const storage = new LocalDeterministicMediaStorage();
+    const firstBytes = new Uint8Array([1]); const secondBytes = new Uint8Array([2]); const foreignBytes = new Uint8Array([3]);
+    const firstKey = originalKey(first, sha256(firstBytes)); const secondKey = originalKey(first, sha256(secondBytes));
+    const foreignKey = originalKey(second, sha256(foreignBytes));
+    await storage.putImmutable({ key: firstKey, bytes: firstBytes, mediaType: "image/jpeg" });
+    await storage.putImmutable({ key: secondKey, bytes: secondBytes, mediaType: "image/jpeg" });
+    await storage.putImmutable({ key: foreignKey, bytes: foreignBytes, mediaType: "image/jpeg" });
+    const page = await storage.inventory(originalPrefix(first), 1);
+    expect(page.objects).toHaveLength(1);
+    expect(page.nextCursor).toBeDefined();
+    expect((await storage.inventory(originalPrefix(first), 1, page.nextCursor)).objects).toHaveLength(1);
+    expect((await storage.inventory(originalPrefix(first), 1, `${originalPrefix(first)}${"0".repeat(64)}`)).objects).toHaveLength(1);
+    expect((await storage.inventory(originalPrefix(second), 10)).objects.map(({ key }) => key)).toEqual([foreignKey]);
+    const grace = new Date(Date.now() + 60_000);
+    await storage.deleteRecoverable(firstKey, grace);
+    await expect(storage.reclaim(firstKey, new Date())).rejects.toThrow("GRACE");
+    expect(await storage.restore(firstKey)).toBe(true);
+    await storage.deleteRecoverable(firstKey, new Date(Date.now() - 1));
+    expect(await storage.reclaim(firstKey, new Date())).toBe(true);
+    expect(await storage.head(firstKey)).toBeUndefined();
+    expect(await storage.head(foreignKey)).toBeDefined();
   });
 });
