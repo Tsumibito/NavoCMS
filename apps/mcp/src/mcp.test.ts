@@ -181,11 +181,13 @@ describe("MCP protocol and agent evaluations", () => {
     try {
       const metadata = await fetch(`http://127.0.0.1:${address.port}/.well-known/oauth-protected-resource/mcp`);
       expect(metadata.status).toBe(200);
-      await expect(metadata.json()).resolves.toMatchObject({
+      const metadataBody = await metadata.json();
+      expect(metadataBody).toMatchObject({
         resource: "https://cms.example.test/mcp",
         authorization_servers: ["https://identity.example.test"],
-        scopes_supported: NAVOCMS_PERMISSIONS
+        bearer_methods_supported: ["header"]
       });
+      expect(metadataBody).not.toHaveProperty("scopes_supported");
       const rejected = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: "POST", body: "{}" });
       expect(rejected.status).toBe(401);
       expect(rejected.headers.get("www-authenticate")).toContain("resource_metadata=");

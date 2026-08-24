@@ -45,6 +45,13 @@ the database isolation boundary.
 - Production and staging use different dotenvx keys, database branches, OAuth audiences, and hostnames.
 - Runtime connection pools stay small because Neon also pools at PgBouncer.
 
+## WorkOS MCP authorization
+
+AuthKit OAuth scopes establish the identity session and must use standard OIDC scopes (for example,
+`openid` and client-requested `offline_access`). NavoCMS content authority is not an OAuth scope:
+WorkOS supplies it through the access token's `permissions` claim based on the user's organization
+role, and NavoCMS intersects that claim with the tenant/site membership enforced by PostgreSQL RLS.
+
 ## Preview policy
 
 Protected editorial previews in Sprint 7 are immutable release artifacts and do not need a complete

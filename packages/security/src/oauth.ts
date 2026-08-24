@@ -1,19 +1,20 @@
 import { createHash, timingSafeEqual, webcrypto } from "node:crypto";
 
 import { SecurityError } from "./errors.js";
-import type { Permission, Principal } from "./authorization.js";
+import type { Principal } from "./authorization.js";
 
 export interface ProtectedResourceMetadata {
   readonly resource: string;
   readonly authorization_servers: readonly string[];
-  readonly scopes_supported: readonly string[];
+  readonly bearer_methods_supported: readonly ["header"];
+  readonly scopes_supported?: readonly string[];
   readonly resource_documentation?: string;
 }
 
 export interface OAuthResourceConfig {
   readonly resource: string;
   readonly authorizationServers: readonly string[];
-  readonly scopes: readonly Permission[];
+  readonly scopes?: readonly string[];
   readonly documentationUrl?: string;
 }
 
@@ -26,7 +27,8 @@ export function protectedResourceMetadata(config: OAuthResourceConfig): Protecte
   return Object.freeze({
     resource,
     authorization_servers: Object.freeze(authorizationServers),
-    scopes_supported: Object.freeze([...config.scopes]),
+    bearer_methods_supported: ["header"] as const,
+    ...(config.scopes ? { scopes_supported: Object.freeze([...config.scopes]) } : {}),
     ...(config.documentationUrl ? { resource_documentation: canonicalHttpsUrl(config.documentationUrl, "documentation") } : {})
   });
 }
@@ -42,8 +44,12 @@ function canonicalHttpsUrl(input: string, field: string): string {
 export function bearerChallenge(resource: string, metadataUrl: string, scopes: readonly string[]): string {
   canonicalHttpsUrl(resource, "resource");
   canonicalHttpsUrl(metadataUrl, "resource metadata");
-  const scope = scopes.join(" ");
-  return `Bearer resource_metadata="${metadataUrl}", resource="${resource}", scope="${scope}"`;
+  const fields = [
+    `resource_metadata="${metadataUrl}"`,
+    `resource="${resource}"`,
+    ...(scopes.length > 0 ? [`scope="${scopes.join(" ")}"`] : [])
+  ];
+  return `Bearer ${fields.join(", ")}`;
 }
 
 export interface JwtClaims extends Record<string, unknown> {

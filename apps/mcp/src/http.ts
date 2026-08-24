@@ -22,12 +22,11 @@ export interface McpHttpOptions {
   readonly resource: string;
   readonly authorizationServers: readonly string[];
   /**
-   * Permissions exposed by this particular MCP deployment.  The resource
-   * metadata is an OAuth consent surface, so it must not advertise dormant
-   * product capabilities just because they exist in the global permission
-   * vocabulary.
+   * Optional standard OAuth/OIDC scopes expected by the authorization server.
+   * Product permissions arrive as verified token claims and are enforced
+   * independently from OAuth consent.
    */
-  readonly scopes?: readonly Permission[];
+  readonly scopes?: readonly string[];
   readonly documentationUrl?: string;
   readonly readiness?: () => Promise<boolean>;
   readonly resolveAuthorization?: (token: VerifiedAccessToken) => Promise<AuthorizationContext>;
@@ -37,7 +36,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
   const metadata = protectedResourceMetadata({
     resource: options.resource,
     authorizationServers: options.authorizationServers,
-    scopes: options.scopes ?? NAVOCMS_PERMISSIONS,
+    ...(options.scopes ? { scopes: options.scopes } : {}),
     ...(options.documentationUrl ? { documentationUrl: options.documentationUrl } : {})
   });
   const resourceUrl = new URL(options.resource);
@@ -76,7 +75,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
 
     const token = bearerToken(request.headers.authorization);
     if (!token) {
-      response.setHeader("www-authenticate", bearerChallenge(options.resource, metadataUrl, ["content:read"]));
+      response.setHeader("www-authenticate", bearerChallenge(options.resource, metadataUrl, []));
       return sendJson(response, 401, { error: "AUTHENTICATION_REQUIRED" });
     }
 
@@ -84,7 +83,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
     try {
       verified = await options.verifier.verify(token);
     } catch {
-      response.setHeader("www-authenticate", bearerChallenge(options.resource, metadataUrl, ["content:read"]));
+      response.setHeader("www-authenticate", bearerChallenge(options.resource, metadataUrl, []));
       return sendJson(response, 401, { error: "ACCESS_TOKEN_REJECTED" });
     }
 
