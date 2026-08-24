@@ -2,7 +2,8 @@
 
 ## Status
 
-Pending CI. This report does not close the Sprint 8A.6 gate.
+Complete. The Sprint 8A.6 code gate is closed; remote ingest remains absent
+from the production profile and MCP discovery.
 
 ## Implemented boundary
 
@@ -31,12 +32,14 @@ Pending CI. This report does not close the Sprint 8A.6 gate.
 - PostgreSQL intent/finalize replay, RLS scope, provenance, Ledger, and outbox
   trajectory.
 
-## Required evidence before closure
+## Retained CI evidence
 
-- GitHub PostgreSQL CI with no skipped integration tests;
-- media isolation suite and production container build;
-- retained CI link added here after a green run;
-- no production activation of external storage or remote ingest.
+- [GitHub run 32767769045](https://github.com/Tsumibito/NavoCMS/actions/runs/32767769045)
+  passed on code head `7c6fc5b`: 30/30 test files and 133/133 tests with no
+  skipped PostgreSQL scenarios, plus 5/5 visual tests;
+- PostgreSQL tenant RLS and media isolation suites passed;
+- the production container build passed;
+- no external storage or remote-ingest production activation was introduced.
 
 ## Local review evidence
 
