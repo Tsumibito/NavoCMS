@@ -57,7 +57,9 @@ integration("atomic media repository", () => {
     const pixelBomb = mediaBytes(`${key}-dimensions`, 99_999);
     const dimensionIntent = uploadIntent(await repository.createUploadIntent(scope, createInput(`${key}-dimensions`, "image/png", pixelBomb)));
     await storage.putImmutable({ key: dimensionIntent.storageKey, bytes: pixelBomb, mediaType: "image/png" });
-    await expect(repository.finalizeUpload(scope, finalizeInput(dimensionIntent, `${key}-dimensions`))).rejects.toThrow("DECODE_LIMIT");
+    await expect(repository.finalizeUpload(scope, finalizeInput(dimensionIntent, `${key}-dimensions`))).rejects.toMatchObject({
+      code: "MEDIA_DECODE_LIMIT"
+    });
     await expect(repository.finalizeUpload({ ...scope, siteId: "22222222-2222-4222-8222-222222222222" }, finalizeInput(intent, key))).rejects.toThrow("NOT_FOUND");
     await database!.withScope(scope, (client) => client.query("UPDATE navocms.media_upload_intents SET expires_at = now() - interval '1 second' WHERE id = $1", [intent.intentId]));
     await expect(repository.finalizeUpload(scope, finalizeInput(intent, `${key}-expired`))).rejects.toThrow("EXPIRED");
