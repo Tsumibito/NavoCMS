@@ -5,5 +5,5 @@
   "type": "module",
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
   "files": ["dist"],
-  "dependencies": { "@navocms/security": "workspace:*" }
+  "dependencies": { "@navocms/kernel": "workspace:*", "@navocms/persistence-postgres": "workspace:*", "@navocms/security": "workspace:*" }
 }

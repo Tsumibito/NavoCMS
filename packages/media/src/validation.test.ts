@@ -27,6 +27,8 @@ describe("media trust boundary", () => {
     const storage = new LocalDeterministicMediaStorage();
     await storage.putImmutable({ key, bytes, mediaType: "image/jpeg" });
     await storage.putImmutable({ key, bytes, mediaType: "image/jpeg" });
+    await expect(storage.read(key, 2)).rejects.toThrow("READ_LIMIT");
+    expect(await storage.read(key, 3)).toMatchObject({ key, mediaType: "image/jpeg" });
     await expect(storage.putImmutable({ key, bytes: new Uint8Array([4]), mediaType: "image/jpeg" })).rejects.toThrow("IMMUTABLE");
     await expect(storage.putImmutable({ key, bytes, mediaType: "image/png" })).rejects.toThrow("IMMUTABLE");
     expect(() => assertOriginalKey(scope, key.replace(scope.siteId, "33333333-3333-4333-8333-333333333333"), digest)).toThrow("SCOPE");

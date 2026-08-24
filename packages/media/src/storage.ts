@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { MediaScope } from "./domain.js";
 
 export interface StorageObject {
   readonly key: string;
@@ -9,20 +10,19 @@ export interface StorageObject {
 export interface MediaStorage {
   putImmutable(object: StorageObject): Promise<void>;
   head(key: string): Promise<Readonly<{ byteSize: number; sha256: string; mediaType: string }> | undefined>;
-  read(key: string): Promise<StorageObject | undefined>;
+  /** Implementations must abort rather than buffer past maxBytes. */
+  read(key: string, maxBytes: number): Promise<StorageObject | undefined>;
   deleteRecoverable(key: string, recoverableUntil: Date): Promise<void>;
   restore(key: string): Promise<boolean>;
   reclaim(now: Date): Promise<readonly string[]>;
 }
 
-export interface MediaScope { readonly tenantId: string; readonly siteId: string; }
-
-export function originalKey(scope: MediaScope, sha256: string): string {
+export function originalKey(scope: Pick<MediaScope, "tenantId" | "siteId">, sha256: string): string {
   assertSha256(sha256);
   return `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/${sha256}`;
 }
 
-export function assertOriginalKey(scope: MediaScope, key: string, digest: string): void {
+export function assertOriginalKey(scope: Pick<MediaScope, "tenantId" | "siteId">, key: string, digest: string): void {
   if (key !== originalKey(scope, digest)) throw new Error("STORAGE_KEY_SCOPE_MISMATCH");
 }
 
@@ -33,7 +33,7 @@ export function variantIdentity(originalSha256: string, presetVersion: string, t
   return sha256(`${originalSha256}\n${presetVersion}\n${canonicalJson(transform)}`);
 }
 
-export function variantKey(scope: MediaScope, identity: string): string {
+export function variantKey(scope: Pick<MediaScope, "tenantId" | "siteId">, identity: string): string {
   assertSha256(identity);
   return `tenants/${scope.tenantId}/sites/${scope.siteId}/variants/${identity}`;
 }
@@ -59,8 +59,9 @@ export class LocalDeterministicMediaStorage implements MediaStorage {
     return object && Object.freeze({ byteSize: object.bytes.byteLength, sha256: sha256(object.bytes), mediaType: object.mediaType });
   }
 
-  public async read(key: string): Promise<StorageObject | undefined> {
+  public async read(key: string, maxBytes: number): Promise<StorageObject | undefined> {
     const object = this.#objects.get(key);
+    if (object && object.bytes.byteLength > maxBytes) throw new Error("STORAGE_READ_LIMIT_EXCEEDED");
     return object && Object.freeze({ ...object, bytes: new Uint8Array(object.bytes) });
   }
 

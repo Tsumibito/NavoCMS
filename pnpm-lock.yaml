@@ -167,6 +167,12 @@ importers:
 
   packages/media:
     dependencies:
+      '@navocms/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@navocms/persistence-postgres':
+        specifier: workspace:*
+        version: link:../persistence-postgres
       '@navocms/security':
         specifier: workspace:*
         version: link:../security
