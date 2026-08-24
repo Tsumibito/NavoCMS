@@ -1,6 +1,6 @@
 # ADR 0013 — Media persistence boundary
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-24
 

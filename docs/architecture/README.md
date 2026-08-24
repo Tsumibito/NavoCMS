@@ -17,7 +17,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0010](0010-decoupled-mcp-editing-surface.md) | Accepted | OAuth-scoped tools with decoupled MCP Apps review surfaces |
 | [0011](0011-production-environment-topology.md) | Accepted | Persistent staging, scale-to-zero Neon branches, and separate release previews |
 | [0012](0012-provider-neutral-mcp-oauth.md) | Accepted | Provider-neutral MCP OAuth with deployment-bound tenant/site membership |
-| [0013](0013-media-persistence-boundary.md) | Proposed | Media domain facade with a constrained PostgreSQL transactional adapter |
+| [0013](0013-media-persistence-boundary.md) | Accepted | Media domain facade with a constrained PostgreSQL transactional adapter |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.
