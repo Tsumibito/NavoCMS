@@ -29,7 +29,8 @@ const schemaPaths = {
   contentType: "schemas/content-type.schema.json",
   designOverride: "schemas/design-override.schema.json",
   designSystem: "schemas/design-system.schema.json",
-  event: "schemas/event-envelope.schema.json"
+  event: "schemas/event-envelope.schema.json",
+  mediaAsset: "schemas/media-asset.schema.json"
 };
 
 const validators = {};
@@ -89,6 +90,13 @@ function semanticEvent(document, file) {
   }
 }
 
+function semanticMediaAsset(document, file) {
+  if (["verified", "processing", "ready"].includes(document.spec.state)) {
+    assert(document.spec.original, `${file}: verified media requires an original`);
+  }
+  if (document.spec.state === "rejected") assert(document.spec.rejectionReason, `${file}: rejected media needs a reason`);
+}
+
 function tokenPaths(group, prefix = "") {
   return Object.entries(group).flatMap(([name, value]) => {
     const tokenPath = prefix ? `${prefix}.${name}` : name;
@@ -127,7 +135,8 @@ const fixtureKinds = [
   { suffix: ".content-type.json", validator: "contentType", semantic: semanticContentType },
   { suffix: ".design-override.json", validator: "designOverride", semantic: semanticDesignOverride },
   { suffix: ".design-system.json", validator: "designSystem", semantic: semanticDesignSystem },
-  { suffix: ".event.json", validator: "event", semantic: semanticEvent }
+  { suffix: ".event.json", validator: "event", semantic: semanticEvent },
+  { suffix: ".media-asset.json", validator: "mediaAsset", semantic: semanticMediaAsset }
 ];
 
 let validated = 0;
@@ -148,7 +157,8 @@ const negativeChecks = [
   ["contentType", { apiVersion: "navocms.io/v0alpha1", kind: "ContentType" }],
   ["designOverride", { apiVersion: "navocms.io/v0alpha1", kind: "DesignOverride" }],
   ["designSystem", { apiVersion: "navocms.io/v0alpha1", kind: "DesignSystem" }],
-  ["event", { specversion: "1.0" }]
+  ["event", { specversion: "1.0" }],
+  ["mediaAsset", { apiVersion: "navocms.io/v0alpha1", kind: "MediaAsset" }]
 ];
 
 for (const [name, invalidDocument] of negativeChecks) {

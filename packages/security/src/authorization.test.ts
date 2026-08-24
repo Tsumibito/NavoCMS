@@ -47,7 +47,7 @@ describe("authorization intersection", () => {
   });
 
   it("maps persisted site roles to bounded permissions", () => {
-    expect(siteRoleAuthority("viewer").permissions).toEqual(["content:read"]);
+    expect(siteRoleAuthority("viewer").permissions).toEqual(["content:read", "media:read"]);
     expect(siteRoleAuthority("editor").permissions).not.toContain("content:publish");
     expect(siteRoleAuthority("publisher").permissions).toContain("content:publish");
   });

@@ -21,6 +21,21 @@ describe("public contract validators", () => {
       contracts.designOverride.parse(await fixture("design-systems/campaign.design-override.json"))
     ).toBeTruthy();
     expect(contracts.event.parse(await fixture("events/revision-created.event.json"))).toBeTruthy();
+    expect(contracts.mediaAsset.parse(await fixture("media/verified-image.media-asset.json"))).toBeTruthy();
+  });
+
+  it("rejects adversarial media storage keys that point at another site", async () => {
+    await expect(fixture("media/adversarial-storage-key.media-asset.invalid.json").then((value) => (
+      contracts.mediaAsset.parse(value)
+    ))).rejects.toThrow(/exactly match tenant, site, and SHA-256/);
+  });
+
+  it("rejects partially specified original dimensions", async () => {
+    const media = contracts.mediaAsset.parse(await fixture("media/verified-image.media-asset.json"));
+    const { height: _height, ...widthOnly } = media.spec.original!;
+    const invalid = { ...media, spec: { ...media.spec, original: widthOnly } };
+
+    expect(() => contracts.mediaAsset.parse(invalid)).toThrowError(/must have property height/);
   });
 
   it("returns bounded validation issues", () => {

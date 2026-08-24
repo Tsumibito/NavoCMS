@@ -11,6 +11,7 @@ import type {
   DesignToken,
   DesignTokenGroup,
   DomainEvent,
+  MediaAsset,
   PluginManifest,
   SiteProfile
 } from "./types.js";
@@ -20,6 +21,7 @@ const schemaFiles = {
   designOverride: "design-override.schema.json",
   designSystem: "design-system.schema.json",
   event: "event-envelope.schema.json",
+  mediaAsset: "media-asset.schema.json",
   plugin: "plugin-manifest.schema.json",
   profile: "site-profile.schema.json"
 } as const;
@@ -207,6 +209,19 @@ function eventSemantics(event: DomainEvent): string[] {
   return [];
 }
 
+function mediaAssetSemantics(asset: MediaAsset): string[] {
+  const issues: string[] = [];
+  if (["verified", "processing", "ready"].includes(asset.spec.state) && !asset.spec.original) {
+    issues.push("verified media requires an immutable original");
+  }
+  if (asset.spec.state === "rejected" && !asset.spec.rejectionReason) issues.push("rejected media requires a rejection reason");
+  if (asset.spec.original) {
+    const expectedKey = `tenants/${asset.metadata.tenantId}/sites/${asset.metadata.siteId}/originals/${asset.spec.original.sha256}`;
+    if (asset.spec.original.storageKey !== expectedKey) issues.push("original key must exactly match tenant, site, and SHA-256");
+  }
+  return issues;
+}
+
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 const addFormats = (
   "default" in addFormatsModule ? addFormatsModule.default : addFormatsModule
@@ -232,6 +247,11 @@ export const contracts = {
     "event envelope",
     ajv.compile<DomainEvent>(readSchema(schemaFiles.event)),
     eventSemantics
+  ),
+  mediaAsset: new ContractValidator<MediaAsset>(
+    "media asset",
+    ajv.compile<MediaAsset>(readSchema(schemaFiles.mediaAsset)),
+    mediaAssetSemantics
   ),
   plugin: new ContractValidator<PluginManifest>(
     "plugin manifest",

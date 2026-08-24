@@ -7,6 +7,7 @@ const files = [
   "design-override.schema.json",
   "design-system.schema.json",
   "event-envelope.schema.json",
+  "media-asset.schema.json",
   "plugin-manifest.schema.json",
   "site-profile.schema.json"
 ];

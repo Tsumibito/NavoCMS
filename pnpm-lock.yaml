@@ -165,6 +165,12 @@ importers:
         specifier: 1.9.0
         version: 1.9.0
 
+  packages/media:
+    dependencies:
+      '@navocms/security':
+        specifier: workspace:*
+        version: link:../security
+
   packages/persistence-postgres:
     dependencies:
       '@navocms/contracts':

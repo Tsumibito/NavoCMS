@@ -94,6 +94,8 @@ jobs:
             -f packages/persistence-postgres/tests/runtime-isolation.sql
           psql -h 127.0.0.1 -U postgres -d navocms_test \
             -f packages/persistence-postgres/tests/release-workflow-isolation.sql
+          psql -h 127.0.0.1 -U postgres -d navocms_test \
+            -f packages/persistence-postgres/tests/media-isolation.sql
 
       - name: Build production container
         run: docker build --tag navocms:${{ github.sha }} .

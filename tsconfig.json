@@ -8,6 +8,7 @@
     { "path": "packages/design-astro" },
     { "path": "packages/kernel" },
     { "path": "packages/persistence-postgres" },
+    { "path": "packages/media" },
     { "path": "apps/api" },
     { "path": "apps/mcp" },
     { "path": "plugins/noop-service" }

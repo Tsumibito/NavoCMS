@@ -4,6 +4,8 @@ export const NAVOCMS_PERMISSIONS = [
   "content:read",
   "content:draft",
   "content:publish",
+  "media:read",
+  "media:write",
   "leads:read",
   "site:admin",
   "plugins:admin",
@@ -17,9 +19,9 @@ export type SiteRole = "owner" | "admin" | "publisher" | "editor" | "viewer";
 export const SITE_ROLE_PERMISSIONS: Readonly<Record<SiteRole, readonly Permission[]>> = Object.freeze({
   owner: NAVOCMS_PERMISSIONS,
   admin: NAVOCMS_PERMISSIONS,
-  publisher: ["content:read", "content:draft", "content:publish", "leads:read"],
-  editor: ["content:read", "content:draft"],
-  viewer: ["content:read"]
+  publisher: ["content:read", "content:draft", "content:publish", "media:read", "media:write", "leads:read"],
+  editor: ["content:read", "content:draft", "media:read", "media:write"],
+  viewer: ["content:read", "media:read"]
 });
 
 export function siteRoleAuthority(role: SiteRole): AuthorityLayer {
