@@ -91,33 +91,34 @@ export function applyStructuralPatch(input: {
 export function compareMarkdown(from: string, to: string): RevisionDiff {
   const before = from.replace(/\n$/, "").split("\n");
   const after = to.replace(/\n$/, "").split("\n");
-  const matrix = Array.from({ length: before.length + 1 }, () => Array<number>(after.length + 1).fill(0));
-  for (let left = before.length - 1; left >= 0; left -= 1) {
-    for (let right = after.length - 1; right >= 0; right -= 1) {
-      matrix[left]![right] = before[left] === after[right]
-        ? 1 + matrix[left + 1]![right + 1]!
-        : Math.max(matrix[left + 1]![right]!, matrix[left]![right + 1]!);
-    }
-  }
+  // A review diff is an untrusted agent-facing input. The old LCS matrix allocated
+  // O(n*m) memory and made a large pair of documents a cheap denial of service.
+  // This bounded linear pass intentionally favors a stable, safe review over a
+  // minimal edit script: retain the shared prefix/suffix and replace the middle.
+  const prefix = sharedPrefix(before, after);
+  const suffix = sharedSuffix(before, after, prefix);
   const lines: RevisionDiffLine[] = [];
-  let left = 0;
-  let right = 0;
-  while (left < before.length && right < after.length) {
-    if (before[left] === after[right]) {
-      lines.push({ kind: "context", line: before[left]! });
-      left += 1;
-      right += 1;
-    } else if (matrix[left + 1]![right]! >= matrix[left]![right + 1]!) {
-      lines.push({ kind: "remove", line: before[left]! });
-      left += 1;
-    } else {
-      lines.push({ kind: "add", line: after[right]! });
-      right += 1;
-    }
-  }
-  while (left < before.length) lines.push({ kind: "remove", line: before[left++]! });
-  while (right < after.length) lines.push({ kind: "add", line: after[right++]! });
+  for (const line of before.slice(0, prefix)) lines.push({ kind: "context", line });
+  for (const line of before.slice(prefix, before.length - suffix)) lines.push({ kind: "remove", line });
+  for (const line of after.slice(prefix, after.length - suffix)) lines.push({ kind: "add", line });
+  for (const line of before.slice(before.length - suffix)) lines.push({ kind: "context", line });
   return Object.freeze({ fromHash: contentHash(from), toHash: contentHash(to), lines: Object.freeze(lines) });
+}
+
+function sharedPrefix(before: readonly string[], after: readonly string[]): number {
+  let index = 0;
+  while (index < before.length && index < after.length && before[index] === after[index]) index += 1;
+  return index;
+}
+
+function sharedSuffix(before: readonly string[], after: readonly string[], prefix: number): number {
+  let length = 0;
+  while (
+    length < before.length - prefix &&
+    length < after.length - prefix &&
+    before[before.length - 1 - length] === after[after.length - 1 - length]
+  ) length += 1;
+  return length;
 }
 
 function fragment(markdown: string, directives: readonly DirectiveDefinition[]): string {

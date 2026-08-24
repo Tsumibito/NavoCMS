@@ -28,8 +28,13 @@ export interface McpHttpOptions {
    */
   readonly scopes?: readonly string[];
   readonly documentationUrl?: string;
-  readonly readiness?: () => Promise<boolean>;
+  readonly readiness?: () => Promise<boolean | ReadinessResult>;
   readonly resolveAuthorization?: (token: VerifiedAccessToken) => Promise<AuthorizationContext>;
+}
+
+export interface ReadinessResult {
+  readonly ready: boolean;
+  readonly pluginHost?: Readonly<Record<string, unknown>>;
 }
 
 export function createMcpHttpServer(options: McpHttpOptions) {
@@ -49,8 +54,12 @@ export function createMcpHttpServer(options: McpHttpOptions) {
     }
     if (request.method === "GET" && request.url === "/readyz") {
       try {
-        const ready = options.readiness ? await options.readiness() : true;
-        return sendJson(response, ready ? 200 : 503, { status: ready ? "ready" : "not-ready" });
+        const result = options.readiness ? await options.readiness() : true;
+        const readiness = typeof result === "boolean" ? { ready: result } : result;
+        return sendJson(response, readiness.ready ? 200 : 503, {
+          status: readiness.ready ? "ready" : "not-ready",
+          ...(readiness.pluginHost ? { pluginHost: readiness.pluginHost } : {})
+        });
       } catch {
         return sendJson(response, 503, { status: "not-ready" });
       }

@@ -5,4 +5,5 @@ export * from "./idempotency.js";
 export * from "./identity.js";
 export * from "./migrate.js";
 export * from "./provision-runtime-role.js";
+export * from "./runtime-policy.js";
 export * from "./bootstrap-site.js";

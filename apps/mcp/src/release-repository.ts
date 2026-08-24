@@ -19,6 +19,7 @@ export interface ReleaseSummary {
   readonly workflow: string;
   readonly releaseHash: string;
   readonly artifactHash: string;
+  readonly correlationId: string;
   readonly status: ReleaseStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -57,6 +58,15 @@ export interface CreateReleaseInput {
   readonly artifact: ReleaseArtifact;
   readonly previewTokenHash: string;
   readonly previewExpiresAt: string;
+  readonly correlationId: string;
+}
+
+export interface ReleaseApprovalInput {
+  readonly policyVersion: string;
+  readonly evidence: Readonly<Record<string, string>>;
+  readonly expiresAt: string;
+  readonly actorKind: "human";
+  readonly scope: Readonly<{ tenantId: string; siteId: string; environmentId: string }>;
 }
 
 export interface ReleaseWorkflowRepository {
@@ -64,7 +74,7 @@ export interface ReleaseWorkflowRepository {
   createPreview(input: CreateReleaseInput): Promise<StoredRelease>;
   resolvePreview(tokenHash: string): Promise<PreviewDocument | undefined>;
   getRelease(context: RepositoryContext, releaseId: string): Promise<StoredRelease>;
-  approve(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<StoredRelease>;
+  approve(context: RepositoryContext, releaseId: string, releaseHash: string, approval: ReleaseApprovalInput): Promise<StoredRelease>;
   beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<{
     readonly release: StoredRelease;
     readonly previous?: PublicationRecord;
@@ -90,6 +100,7 @@ interface MutableRelease {
   workflow: string;
   releaseHash: string;
   artifactHash: string;
+  correlationId: string;
   status: ReleaseStatus;
   manifest: ReleaseManifestV1;
   artifact: ReleaseArtifact;
@@ -97,6 +108,7 @@ interface MutableRelease {
   updatedAt: string;
   approvedAt?: string;
   publishedAt?: string;
+  approval?: ReleaseApprovalInput;
 }
 
 export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowRepository {
@@ -123,6 +135,7 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
       id: randomUUID(), tenantId: input.context.site.tenantId, siteId: input.context.site.siteId,
       environmentId: this.#environmentId, revisionId: input.revisionId, workflow: input.workflow,
       releaseHash: input.releaseHash, artifactHash: input.artifact.hash, status: "previewed" as const,
+      correlationId: input.correlationId,
       manifest: input.manifest, artifact: input.artifact, createdAt: now, updatedAt: now
     };
     this.#releases.set(release.id, release);
@@ -146,16 +159,21 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     return freezeRelease(this.requireScoped(context, releaseId));
   }
 
-  public async approve(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<StoredRelease> {
+  public async approve(context: RepositoryContext, releaseId: string, releaseHash: string, approval: ReleaseApprovalInput): Promise<StoredRelease> {
     const release = this.requireExact(context, releaseId, releaseHash);
+    this.assertApproval(release, approval);
     if (release.status === "approved") return freezeRelease(release);
     release.status = releaseTransition(release.status, "approved");
+    release.approval = approval;
     release.approvedAt = release.updatedAt = new Date().toISOString();
     return freezeRelease(release);
   }
 
   public async beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string) {
     const release = this.requireExact(context, releaseId, releaseHash);
+    if (!release.approval || new Date(release.approval.expiresAt).getTime() <= Date.now()) {
+      throw new McpEditingError("RELEASE_APPROVAL_EXPIRED", "A current human approval is required before publication");
+    }
     if (release.status !== "publishing") release.status = releaseTransition(release.status, "publishing");
     release.updatedAt = new Date().toISOString();
     return Object.freeze({ release: freezeRelease(release), ...this.previousFor(release) });
@@ -253,6 +271,14 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     if (!publication || publication.environmentId !== release.environmentId) throw new McpEditingError("PUBLICATION_NOT_FOUND", "Publication record was not found");
     return publication;
   }
+
+  private assertApproval(release: MutableRelease, approval: ReleaseApprovalInput): void {
+    if (approval.actorKind !== "human" || approval.scope.tenantId !== release.tenantId ||
+      approval.scope.siteId !== release.siteId || approval.scope.environmentId !== release.environmentId ||
+      new Date(approval.expiresAt).getTime() <= Date.now()) {
+      throw new McpEditingError("RELEASE_APPROVAL_INVALID", "Approval must be current, human, and scoped to this exact release");
+    }
+  }
 }
 
 export class EmbeddedReleaseProvider implements ReleaseProvider {
@@ -285,6 +311,7 @@ function freezeRelease(release: MutableRelease): StoredRelease {
     workflow: release.workflow,
     releaseHash: release.releaseHash,
     artifactHash: release.artifactHash,
+    correlationId: release.correlationId,
     status: release.status,
     manifest: release.manifest,
     artifact: release.artifact,

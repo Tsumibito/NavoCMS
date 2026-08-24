@@ -11,6 +11,7 @@ import {
   type ReleaseProvider
 } from "@navocms/kernel";
 import { assertSafeProjection, requirePermission } from "@navocms/security";
+import type { PostgresDatabase } from "@navocms/persistence-postgres";
 
 import { McpEditingError } from "./errors.js";
 import { MCP_LIMITS, type McpRequestContext, type PreviewPreparation } from "./model.js";
@@ -18,6 +19,7 @@ import {
   EmbeddedReleaseProvider,
   InMemoryReleaseWorkflowRepository,
   type PublicationRecord,
+  type ReleaseApprovalInput,
   type ReleaseWorkflowRepository,
   type StoredRelease
 } from "./release-repository.js";
@@ -40,6 +42,16 @@ export interface IdempotencyStore {
   reserve<T>(scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string }, operation: string, key: string, fingerprint: string): Promise<IdempotencyReservation<T>>;
   complete(scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string }, operation: string, key: string, fingerprint: string, value: unknown): Promise<void>;
   fail(scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string }, operation: string, key: string, fingerprint: string, errorCode: string): Promise<void>;
+}
+
+export interface RuntimePolicyGuard {
+  consume(request: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly principalId: string;
+    readonly operation: string;
+    readonly idempotencyKey: string;
+  }): Promise<void>;
 }
 
 export class InMemoryIdempotencyStore implements IdempotencyStore {
@@ -75,10 +87,14 @@ export class McpEditingService {
   readonly #idempotency: IdempotencyStore;
   readonly #releases: ReleaseWorkflowRepository;
   readonly #releaseProvider: ReleaseProvider;
+  readonly #database: Pick<PostgresDatabase, "withScope"> | undefined;
+  readonly #policyGuard: RuntimePolicyGuard | undefined;
   readonly #releaseConfig: Readonly<{
     environmentKey: string;
     previewBaseUrl: string;
     previewTtlSeconds: number;
+    approvalTtlSeconds: number;
+    approvalPolicyVersion: string;
   }>;
 
   public constructor(
@@ -91,17 +107,25 @@ export class McpEditingService {
       readonly environmentKey?: string;
       readonly previewBaseUrl?: string;
       readonly previewTtlSeconds?: number;
-    } = {}
+      readonly approvalTtlSeconds?: number;
+      readonly approvalPolicyVersion?: string;
+    } = {},
+    database?: Pick<PostgresDatabase, "withScope">,
+    policyGuard?: RuntimePolicyGuard
   ) {
     this.#repository = repository;
     this.#events = events;
     this.#idempotency = idempotency;
     this.#releases = releases;
     this.#releaseProvider = releaseProvider;
+    this.#database = database;
+    this.#policyGuard = policyGuard;
     this.#releaseConfig = Object.freeze({
       environmentKey: releaseConfig.environmentKey ?? "development",
       previewBaseUrl: (releaseConfig.previewBaseUrl ?? "https://preview.example.test").replace(/\/$/, ""),
-      previewTtlSeconds: releaseConfig.previewTtlSeconds ?? 3600
+      previewTtlSeconds: releaseConfig.previewTtlSeconds ?? 3600,
+      approvalTtlSeconds: releaseConfig.approvalTtlSeconds ?? 900,
+      approvalPolicyVersion: releaseConfig.approvalPolicyVersion ?? "navocms.release-approval.v1"
     });
   }
 
@@ -202,7 +226,7 @@ export class McpEditingService {
         documentId: draft.id,
         revisionId: draft.revisionId,
         sourceHash: draft.sourceHash
-      });
+      }, "G1", draft.id);
       return safe({ draft, next: "Review the exact revision or prepare a structural patch." });
     });
   }
@@ -228,7 +252,7 @@ export class McpEditingService {
         revisionId: result.draft.revisionId,
         sourceHash: result.draft.sourceHash,
         operationCount: input.operations.length
-      });
+      }, "G1", result.draft.id);
       return safe({ draft: result.draft, diff: boundDiff(result.diff) });
     });
   }
@@ -239,7 +263,7 @@ export class McpEditingService {
   }
 
   public async preparePreview(context: McpRequestContext, revisionId: string, idempotencyKey: string): Promise<PreviewPreparation> {
-    const repositoryContext = await this.requireSite(context, "content:read");
+    const repositoryContext = await this.requireSite(context, "content:draft");
     return this.idempotent({
       tenantId: repositoryContext.site.tenantId,
       siteId: repositoryContext.site.siteId,
@@ -271,7 +295,8 @@ export class McpEditingService {
         releaseHash,
         artifact,
         previewTokenHash: sha256(token),
-        previewExpiresAt: expiresAt
+        previewExpiresAt: expiresAt,
+        correlationId: revision.documentId
       });
       await this.appendEvent(context, "io.navocms.release.preview.created.v1", release.id, idempotencyKey, {
         phase: "verified",
@@ -280,7 +305,7 @@ export class McpEditingService {
         artifactHash: artifact.hash,
         revisionId: revision.id,
         expiresAt
-      });
+      }, "G1", release.correlationId);
       return safe({
         status: "previewed",
         releaseId: release.id,
@@ -307,11 +332,16 @@ export class McpEditingService {
     readonly idempotencyKey: string;
   }): Promise<object> {
     const repositoryContext = await this.requireSite(context, "content:publish");
+    if (context.authorization.principal.kind !== "human") {
+      throw new McpEditingError("HUMAN_APPROVAL_REQUIRED", "Only a human publisher can approve a release");
+    }
     return this.idempotent({ ...scope(repositoryContext), principalId: context.authorization.principal.id }, "release_approve", input.idempotencyKey, input, async () => {
-      const release = await this.#releases.approve(repositoryContext, input.releaseId, input.releaseHash);
+      const candidate = await this.#releases.getRelease(repositoryContext, input.releaseId);
+      const release = await this.#releases.approve(repositoryContext, input.releaseId, input.releaseHash,
+        this.approvalFor(context, repositoryContext, candidate.environmentId));
       await this.appendEvent(context, "io.navocms.release.approved.v1", release.id, input.idempotencyKey, {
         phase: "applied", releaseId: release.id, releaseHash: release.releaseHash, artifactHash: release.artifactHash
-      });
+      }, "G1", release.correlationId);
       return safe({ release: releaseProjection(release), nextStep: "publish-exact-release" });
     });
   }
@@ -327,7 +357,7 @@ export class McpEditingService {
       await this.appendEvent(context, "io.navocms.release.published.v1", input.releaseId, input.idempotencyKey, {
         phase: "verified", releaseId: input.releaseId, releaseHash: input.releaseHash,
         artifactHash: publication.artifactHash, providerKey: publication.providerKey
-      });
+      }, "G2", (await this.#releases.getRelease(repositoryContext, input.releaseId)).correlationId);
       return safe({ release: releaseProjection(await this.#releases.getRelease(repositoryContext, input.releaseId)), publication });
     });
   }
@@ -352,7 +382,7 @@ export class McpEditingService {
       const release = await this.#releases.getRelease(repositoryContext, input.releaseId);
       await this.appendEvent(context, "io.navocms.release.reconciled.v1", release.id, input.idempotencyKey, {
         phase: "verified", releaseId: release.id, releaseHash: release.releaseHash, status: release.status
-      });
+      }, "G1", release.correlationId);
       return safe({ release: releaseProjection(release), ...(publication ? { publication } : {}) });
     });
   }
@@ -370,7 +400,7 @@ export class McpEditingService {
       await this.appendEvent(context, "io.navocms.release.rolled-back.v1", release.id, input.idempotencyKey, {
         phase: "verified", releaseId: release.id, releaseHash: release.releaseHash,
         restoredPublicationId: prepared.target.id, restoredArtifactHash: prepared.target.artifactHash
-      });
+      }, "G1", release.correlationId);
       return safe({ release: releaseProjection(release), restoredPublication: prepared.target });
     });
   }
@@ -420,6 +450,18 @@ export class McpEditingService {
     input: unknown,
     create: () => Promise<T>
   ): Promise<T> {
+    await this.#policyGuard?.consume({ ...scope, operation, idempotencyKey: key });
+    if (this.#database) return this.#database.withScope(scope, () => this.idempotentInTransaction(scope, operation, key, input, create));
+    return this.idempotentInTransaction(scope, operation, key, input, create);
+  }
+
+  private async idempotentInTransaction<T>(
+    scope: { readonly tenantId: string; readonly siteId: string; readonly principalId: string },
+    operation: string,
+    key: string,
+    input: unknown,
+    create: () => Promise<T>
+  ): Promise<T> {
     const fingerprint = inputFingerprint(input);
     let reservation: IdempotencyReservation<T>;
     try {
@@ -456,19 +498,36 @@ export class McpEditingService {
     type: string,
     subject: string,
     idempotencyKey: string,
-    data: Record<string, unknown>
+    data: Record<string, unknown>,
+    consequence: "G1" | "G2" = "G1",
+    correlationId?: string
   ): Promise<void> {
     const factory = new DomainEventFactory({
       source: "urn:navocms:mcp",
       tenantId: context.authorization.tenantId,
       siteId: context.authorization.siteId,
-      correlationId: randomUUID(),
+      correlationId: correlationId ?? randomUUID(),
       actor: {
         type: context.authorization.principal.kind,
         id: context.authorization.principal.id
       }
     });
-    await this.#events.append(factory.create({ type, subject, consequence: "G1", idempotencyKey, data }));
+    await this.#events.append(factory.create({ type, subject, consequence, idempotencyKey, data }));
+  }
+
+  private approvalFor(context: McpRequestContext, repositoryContext: RepositoryContext, environmentId: string): ReleaseApprovalInput {
+    return Object.freeze({
+      policyVersion: this.#releaseConfig.approvalPolicyVersion,
+      // Keep verifiable, non-secret evidence; the OIDC subject itself remains in the identity store.
+      evidence: Object.freeze({ actorReferenceHash: sha256(`${context.authorization.principal.issuer}|${context.authorization.principal.subject}`), channel: "authenticated-mcp" }),
+      expiresAt: new Date(Date.now() + this.#releaseConfig.approvalTtlSeconds * 1000).toISOString(),
+      actorKind: "human",
+      scope: Object.freeze({
+        tenantId: repositoryContext.site.tenantId,
+        siteId: repositoryContext.site.siteId,
+        environmentId
+      })
+    });
   }
 }
 

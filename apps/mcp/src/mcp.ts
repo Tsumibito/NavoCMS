@@ -6,9 +6,10 @@ import {
   RESOURCE_MIME_TYPE
 } from "@modelcontextprotocol/ext-apps/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ContentError } from "@navocms/content";
 import { KernelError } from "@navocms/kernel";
-import { SecurityError } from "@navocms/security";
+import { effectivePermissions, SecurityError, type Permission } from "@navocms/security";
 import { z } from "zod";
 
 import { McpEditingError } from "./errors.js";
@@ -32,15 +33,28 @@ const operationSchema = z.discriminatedUnion("op", [
 
 export function createMcpServer(service: McpEditingService, context: McpRequestContext): McpServer {
   const server = new McpServer({ name: "NavoCMS", version: "0.1.0" });
+  const can = (permission: Permission) => effectivePermissions(context.authorization.layers).includes(permission)
+    && (!context.authorization.expiresAt || new Date(context.authorization.expiresAt).getTime() > Date.now());
+  const canRead = can("content:read");
+  const canDraft = can("content:draft");
+  const canPublish = can("content:publish");
 
-  server.registerTool("sites_list", {
+  // The SDK only advertises tools/list after the first tool is registered.
+  // A fully denied principal must still receive a valid, empty discovery
+  // response rather than a protocol-level "method not found" error.
+  if (!canRead && !canDraft && !canPublish) {
+    server.server.registerCapabilities({ tools: { listChanged: false } });
+    server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [] }));
+  }
+
+  if (canRead) server.registerTool("sites_list", {
     title: "List authorized sites",
     description: "List only the site visible to the current OAuth token. Use before content work when site context is unclear.",
     inputSchema: {},
     annotations: readOnlyAnnotations()
   }, safeTool(async () => result("Authorized site", { sites: await service.listSites(context) })));
 
-  server.registerTool("content_search", {
+  if (canRead) server.registerTool("content_search", {
     title: "Search site content",
     description: "Search titles, slugs, types, and Markdown excerpts inside the authorized site. Returns bounded summaries, revision IDs, and source hashes.",
     inputSchema: {
@@ -50,21 +64,21 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ query, limit }) => result("Content search completed", await service.search(context, query, limit))));
 
-  server.registerTool("content_get", {
+  if (canRead) server.registerTool("content_get", {
     title: "Read a content revision",
     description: "Read portable Markdown, safe metadata, stable AST node IDs, and the source hash for one authorized revision. Use before proposing a patch.",
     inputSchema: { revisionId: z.string().min(1) },
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ revisionId }) => result("Content revision loaded", await service.getContent(context, revisionId))));
 
-  server.registerTool("drafts_list", {
+  if (canRead) server.registerTool("drafts_list", {
     title: "List drafts",
     description: "List the newest bounded draft queue for the authorized site.",
     inputSchema: { limit: z.number().int().min(1).max(20).optional() },
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ limit }) => result("Draft queue loaded", await service.listDrafts(context, limit))));
 
-  server.registerTool("draft_create", {
+  if (canDraft) server.registerTool("draft_create", {
     title: "Create a Markdown draft",
     description: "Create an immutable first revision from Markdown. Requires content:draft and an idempotency key. This never publishes content.",
     inputSchema: {
@@ -84,7 +98,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     }
   }, safeTool(async (input) => result("Draft created; nothing was published", await service.createDraft(context, input))));
 
-  server.registerTool("revision_patch", {
+  if (canDraft) server.registerTool("revision_patch", {
     title: "Apply a structural Markdown patch",
     description: "Create a new draft revision by applying stable AST operations to an exact source hash. Stale hashes fail closed. This never publishes content.",
     inputSchema: {
@@ -101,7 +115,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     }
   }, safeTool(async (input) => result("New draft revision created; nothing was published", await service.patchRevision(context, input))));
 
-  server.registerTool("revision_compare", {
+  if (canRead) server.registerTool("revision_compare", {
     title: "Compare revisions",
     description: "Compare two revisions of the same variant and return a bounded line diff with exact before/after hashes.",
     inputSchema: { fromRevisionId: z.string().min(1), toRevisionId: z.string().min(1) },
@@ -111,42 +125,42 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     await service.compare(context, fromRevisionId, toRevisionId)
   )));
 
-  server.registerTool("preview_prepare", {
+  if (canDraft) server.registerTool("preview_prepare", {
     title: "Create a protected immutable preview",
     description: "Build an expiring noindex capability URL and bind it to the exact release and artifact hashes. This does not publish.",
     inputSchema: { revisionId: z.string().min(1), idempotencyKey: z.string().min(8).max(128) },
     annotations: writeAnnotations()
   }, safeTool(async ({ revisionId, idempotencyKey }) => result("Protected preview created; nothing was published", await service.preparePreview(context, revisionId, idempotencyKey))));
 
-  server.registerTool("release_status", {
+  if (canRead) server.registerTool("release_status", {
     title: "Read release status",
     description: "Read the immutable hashes and current durable workflow state for one release.",
     inputSchema: { releaseId: z.string().uuid() },
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ releaseId }) => result("Release status loaded", await service.releaseStatus(context, releaseId))));
 
-  server.registerTool("release_approve", {
+  if (canPublish && context.authorization.principal.kind === "human") server.registerTool("release_approve", {
     title: "Approve an exact previewed release",
     description: "Approve only the supplied release hash. A stale or changed hash fails closed. Requires content:publish.",
     inputSchema: exactReleaseInput(),
     annotations: writeAnnotations()
   }, safeTool(async (input) => result("Exact release approved; it is not published yet", await service.approveRelease(context, input))));
 
-  server.registerTool("release_publish", {
+  if (canPublish) server.registerTool("release_publish", {
     title: "Publish and verify an approved release",
     description: "Publish the identical previewed artifact, verify its hash, and checkpoint the durable workflow. Requires content:publish.",
     inputSchema: exactReleaseInput(),
     annotations: writeAnnotations()
   }, safeTool(async (input) => result("Approved release published and verified", await service.publishRelease(context, input))));
 
-  server.registerTool("release_reconcile", {
+  if (canPublish) server.registerTool("release_reconcile", {
     title: "Reconcile an incomplete publication",
     description: "Resume or verify a partially completed publication without duplicating an already checkpointed effect.",
     inputSchema: exactReleaseInput(),
     annotations: writeAnnotations()
   }, safeTool(async (input) => result("Release workflow reconciled", await service.reconcileRelease(context, input))));
 
-  server.registerTool("release_rollback", {
+  if (canPublish) server.registerTool("release_rollback", {
     title: "Roll back to the previous verified publication",
     description: "Restore the prior verified artifact and retain the full audit trail. Requires exact hash and content:publish.",
     inputSchema: exactReleaseInput(),
@@ -158,10 +172,10 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     }
   }, safeTool(async (input) => result("Release rolled back to the previous verified publication", await service.rollbackRelease(context, input))));
 
-  registerStandardTools(server, service, context);
-  registerReviewTools(server, service, context);
+  if (canRead) registerStandardTools(server, service, context);
+  if (canRead) registerReviewTools(server, service, context, canDraft);
 
-  server.registerResource("authorized-site-profile", SITE_RESOURCE_URI, {
+  if (canRead) server.registerResource("authorized-site-profile", SITE_RESOURCE_URI, {
     title: "Authorized NavoCMS site profile",
     description: "Safe agent-readable identity and locale profile for the OAuth-scoped site.",
     mimeType: "application/json"
@@ -203,7 +217,7 @@ function registerStandardTools(server: McpServer, service: McpEditingService, co
   }, safeTool(async ({ id }) => jsonOnly(await service.fetch(context, id))));
 }
 
-function registerReviewTools(server: McpServer, service: McpEditingService, context: McpRequestContext): void {
+function registerReviewTools(server: McpServer, service: McpEditingService, context: McpRequestContext, canDraft: boolean): void {
   const appMeta = { ui: { resourceUri: WIDGET_URI, visibility: ["model"] as const } };
   registerAppTool(server, "review_markdown", {
     title: "Show Markdown review",
@@ -246,7 +260,7 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     return result("Draft queue opened", { view: "drafts", ...queue });
   }));
 
-  registerAppTool(server, "review_preview_handoff", {
+  if (canDraft) registerAppTool(server, "review_preview_handoff", {
     title: "Show preview handoff",
     description: "Render whether an immutable revision is safely bound and ready for the protected preview workflow.",
     inputSchema: { revisionId: z.string().min(1), idempotencyKey: z.string().min(8).max(128) },

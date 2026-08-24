@@ -4,6 +4,7 @@ import {
   PostgresEventStore,
   PostgresIdentityResolver,
   PostgresIdempotencyStore,
+  PostgresRuntimePolicyGuard,
   requireDatabaseUrl
 } from "@navocms/persistence-postgres";
 
@@ -14,21 +15,32 @@ import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository
 import { EmbeddedReleaseProvider, InMemoryReleaseWorkflowRepository } from "./release-repository.js";
 import { InMemoryEditingRepository } from "./repository.js";
 import { McpEditingService, type IdempotencyStore } from "./service.js";
+import { bootPinnedProductionPluginHost } from "./production-profile.js";
 
 const resource = required("NAVOCMS_MCP_RESOURCE");
 const issuer = required("NAVOCMS_OIDC_ISSUER");
 const jwksUrl = required("NAVOCMS_OIDC_JWKS_URL");
 const runtimeMode = process.env.NAVOCMS_RUNTIME_MODE ?? (process.env.NODE_ENV === "production" ? "production" : "development");
+const pluginHost = runtimeMode === "production" ? await bootPinnedProductionPluginHost() : undefined;
 const databaseUrl = process.env.NAVOCMS_DATABASE_URL;
+const deploymentScope = Object.freeze({
+  tenantId: databaseUrl ? required("NAVOCMS_TENANT_ID") : required("NAVOCMS_DEVELOPMENT_TENANT_ID"),
+  siteId: databaseUrl ? required("NAVOCMS_SITE_ID") : required("NAVOCMS_DEVELOPMENT_SITE_ID")
+});
+const environmentKey = runtimeMode === "production" ? required("NAVOCMS_ENVIRONMENT") : (process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode);
+const deploymentEnvironmentKey = process.env.NAVOCMS_ENVIRONMENT_KEY ?? "default";
 const database = databaseUrl ? new PostgresDatabase({
   connectionString: requireDatabaseUrl(databaseUrl),
-  applicationName: `navocms-mcp-${process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode}`,
-  maxConnections: environmentInteger("NAVOCMS_DATABASE_POOL_MAX", 8, 100)
+  applicationName: `navocms-mcp-${environmentKey}`,
+  maxConnections: environmentInteger("NAVOCMS_DATABASE_POOL_MAX", 8, 100),
+  ...(runtimeMode === "production" ? {
+    readinessScope: {
+      ...deploymentScope,
+      principalId: required("NAVOCMS_RUNTIME_PRINCIPAL_ID"),
+      environmentKey: deploymentEnvironmentKey
+    }
+  } : {})
 }) : undefined;
-const deploymentScope = Object.freeze({
-  tenantId: database ? required("NAVOCMS_TENANT_ID") : required("NAVOCMS_DEVELOPMENT_TENANT_ID"),
-  siteId: database ? required("NAVOCMS_SITE_ID") : required("NAVOCMS_DEVELOPMENT_SITE_ID")
-});
 const identityResolver = database ? new PostgresIdentityResolver(database, deploymentScope) : undefined;
 
 let service: McpEditingService;
@@ -40,10 +52,12 @@ if (database) {
     new PostgresReleaseWorkflowRepository(database),
     new EmbeddedReleaseProvider(),
     {
-      environmentKey: process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode,
+      environmentKey,
       previewBaseUrl: process.env.NAVOCMS_PREVIEW_BASE_URL ?? new URL(resource).origin,
-      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800)
-    }
+      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800),
+      approvalTtlSeconds: environmentInteger("NAVOCMS_APPROVAL_TTL_SECONDS", 900, 86_400),
+      approvalPolicyVersion: process.env.NAVOCMS_APPROVAL_POLICY_VERSION ?? "navocms.release-approval.v1"
+    }, database, new PostgresRuntimePolicyGuard(database)
   );
 } else {
   if (runtimeMode !== "development") throw new Error("NAVOCMS_DATABASE_URL is required outside development mode");
@@ -62,9 +76,11 @@ if (database) {
     new InMemoryReleaseWorkflowRepository(required("NAVOCMS_DEVELOPMENT_ENVIRONMENT_ID")),
     new EmbeddedReleaseProvider(),
     {
-      environmentKey: process.env.NAVOCMS_ENVIRONMENT ?? "development",
+      environmentKey,
       previewBaseUrl: process.env.NAVOCMS_PREVIEW_BASE_URL ?? new URL(resource).origin,
-      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800)
+      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800),
+      approvalTtlSeconds: environmentInteger("NAVOCMS_APPROVAL_TTL_SECONDS", 900, 86_400),
+      approvalPolicyVersion: process.env.NAVOCMS_APPROVAL_POLICY_VERSION ?? "navocms.release-approval.v1"
     }
   );
 }
@@ -82,7 +98,12 @@ const server = createMcpHttpServer({
   authorizationServers: [issuer],
   scopes: ["openid"],
   ...(identityResolver ? { resolveAuthorization: (token) => identityResolver.resolve(token) } : {}),
-  ...(database ? { readiness: () => database.ready() } : {})
+  ...(database ? {
+    readiness: async () => ({
+      ready: await database.ready() && (pluginHost?.state === "healthy"),
+      ...(pluginHost ? { pluginHost: pluginHost.status() } : {})
+    })
+  } : {})
 });
 const port = Number(process.env.PORT ?? "8788");
 const host = process.env.NAVOCMS_HOST ?? (runtimeMode === "development" ? "127.0.0.1" : "0.0.0.0");
@@ -93,7 +114,9 @@ server.listen(port, host, () => {
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
     server.close(() => {
-      void database?.close().finally(() => process.exit(0));
+      void (pluginHost ? pluginHost.shutdown() : Promise.resolve())
+        .finally(() => database?.close())
+        .finally(() => process.exit(0));
     });
   });
 }

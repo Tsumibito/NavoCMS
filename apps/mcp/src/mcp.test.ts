@@ -203,7 +203,7 @@ describe("MCP protocol and agent evaluations", () => {
   });
 
   it("exposes goal-oriented tools, standard search/fetch, safe fallbacks, resources, and review UI", async () => {
-    const { service, context } = fixture("editor");
+    const { service, context } = fixture("publisher");
     const server = createMcpServer(service, context);
     const client = new Client({ name: "navocms-test-client", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -262,16 +262,46 @@ describe("MCP protocol and agent evaluations", () => {
     await server.close();
   });
 
-  const cases = [
-    { prompt: "Какие черновики есть?", expected: "drafts_list" },
-    { prompt: "Покажи разницу этих двух версий", expected: "revision_compare" },
-    { prompt: "Замени абзац, но не публикуй", expected: "revision_patch" },
-    { prompt: "Подготовь безопасное превью", expected: "preview_prepare" }
-  ] as const;
+  it("discovers only tools allowed by the resolved authorization layers", async () => {
+    const { service } = fixture("publisher");
+    const namesFor = async (context: ReturnType<typeof requestContext>) => {
+      const server = createMcpServer(service, context);
+      const client = new Client({ name: "navocms-permission-evaluation", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      try {
+        return (await client.listTools()).tools.map(({ name }) => name);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    };
 
-  it.each(cases)("documents deterministic tool routing for: $prompt", ({ expected }) => {
-    expect(expected).toMatch(/^(drafts_list|revision_compare|revision_patch|preview_prepare)$/);
+    const viewer = await namesFor(requestContext("viewer"));
+    expect(viewer).toContain("content_get");
+    expect(viewer).not.toEqual(expect.arrayContaining(["draft_create", "preview_prepare", "release_approve", "release_publish"]));
+
+    const editor = await namesFor(requestContext("editor"));
+    expect(editor).toEqual(expect.arrayContaining(["draft_create", "revision_patch", "preview_prepare"]));
+    expect(editor).not.toEqual(expect.arrayContaining(["release_approve", "release_publish"]));
+
+    const publisher = await namesFor(requestContext("publisher"));
+    expect(publisher).toEqual(expect.arrayContaining(["release_approve", "release_publish", "release_reconcile"]));
+
+    const agentPublisher = requestContext("publisher");
+    const agentContext = { authorization: { ...agentPublisher.authorization, principal: { ...agentPublisher.authorization.principal, kind: "agent" as const } } };
+    const agent = await namesFor(agentContext);
+    expect(agent).toContain("release_publish");
+    expect(agent).not.toContain("release_approve");
+
+    const expired = await namesFor({ authorization: { ...requestContext("publisher").authorization, expiresAt: "2020-01-01T00:00:00.000Z" } });
+    expect(expired).toEqual([]);
+
+    const crossSite = await namesFor(requestContext("publisher", "33333333-3333-4333-8333-333333333333"));
+    expect(crossSite).toContain("release_publish");
+    await expect(service.listSites(requestContext("publisher", "33333333-3333-4333-8333-333333333333"))).rejects.toMatchObject({ code: "SITE_NOT_REGISTERED" });
   });
+
 });
 
 function fixture(role: SiteRole) {

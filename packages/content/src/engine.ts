@@ -192,13 +192,17 @@ export class ContentEngine {
   public patchRevision(input: PatchRevisionInput): { readonly revision: ContentRevision; readonly diff: RevisionDiff } {
     const base = this.requireRevision(input, input.revisionId);
     const document = this.requireDocument(input, base.documentId);
-    const metadata = input.metadata ?? base.metadata;
     const result = applyStructuralPatch({
       source: base.source,
       baseSourceHash: input.baseSourceHash,
       operations: input.operations,
       directives: this.directivesFor(input, document.typeName)
     });
+    // `body` is a supported metadata mirror in the foundation packs. Never let it
+    // point at the previous revision after a structural patch.
+    const metadata = input.metadata ?? (
+      typeof base.metadata.body === "string" ? { ...base.metadata, body: result.source } : base.metadata
+    );
     const revision = this.createRevision({
       ...input,
       documentId: base.documentId,
