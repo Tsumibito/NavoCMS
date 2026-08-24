@@ -20,6 +20,27 @@ export class PostgresIdempotencyStore {
     this.#database = database;
   }
 
+  /**
+   * Read an existing reservation before an external effect. Reservations are
+   * still created exclusively by {@link reserve}; this method never changes
+   * their lifecycle.
+   */
+  public async lookup<T>(scope: DatabaseScope, operation: string, key: string, fingerprint: string): Promise<IdempotencyReservation<T> | undefined> {
+    return this.#database.withScope(scope, async (client) => {
+      const existing = await client.query<IdempotencyRow>(
+        `SELECT input_fingerprint, status, response_json, error_code
+           FROM navocms.idempotency_records
+          WHERE tenant_id = $1 AND site_id = $2 AND operation = $3 AND idempotency_key = $4`,
+        [scope.tenantId, scope.siteId, operation, key]
+      );
+      const row = existing.rows[0];
+      if (!row) return undefined;
+      if (row.input_fingerprint !== fingerprint) throw new Error("IDEMPOTENCY_KEY_REUSED");
+      if (row.status === "completed") return { status: "completed", value: row.response_json as T };
+      return { status: row.status, ...(row.error_code ? { errorCode: row.error_code } : {}) };
+    });
+  }
+
   public async reserve<T>(scope: DatabaseScope, operation: string, key: string, fingerprint: string): Promise<IdempotencyReservation<T>> {
     return this.#database.withScope(scope, async (client) => {
       const inserted = await client.query(

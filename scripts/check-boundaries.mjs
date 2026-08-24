@@ -53,6 +53,12 @@ const rules = [
     reason: "the Astro design adapter cannot depend on applications, plugins, the kernel, or transport"
   },
   {
+    directory: "packages/media/src",
+    forbidden: ["apps/", "plugins/", "fastify"],
+    allowedWorkspaceImports: ["@navocms/kernel", "@navocms/persistence-postgres", "@navocms/security"],
+    reason: "the media boundary may use only kernel events, the PostgreSQL adapter, and security primitives"
+  },
+  {
     directory: "plugins/noop-service/src",
     forbidden: ["@navocms/kernel"],
     reason: "service plugins must not import the trusted kernel"
@@ -65,6 +71,13 @@ for (const rule of rules) {
     const source = await readFile(path.join(root, file), "utf8");
     for (const forbidden of rule.forbidden) {
       if (source.includes(forbidden)) violations.push(`${file}: ${rule.reason} (${forbidden})`);
+    }
+    if (rule.allowedWorkspaceImports) {
+      for (const match of source.matchAll(/from\s+["'](@navocms\/[^"']+)["']/g)) {
+        if (!rule.allowedWorkspaceImports.includes(match[1])) {
+          violations.push(`${file}: ${rule.reason} (${match[1]} is not an allowed workspace dependency)`);
+        }
+      }
     }
   }
 }
