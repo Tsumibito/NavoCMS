@@ -67,7 +67,7 @@ integration("atomic media repository", () => {
     await repository.rejectAsset(scope, { assetId: rejected.asset.id, reason: "operator_rejected", idempotencyKey: `${key}-reject` });
     await expect(signer.sign(scope, rejected.intentId, 60)).rejects.toThrow("INTENT");
     const expired = uploadIntent(await repository.createUploadIntent(scope, createInput(`${key}-expired`)));
-    await database!.withScope(scope, (client) => client.query("UPDATE navocms.media_upload_intents SET expires_at = now() - interval '1 second' WHERE id = $1", [expired.intentId]));
+    await database!.withScope(scope, (client) => client.query("UPDATE navocms.media_upload_intents SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second' WHERE id = $1", [expired.intentId]));
     await expect(signer.sign(scope, expired.intentId, 60)).rejects.toThrow("INTENT");
   });
 
