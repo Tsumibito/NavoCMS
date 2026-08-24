@@ -69,7 +69,10 @@ function repository(): MediaRepository {
     finalizeUpload: async () => asset, getAsset: async () => asset,
     getAssetReview: async () => ({ ...asset, provenance: {}, rights: {}, references: [] }),
     listAssets: async () => ({ assets: [asset] }), listReferences: async () => ({ references: [] }),
-    createReference: async () => ({ id: "33333333-3333-4333-8333-333333333333" }), removeReference: async () => undefined, rejectAsset: async () => ({ ...asset, state: "rejected" as const, rejectionReason: "rejected" })
+    createReference: async () => ({ id: "33333333-3333-4333-8333-333333333333" }), removeReference: async () => undefined, rejectAsset: async () => ({ ...asset, state: "rejected" as const, rejectionReason: "rejected" }),
+    scheduleDelete: async () => ({ ...asset, state: "deleted" as const }), recoverableDelete: async () => undefined,
+    restore: async () => ({ ...asset, state: "verified" as const }), reclaim: async () => undefined,
+    reconcile: async () => ({ inspected: 0, orphanedStorageObjects: 0, missingStorageObjects: 0 })
   };
 }
 
