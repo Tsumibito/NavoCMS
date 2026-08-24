@@ -357,10 +357,10 @@ async function failedDedupCounts(keys: readonly string[], sourceUrls: readonly s
   return database!.withScope(scope, async (client) => (
     await client.query<{ assets: string; intents: string; originals: string; idempotency: string; ledger: string; outbox: string }>(
       `SELECT
-        (SELECT count(*) FROM navocms.media_assets WHERE provenance->>'sourceUrl' = ANY($2::text[])) AS assets,
+        (SELECT count(*) FROM navocms.media_assets WHERE provenance_json->>'sourceUrl' = ANY($2::text[])) AS assets,
         (SELECT count(*) FROM navocms.media_upload_intents WHERE operation_key = ANY($1::text[])) AS intents,
         (SELECT count(*) FROM navocms.media_originals o JOIN navocms.media_assets a ON a.id = o.asset_id
-          WHERE a.provenance->>'sourceUrl' = ANY($2::text[])) AS originals,
+          WHERE a.provenance_json->>'sourceUrl' = ANY($2::text[])) AS originals,
         (SELECT count(*) FROM navocms.idempotency_records WHERE idempotency_key = ANY($1::text[])) AS idempotency,
         (SELECT count(*) FROM navocms.event_ledger WHERE event_json->>'navoidempotencykey' = ANY($3::text[])) AS ledger,
         (SELECT count(*) FROM navocms.domain_outbox WHERE payload_json->>'navoidempotencykey' = ANY($3::text[])) AS outbox`,
