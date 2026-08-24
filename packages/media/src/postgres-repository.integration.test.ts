@@ -287,16 +287,21 @@ integration("atomic media repository", () => {
     const key = `media-dedup-metadata-${randomUUID()}`;
     const intent = uploadIntent(await repository.createUploadIntent(scope, createInput(key)));
     await finalize(repository, storage, intent, key);
-    const before = await mediaRowCounts();
     const sizeKey = `media-dedup-size-${randomUUID()}`;
     const mimeKey = `media-dedup-mime-${randomUUID()}`;
-    await expect(repository.createUploadIntent(scope, { ...createInput(sizeKey, "image/png", mediaBytes(key)), expectedSize: mediaBytes(key).byteLength + 1 })).rejects.toThrow("DEDUP_METADATA_MISMATCH");
-    await expect(repository.createUploadIntent(scope, { ...createInput(mimeKey, "image/jpeg", mediaBytes(key)) })).rejects.toThrow("DEDUP_METADATA_MISMATCH");
-    expect(await mediaRowCounts()).toEqual(before);
-    const idempotency = await database!.withScope(scope, async (client) => (
-      await client.query<{ count: string }>("SELECT count(*) FROM navocms.idempotency_records WHERE idempotency_key = ANY($1::text[])", [[sizeKey, mimeKey]])
-    ).rows[0]!.count);
-    expect(idempotency).toBe("0");
+    const sourceUrls = [`https://example.com/${sizeKey}`, `https://example.com/${mimeKey}`];
+    const sizeInput = createInput(sizeKey, "image/png", mediaBytes(key));
+    const mimeInput = createInput(mimeKey, "image/jpeg", mediaBytes(key));
+    await expect(repository.createUploadIntent(scope, {
+      ...sizeInput, expectedSize: mediaBytes(key).byteLength + 1,
+      provenance: { ...sizeInput.provenance, sourceUrl: sourceUrls[0] }
+    })).rejects.toThrow("DEDUP_METADATA_MISMATCH");
+    await expect(repository.createUploadIntent(scope, {
+      ...mimeInput, provenance: { ...mimeInput.provenance, sourceUrl: sourceUrls[1] }
+    })).rejects.toThrow("DEDUP_METADATA_MISMATCH");
+    expect(await failedDedupCounts([sizeKey, mimeKey], sourceUrls)).toEqual({
+      assets: "0", intents: "0", originals: "0", idempotency: "0", ledger: "0", outbox: "0"
+    });
   });
 });
 
@@ -347,15 +352,19 @@ async function countsFor(assetId: string, idempotencyKeys: readonly string[]) {
   });
 }
 
-async function mediaRowCounts() {
+async function failedDedupCounts(keys: readonly string[], sourceUrls: readonly string[]) {
+  const eventKeys = keys.map((key) => `media_upload_intent_create:${key}`);
   return database!.withScope(scope, async (client) => (
-    await client.query<{ assets: string; intents: string; originals: string; ledger: string; outbox: string }>(
+    await client.query<{ assets: string; intents: string; originals: string; idempotency: string; ledger: string; outbox: string }>(
       `SELECT
-        (SELECT count(*) FROM navocms.media_assets) AS assets,
-        (SELECT count(*) FROM navocms.media_upload_intents) AS intents,
-        (SELECT count(*) FROM navocms.media_originals) AS originals,
-        (SELECT count(*) FROM navocms.event_ledger) AS ledger,
-        (SELECT count(*) FROM navocms.domain_outbox) AS outbox`
+        (SELECT count(*) FROM navocms.media_assets WHERE provenance->>'sourceUrl' = ANY($2::text[])) AS assets,
+        (SELECT count(*) FROM navocms.media_upload_intents WHERE operation_key = ANY($1::text[])) AS intents,
+        (SELECT count(*) FROM navocms.media_originals o JOIN navocms.media_assets a ON a.id = o.asset_id
+          WHERE a.provenance->>'sourceUrl' = ANY($2::text[])) AS originals,
+        (SELECT count(*) FROM navocms.idempotency_records WHERE idempotency_key = ANY($1::text[])) AS idempotency,
+        (SELECT count(*) FROM navocms.event_ledger WHERE event_json->>'navoidempotencykey' = ANY($3::text[])) AS ledger,
+        (SELECT count(*) FROM navocms.domain_outbox WHERE payload_json->>'navoidempotencykey' = ANY($3::text[])) AS outbox`,
+      [keys, sourceUrls, eventKeys]
     )).rows[0]!
   );
 }
