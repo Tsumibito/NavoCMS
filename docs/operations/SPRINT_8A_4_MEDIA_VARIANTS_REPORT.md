@@ -2,8 +2,8 @@
 
 ## Status
 
-Implementation is in progress and the gate is not closed. PostgreSQL CI evidence
-must be retained before acceptance.
+Accepted. The code gate is closed by retained GitHub PostgreSQL CI evidence for
+commit `1d830f8`; no PostgreSQL scenarios were skipped.
 
 ## Current design
 
@@ -37,6 +37,12 @@ must be retained before acceptance.
   against the exact deterministic output and fail closed on drift.
 - Final variant record, checkpoint completion, idempotency result, Event
   Ledger, and outbox remain in one scoped PostgreSQL transaction.
+- The first PostgreSQL run exposed that `SELECT ... FOR UPDATE` required an
+  intentionally revoked runtime `UPDATE` privilege. The final implementation
+  keeps variants immutable, uses the existing advisory lock for serialization,
+  and performs a privilege-safe exact read. Integration fixtures also use a
+  distinct real PNG per scenario so site-level SHA dedup cannot leak state
+  between tests.
 
 ## Verification
 
@@ -45,5 +51,8 @@ must be retained before acceptance.
 - PostgreSQL coverage now includes three formats, replay/drift, concurrency,
   cross-site denial, invalid transforms before effects, source mismatch,
   post-storage crash recovery, and injected Ledger/outbox rollback.
-- GitHub PostgreSQL CI without skipped tests, media isolation suite, and the
-  production-container build remain required before acceptance.
+- Retained GitHub run
+  [32754399753](https://github.com/Tsumibito/NavoCMS/actions/runs/32754399753)
+  applied all 9 migrations and passed 28 test files / 112 tests with no skips,
+  5 visual tests, the media isolation SQL suite, and the production-container
+  build.
