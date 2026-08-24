@@ -31,8 +31,16 @@ integration("atomic media repository", () => {
     expect(replayed).toEqual(finalized);
     await expect(repository.finalizeUpload(scope, { ...finalizeInput(intent, key), uploadedStorageKey: "wrong" })).rejects.toThrow("IDEMPOTENCY_KEY_REUSED");
     expect(await repository.getAsset(scope, intent.asset.id)).toEqual(finalized);
-    expect(await repository.listAssets(scope, 1)).toHaveLength(1);
+    const firstPage = await repository.listAssets(scope, 1);
+    expect(firstPage.assets).toHaveLength(1);
+    const secondIntent = uploadIntent(await repository.createUploadIntent(scope, createInput(`${key}-page-two`)));
+    const pageWithCursor = await repository.listAssets(scope, 1);
+    expect(pageWithCursor.nextCursor).toBeDefined();
+    const secondPage = await repository.listAssets(scope, 1, pageWithCursor.nextCursor);
+    expect(secondPage.assets[0]?.id).not.toBe(pageWithCursor.assets[0]?.id);
+    expect(secondIntent.asset.id).toBeTruthy();
     await expect(repository.listAssets(scope, 0)).rejects.toThrow("LIMIT");
+    await expect(repository.listAssets(scope, 1, "invalid")).rejects.toThrow("CURSOR");
     const counts = await countsFor(intent.asset.id, [key, `${key}-finalize`]);
     expect(counts).toMatchObject({ assets: "1", originals: "1", finalized: "1", idempotency: "2", ledger: "3", outbox: "3" });
   });
@@ -115,6 +123,18 @@ integration("atomic media repository", () => {
     const intent = uploadIntent(await repository.createUploadIntent(scope, createInput(key)));
     const reference = await repository.createReference(scope, {
       assetId: intent.asset.id, ownerType: "content.entry", ownerId: randomUUID(), purpose: "hero", idempotencyKey: `${key}-reference`
+    });
+    const secondReference = await repository.createReference(scope, {
+      assetId: intent.asset.id, ownerType: "content.entry", ownerId: randomUUID(), purpose: "thumbnail", idempotencyKey: `${key}-reference-two`
+    });
+    const firstPage = await repository.listReferences(scope, intent.asset.id, 1);
+    expect(firstPage).toMatchObject({ references: [{ id: expect.any(String) }], nextCursor: expect.any(String) });
+    const secondPage = await repository.listReferences(scope, intent.asset.id, 1, firstPage.nextCursor);
+    expect(secondPage.references[0]?.id).not.toBe(firstPage.references[0]?.id);
+    await expect(repository.getAssetReview(scope, intent.asset.id, 10)).resolves.toMatchObject({
+      provenance: { receivedBy: scope.principalId }, rights: { license: "test" }, references: expect.arrayContaining([
+        expect.objectContaining({ id: reference.id }), expect.objectContaining({ id: secondReference.id })
+      ])
     });
     await repository.removeReference(scope, reference.id, `${key}-remove`);
     const rejected = await repository.rejectAsset(scope, { assetId: intent.asset.id, reason: "policy denied", idempotencyKey: `${key}-reject` });

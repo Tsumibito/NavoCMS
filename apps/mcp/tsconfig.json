@@ -10,6 +10,7 @@
     { "path": "../../packages/security" },
     { "path": "../../packages/content" },
     { "path": "../../packages/kernel" },
+    { "path": "../../packages/media" },
     { "path": "../../packages/persistence-postgres" }
   ],
   "include": ["src/**/*.ts"],

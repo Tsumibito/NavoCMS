@@ -20,6 +20,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@navocms/content": "workspace:*",
     "@navocms/kernel": "workspace:*",
+    "@navocms/media": "workspace:*",
     "@navocms/persistence-postgres": "workspace:*",
     "@navocms/security": "workspace:*",
     "zod": "4.4.3"

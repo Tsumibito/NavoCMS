@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import { McpEditingError } from "./errors.js";
 import type { McpRequestContext } from "./model.js";
+import { McpMediaService } from "./media-service.js";
 import { McpEditingService } from "./service.js";
 
 const WIDGET_URI = "ui://navocms/editorial-review-v1.html";
@@ -31,18 +32,20 @@ const operationSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("remove"), nodeId: z.string().min(1) })
 ]);
 
-export function createMcpServer(service: McpEditingService, context: McpRequestContext): McpServer {
+export function createMcpServer(service: McpEditingService, context: McpRequestContext, media?: McpMediaService): McpServer {
   const server = new McpServer({ name: "NavoCMS", version: "0.1.0" });
   const can = (permission: Permission) => effectivePermissions(context.authorization.layers).includes(permission)
     && (!context.authorization.expiresAt || new Date(context.authorization.expiresAt).getTime() > Date.now());
   const canRead = can("content:read");
   const canDraft = can("content:draft");
   const canPublish = can("content:publish");
+  const canMediaRead = can("media:read") && media !== undefined;
+  const canMediaWrite = can("media:write") && media?.storageInjected === true;
 
   // The SDK only advertises tools/list after the first tool is registered.
   // A fully denied principal must still receive a valid, empty discovery
   // response rather than a protocol-level "method not found" error.
-  if (!canRead && !canDraft && !canPublish) {
+  if (!canRead && !canDraft && !canPublish && !canMediaRead && !canMediaWrite) {
     server.server.registerCapabilities({ tools: { listChanged: false } });
     server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [] }));
   }
@@ -172,8 +175,12 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     }
   }, safeTool(async (input) => result("Release rolled back to the previous verified publication", await service.rollbackRelease(context, input))));
 
+  if (canMediaRead && media) registerMediaReadTools(server, media, context);
+  if (canMediaWrite && media) registerMediaWriteTools(server, media, context);
+
   if (canRead) registerStandardTools(server, service, context);
   if (canRead) registerReviewTools(server, service, context, canDraft);
+  if (canMediaRead && media) registerMediaReviewTool(server, media, context);
 
   if (canRead) server.registerResource("authorized-site-profile", SITE_RESOURCE_URI, {
     title: "Authorized NavoCMS site profile",
@@ -184,7 +191,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
   }));
 
   registerAppResource(server, "NavoCMS editorial review", WIDGET_URI, {
-    description: "Portable Markdown, revision diff, draft queue, and preview handoff review surface.",
+    description: "Portable Markdown, revision diff, draft queue, media integrity, and preview handoff review surface.",
     _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } }
   }, async () => ({
     contents: [{
@@ -196,6 +203,78 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
   }));
 
   return server;
+}
+
+function registerMediaReadTools(server: McpServer, media: McpMediaService, context: McpRequestContext): void {
+  server.registerTool("media_list", {
+    title: "List media assets",
+    description: "List bounded metadata for media assets in the authorized site. Requires media:read.",
+    inputSchema: { limit: z.number().int().min(1).max(100).optional(), cursor: z.string().uuid().optional() },
+    annotations: readOnlyAnnotations()
+  }, safeTool(async ({ limit, cursor }) => result("Media assets loaded", await media.list(context, limit ?? 20, cursor))));
+  server.registerTool("media_get", {
+    title: "Get media asset",
+    description: "Read safe metadata, provenance, rights, and bounded references for one asset. Requires media:read.",
+    inputSchema: { assetId: z.string().uuid(), referenceLimit: z.number().int().min(1).max(100).optional() },
+    annotations: readOnlyAnnotations()
+  }, safeTool(async ({ assetId, referenceLimit }) => result("Media asset loaded", await media.get(context, assetId, referenceLimit ?? 20))));
+  server.registerTool("media_references_list", {
+    title: "List media references",
+    description: "List bounded live references for an asset. Requires media:read.",
+    inputSchema: { assetId: z.string().uuid(), limit: z.number().int().min(1).max(100).optional(), cursor: z.string().uuid().optional() },
+    annotations: readOnlyAnnotations()
+  }, safeTool(async ({ assetId, limit, cursor }) => result("Media references loaded", await media.references(context, assetId, limit ?? 20, cursor))));
+}
+
+function registerMediaWriteTools(server: McpServer, media: McpMediaService, context: McpRequestContext): void {
+  server.registerTool("media_upload_prepare", {
+    title: "Prepare a bounded media upload",
+    description: "Create a short-lived upload intent. Requires media:write and an injected media storage capability. Do not send file bytes or base64.",
+    inputSchema: {
+      expectedSha256: z.string().regex(/^[a-f0-9]{64}$/), expectedSize: z.number().int().min(1).max(25 * 1024 * 1024),
+      expectedMediaType: z.enum(["image/jpeg", "image/png"]).optional(), expiresAt: z.string().datetime(),
+      provenance: z.object({ kind: z.enum(["upload", "remote-ingest", "import"]), sourceUrl: z.string().url().max(2048).optional(), receivedAt: z.string().datetime() }).strict(),
+      rights: z.object({ license: z.string().min(1).max(200), holder: z.string().max(200).optional(), expiresAt: z.string().datetime().optional(), restricted: z.boolean() }).strict(),
+      idempotencyKey: z.string().min(16).max(128)
+    }, annotations: writeAnnotations()
+  }, safeTool(async ({ expectedMediaType, provenance, ...input }) => result("Media upload intent created", await media.prepare(context, {
+    ...input,
+    provenance: {
+      kind: provenance.kind,
+      receivedAt: provenance.receivedAt,
+      ...(provenance.sourceUrl ? { sourceUrl: provenance.sourceUrl } : {})
+    },
+    ...(expectedMediaType ? { expectedMediaType } : {})
+  }))));
+  server.registerTool("media_upload_finalize", {
+    title: "Finalize a verified media upload",
+    description: "Verify the bounded storage object and persist its immutable original. Requires media:write. No binary payload is accepted.",
+    inputSchema: { intentId: z.string().uuid(), uploadedStorageKey: z.string().min(1).max(512), idempotencyKey: z.string().min(16).max(128) }, annotations: writeAnnotations()
+  }, safeTool(async (input) => result("Media upload finalized", await media.finalize(context, input))));
+  server.registerTool("media_reject", {
+    title: "Reject a pending media asset",
+    description: "Record a bounded rejection reason. Requires media:write.",
+    inputSchema: { assetId: z.string().uuid(), reason: z.string().min(1).max(500), idempotencyKey: z.string().min(16).max(128) }, annotations: destructiveWriteAnnotations()
+  }, safeTool(async (input) => result("Media asset rejected", await media.reject(context, input))));
+  server.registerTool("media_reference_create", {
+    title: "Create a media reference",
+    description: "Attach an existing asset to a bounded owner reference. Requires media:write.",
+    inputSchema: { assetId: z.string().uuid(), ownerType: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), ownerId: z.string().uuid(), purpose: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), idempotencyKey: z.string().min(16).max(128) }, annotations: writeAnnotations()
+  }, safeTool(async (input) => result("Media reference created", await media.createReference(context, input))));
+  server.registerTool("media_reference_remove", {
+    title: "Remove a media reference",
+    description: "Soft-remove one media reference. Requires media:write.",
+    inputSchema: { referenceId: z.string().uuid(), idempotencyKey: z.string().min(16).max(128) }, annotations: destructiveWriteAnnotations()
+  }, safeTool(async ({ referenceId, idempotencyKey }) => result("Media reference removed", await media.removeReference(context, referenceId, idempotencyKey))));
+}
+
+function registerMediaReviewTool(server: McpServer, media: McpMediaService, context: McpRequestContext): void {
+  const appMeta = { ui: { resourceUri: WIDGET_URI, visibility: ["model"] as const } };
+  registerAppTool(server, "media_review", {
+    title: "Show media review",
+    description: "Open read-only media provenance, rights, integrity, state, and reference review. Requires media:read.",
+    inputSchema: { assetId: z.string().uuid(), referenceLimit: z.number().int().min(1).max(100).optional() }, annotations: readOnlyAnnotations(), _meta: appMeta
+  }, safeTool(async ({ assetId, referenceLimit }) => result("Media review opened", { view: "media", ...await media.get(context, assetId, referenceLimit ?? 20) })));
 }
 
 function registerStandardTools(server: McpServer, service: McpEditingService, context: McpRequestContext): void {
@@ -278,6 +357,10 @@ function readOnlyAnnotations() {
 
 function writeAnnotations() {
   return { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
+}
+
+function destructiveWriteAnnotations() {
+  return { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } as const;
 }
 
 function exactReleaseInput() {
