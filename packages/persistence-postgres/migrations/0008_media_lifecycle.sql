@@ -25,7 +25,6 @@ CREATE TABLE media_lifecycle_checkpoints (
   UNIQUE (tenant_id, site_id, operation, operation_key),
   FOREIGN KEY (tenant_id, site_id, asset_id) REFERENCES media_assets(tenant_id, site_id, id) ON DELETE RESTRICT,
   CHECK ((operation = 'reconcile_orphan') = (asset_id IS NULL)),
-  CHECK ((operation IN ('schedule_delete', 'recoverable_delete', 'restore', 'reclaim')) = (asset_id IS NOT NULL)),
   CHECK ((operation IN ('schedule_delete', 'recoverable_delete', 'restore', 'reclaim', 'reconcile_orphan')) = (grace_until IS NOT NULL)),
   CHECK (operation <> 'reconcile_orphan' OR grace_until >= created_at + interval '24 hours'),
   CHECK ((status = 'completed') = (completed_at IS NOT NULL))

@@ -38,6 +38,9 @@ not declare the Sprint 8A.3 gate closed.
   that multiple missing originals are all reached.
 - A retried orphan preparation reuses its persisted grace deadline rather
   than silently extending it or publishing a different deadline.
+- The first PostgreSQL CI run exposed a contradictory lifecycle CHECK that
+  rejected a valid `reconcile_missing` checkpoint. The redundant condition
+  was removed and the SQL suite now inserts that valid state explicitly.
 
 ## Negative coverage
 
