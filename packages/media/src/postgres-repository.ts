@@ -120,8 +120,8 @@ export class PostgresMediaRepository implements MediaRepository {
     if (preflight.storage_key !== input.uploadedStorageKey) throw new Error("MEDIA_FINALIZATION_MISMATCH");
     const header = await this.#storage.head(input.uploadedStorageKey);
     if (!header) throw new Error("MEDIA_UPLOAD_OBJECT_NOT_FOUND");
-    if (header.sha256 !== preflight.expected_sha256) throw new Error("MEDIA_STORAGE_CHECKSUM_MISMATCH");
     if (header.byteSize !== Number(preflight.expected_size) || header.byteSize > MEDIA_LIMITS.maxBytes) throw new Error("MEDIA_STORAGE_SIZE_MISMATCH");
+    if (header.sha256 !== preflight.expected_sha256) throw new Error("MEDIA_STORAGE_CHECKSUM_MISMATCH");
     if (preflight.expected_media_type !== null && header.mediaType !== preflight.expected_media_type) throw new Error("MEDIA_STORAGE_MIME_MISMATCH");
     const uploaded = await this.#storage.read(input.uploadedStorageKey, Number(preflight.expected_size));
     if (!uploaded) throw new Error("MEDIA_UPLOAD_OBJECT_NOT_FOUND");
