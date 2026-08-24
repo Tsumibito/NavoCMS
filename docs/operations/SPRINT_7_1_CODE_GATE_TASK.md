@@ -21,7 +21,7 @@ exact-hash approval, immutable release records, or the embedded-only provider re
 
 ## Work checklist
 
-- [ ] **1. Boot a pinned production site profile and plugin graph**
+- [x] **1. Boot a pinned production site profile and plugin graph**
   Spec ref: `docs/roadmap/SPRINTS.md > Sprint 7.1`
   What to build: Add a checked-in, digest-pinned profile for the current embedded staging runtime,
   validated through `@navocms/contracts`, and boot it through `PluginHost` before the MCP server
@@ -34,7 +34,7 @@ exact-hash approval, immutable release records, or the embedded-only provider re
   Verify: Unit tests for valid boot, invalid digest/version, missing runtime, unhealthy runtime, and
   cleanup, followed by `pnpm typecheck` and the MCP test suite.
 
-- [ ] **2. Add durable quota and kill-switch enforcement**
+- [x] **2. Add durable quota and kill-switch enforcement**
   Spec ref: `docs/roadmap/SPRINTS.md > Sprint 2` and `Sprint 7.1`
   What to build: Implement PostgreSQL-backed runtime policy checks over `quota_limits`,
   `usage_events`, and `kill_switches`. Add an ordered migration if schema changes are required.
@@ -47,7 +47,7 @@ exact-hash approval, immutable release records, or the embedded-only provider re
   Verify: PostgreSQL concurrency, restart, period-boundary, retry, policy-store failure, and
   cross-site RLS tests.
 
-- [ ] **3. Make readiness prove the deployed contract**
+- [x] **3. Make readiness prove the deployed contract**
   Spec ref: `docs/roadmap/SPRINTS.md > Sprint 6` and `Sprint 7.1`
   What to build: Replace table-existence readiness with one structured readiness check that verifies
   every expected migration name/checksum, the runtime login is `NOBYPASSRLS`, all application tables
@@ -59,7 +59,7 @@ exact-hash approval, immutable release records, or the embedded-only provider re
   current deployment contract.
   Verify: PostgreSQL integration tests for every negative case and one complete positive case.
 
-- [ ] **4. Expose only permission-appropriate MCP tools**
+- [x] **4. Expose only permission-appropriate MCP tools**
   Spec ref: `docs/roadmap/SPRINTS.md > Sprint 4` and `Sprint 7.1`
   What to build: Derive effective permissions from the resolved authorization layers before tool
   registration. A viewer discovers read-only tools only; an editor additionally discovers draft and
@@ -71,7 +71,7 @@ exact-hash approval, immutable release records, or the embedded-only provider re
   expired authorization, and cross-site context. Delete or replace hard-coded routing assertions
   that do not execute the server.
 
-- [ ] **5. Run the complete persistence suite in CI**
+- [x] **5. Run the complete persistence suite in CI**
   Spec ref: `docs/roadmap/SPRINTS.md > Sprint 7.1`
   What to build: Provision the CI PostgreSQL database with the ordered migration runner and a real
   `navocms_runtime` login, bootstrap the fixed integration tenant/site/environment/principal, then
@@ -85,7 +85,7 @@ exact-hash approval, immutable release records, or the embedded-only provider re
   Verify: A clean CI run shows all unit/integration/visual tests passing and no skipped persistence
   suite.
 
-- [ ] **6. Add an end-to-end production-path code evaluation**
+- [x] **6. Add an end-to-end production-path code evaluation**
   Spec ref: `docs/roadmap/SPRINTS.md > Sprint 7.1 exit gate`
   What to build: In CI, boot the MCP application with the pinned profile, runtime role, durable
   policies, enhanced readiness, and embedded release provider. Execute an authenticated local
@@ -97,7 +97,7 @@ exact-hash approval, immutable release records, or the embedded-only provider re
   Verify: The test queries the persisted release, approval, checkpoint, idempotency, Ledger, outbox,
   and usage records after completion.
 
-- [ ] **7. Close the code report without closing operations**
+- [x] **7. Close the code report without closing operations**
   Spec ref: `docs/operations/SPRINT_7_1_REPORT.md`
   What to build: Update the report with exact commands and test counts from CI, the pinned profile
   name/version/digest, migrations applied, and the remaining staging evidence. Mark the code gate

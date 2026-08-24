@@ -2,9 +2,8 @@
 
 **Date:** 2026-08-24
 
-**Implementation state:** completion package implemented and the complete local PostgreSQL 17 gate
-passes; the official code gate awaits a successful GitHub CI run; operational gate open. The work
-is ready for review and is not merged.
+**Implementation state:** code gate closed on commit `e489d33`; operational gate open. The work is
+ready to merge and is not yet merged.
 
 ## Verified local code checks
 
@@ -22,7 +21,8 @@ migration/runtime-role/bootstrap path as CI:
 The GitHub workflow now applies all migrations through the ordered runner, provisions the
 `NOBYPASSRLS` runtime login and integration deployment scope, runs the complete TypeScript
 persistence suite without skips, runs all four SQL RLS suites, and builds the production container.
-The code gate must remain open until that workflow succeeds for the pushed commit.
+The workflow passed for commit `e489d33` in GitHub Actions on 2026-08-24 with the complete
+PostgreSQL suite enabled and no skipped persistence test.
 
 The completion scope and its acceptance criteria are recorded in
 [`SPRINT_7_1_CODE_GATE_TASK.md`](SPRINT_7_1_CODE_GATE_TASK.md).
