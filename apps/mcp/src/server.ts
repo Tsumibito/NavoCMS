@@ -1,4 +1,4 @@
-import { createRemoteJwksProvider, OidcJwtVerifier } from "@navocms/security";
+import { createRemoteJwksProvider, OidcJwtVerifier, type Permission } from "@navocms/security";
 import {
   PostgresDatabase,
   PostgresEventStore,
@@ -18,6 +18,7 @@ import { McpEditingService, type IdempotencyStore } from "./service.js";
 const resource = required("NAVOCMS_MCP_RESOURCE");
 const issuer = required("NAVOCMS_OIDC_ISSUER");
 const jwksUrl = required("NAVOCMS_OIDC_JWKS_URL");
+const activeScopes: readonly Permission[] = ["content:read", "content:draft", "content:publish"];
 const runtimeMode = process.env.NAVOCMS_RUNTIME_MODE ?? (process.env.NODE_ENV === "production" ? "production" : "development");
 const databaseUrl = process.env.NAVOCMS_DATABASE_URL;
 const database = databaseUrl ? new PostgresDatabase({
@@ -80,6 +81,7 @@ const server = createMcpHttpServer({
   verifier,
   resource,
   authorizationServers: [issuer],
+  scopes: activeScopes,
   ...(identityResolver ? { resolveAuthorization: (token) => identityResolver.resolve(token) } : {}),
   ...(database ? { readiness: () => database.ready() } : {})
 });

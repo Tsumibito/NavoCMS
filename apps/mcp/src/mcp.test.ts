@@ -183,7 +183,8 @@ describe("MCP protocol and agent evaluations", () => {
       expect(metadata.status).toBe(200);
       await expect(metadata.json()).resolves.toMatchObject({
         resource: "https://cms.example.test/mcp",
-        authorization_servers: ["https://identity.example.test"]
+        authorization_servers: ["https://identity.example.test"],
+        scopes_supported: NAVOCMS_PERMISSIONS
       });
       const rejected = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: "POST", body: "{}" });
       expect(rejected.status).toBe(401);
