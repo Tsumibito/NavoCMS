@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type Permission } from "@navocms/security";
-
 import { createMcpHttpServer } from "./http.js";
 import { McpEditingService } from "./service.js";
 
 describe("MCP OAuth metadata", () => {
   it("advertises only the scopes enabled for a deployment", async () => {
-    const enabledScopes: readonly Permission[] = ["content:read", "content:draft", "content:publish"];
+    const enabledScopes = ["openid"] as const;
     const server = createMcpHttpServer({
       service: {} as McpEditingService,
       verifier: { verify: async () => { throw new Error("not called"); } },

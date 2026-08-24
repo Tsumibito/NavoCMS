@@ -27,6 +27,7 @@ describe("MCP OAuth resource server", () => {
     expect(metadata).toEqual({
       resource,
       authorization_servers: [issuer],
+      bearer_methods_supported: ["header"],
       scopes_supported: ["content:read", "content:draft"]
     });
     expect(bearerChallenge(resource, `${resource}/.well-known/oauth-protected-resource`, ["content:read"])).toContain(

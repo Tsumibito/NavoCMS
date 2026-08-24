@@ -55,6 +55,7 @@ describe("NavoCMS API shell", () => {
     expect(response.json()).toEqual({
       resource: "https://api.navocms.com",
       authorization_servers: ["https://identity.example"],
+      bearer_methods_supported: ["header"],
       scopes_supported: ["content:read", "content:draft"]
     });
     await app.close();
