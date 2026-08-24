@@ -2,7 +2,7 @@
 
 ## Status
 
-Pending CI. This report does not close the Sprint 8A.5 gate.
+Green PostgreSQL CI evidence is retained in [Quality checks run 32764058586](https://github.com/Tsumibito/NavoCMS/actions/runs/32764058586): provider and PostgreSQL integration tests ran without skips, the media RLS isolation suite passed, and the production container built. The PR head is being revalidated after recording this evidence; this report does not independently close the Sprint 8A.5 gate.
 
 ## First package
 
