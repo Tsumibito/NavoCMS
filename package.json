@@ -29,8 +29,11 @@
     "typecheck": "pnpm build && tsc -p tsconfig.test.json --pretty false"
   },
   "devDependencies": {
+    "@aws-crypto/sha256-js": "5.2.0",
     "@axe-core/playwright": "4.13.0",
     "@playwright/test": "1.62.1",
+    "@smithy/protocol-http": "5.6.2",
+    "@smithy/signature-v4": "5.7.3",
     "@types/node": "24.10.1",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
