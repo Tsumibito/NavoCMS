@@ -13,11 +13,14 @@ describe("media trust boundary", () => {
 
   it("blocks private IPv4/IPv6 and unsafe remote URLs", () => {
     for (const address of [
-      "127.0.0.1", "10.0.0.1", "169.254.169.254", "0.0.0.0", "192.0.2.1", "198.51.100.1", "203.0.113.1", "224.0.0.1",
-      "::1", "fe80::1", "fd00::1", "ff02::1", "2001:db8::1", "::ffff:10.0.0.1", "::ffff:169.254.169.254", "::ffff:0.0.0.0", "not-an-ip", "999.1.1.1"
+      "127.0.0.1", "10.0.0.1", "169.254.169.254", "0.0.0.0", "192.0.2.1", "192.88.99.2", "198.51.100.1", "203.0.113.1", "224.0.0.1",
+      "::1", "fe80::1", "fd00::1", "ff02::1", "2001::1", "2001:2::1", "2001:db8::1", "2002:0a00:0001::1", "3fff::1",
+      "::ffff:10.0.0.1", "::ffff:169.254.169.254", "::ffff:0.0.0.0", "not-an-ip", "999.1.1.1"
     ]) expect(() => assertPublicAddress(address)).toThrow();
+    expect(() => assertPublicAddress("192.31.196.1")).not.toThrow();
     expect(() => assertSafeRemoteUrl("http://example.com/a.jpg")).toThrow();
     expect(() => assertSafeRemoteUrl("https://user:password@example.com/a.jpg")).toThrow();
+    expect(() => assertSafeRemoteUrl("https://example.com/a.jpg#fragment")).toThrow();
     expect(assertSafeRemoteUrl("https://example.com/a.jpg").hostname).toBe("example.com");
   });
 

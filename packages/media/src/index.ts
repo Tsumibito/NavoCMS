@@ -5,3 +5,4 @@ export * from "./validation.js";
 export * from "./presets.js";
 export * from "./processor.js";
 export * from "./s3-storage.js";
+export * from "./remote-ingest.js";

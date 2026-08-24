@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import type { FinalizeUploadInput, GenerateMediaVariantInput, MediaScope, MediaVariantSummary, UploadIntentResult } from "./domain.js";
 import { PostgresMediaRepository } from "./postgres-repository.js";
+import { RemoteMediaIngestService, type RemoteFetchResponse, type RemoteFetchTransport } from "./remote-ingest.js";
 import { PostgresMediaUploadIntentSigner, S3CompatibleMediaStorage, type S3Transport } from "./s3-storage.js";
 import { LocalDeterministicMediaStorage, originalKey, type MediaStorage } from "./storage.js";
 
@@ -46,6 +47,32 @@ integration("atomic media repository", () => {
     await expect(repository.listAssets(scope, 1, "invalid")).rejects.toThrow("CURSOR");
     const counts = await countsFor(intent.asset.id, [key, `${key}-finalize`]);
     expect(counts).toMatchObject({ assets: "1", originals: "1", finalized: "1", idempotency: "2", ledger: "3", outbox: "3" });
+  });
+
+  it("persists remote provenance through the existing intent/finalize Ledger and rejects remote drift", async () => {
+    const storage = new LocalDeterministicMediaStorage();
+    const repository = new PostgresMediaRepository(database!, storage);
+    const key = `media-remote-${randomUUID()}`;
+    const bytes = mediaBytes(key);
+    const responses = [remoteResponse(bytes), remoteResponse(bytes), remoteResponse(mediaBytes(`${key}-drift`))];
+    const transport: RemoteFetchTransport = { async get() {
+      const response = responses.shift(); if (!response) throw new Error("unexpected remote request"); return response;
+    } };
+    const remote = new RemoteMediaIngestService(repository, storage, {
+      resolver: { async lookup() { return [{ address: "8.8.8.8", family: 4 }]; } }, transport
+    });
+    const input = {
+      sourceUrl: "https://media.example/remote.png", idempotencyKey: `${key}-ingest`, receivedAt: new Date().toISOString(),
+      rights: { license: "test", restricted: false }
+    };
+    const first = await remote.ingestRemote(scope, input);
+    const replay = await remote.ingestRemote(scope, input);
+    expect(replay).toEqual(first);
+    expect(await repository.getAssetReview(scope, first.id, 10)).toMatchObject({
+      provenance: { kind: "remote-ingest", sourceUrl: input.sourceUrl, receivedBy: scope.principalId }, state: "verified"
+    });
+    await expect(remote.ingestRemote(scope, input)).rejects.toThrow("IDEMPOTENCY_KEY_REUSED");
+    expect(await countsFor(first.id, [input.idempotencyKey])).toMatchObject({ assets: "1", originals: "1", finalized: "1", idempotency: "2", ledger: "3", outbox: "3" });
   });
 
   it("issues direct-upload authority only for a current pending PostgreSQL intent in its site", async () => {
@@ -702,6 +729,14 @@ function mediaBytes(value: string, width = 2): Uint8Array {
   bytes[20] = 0; bytes[21] = 0; bytes[22] = 0; bytes[23] = 2;
   bytes.set(Buffer.from(value), 24);
   return bytes;
+}
+
+function remoteResponse(bytes: Uint8Array): RemoteFetchResponse {
+  const body = Object.freeze({
+    abort() { /* test transport has no socket */ },
+    async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> { yield bytes; }
+  });
+  return Object.freeze({ status: 200, headers: Object.freeze({ "content-type": "image/png", "content-length": String(bytes.byteLength) }), body, abort() { body.abort(); } });
 }
 
 async function countsFor(assetId: string, idempotencyKeys: readonly string[]) {

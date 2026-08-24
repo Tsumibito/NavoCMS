@@ -103,6 +103,21 @@ export interface FinalizeUploadInput {
   readonly uploadedStorageKey: string;
 }
 
+/**
+ * Remote ingest never accepts binary payloads from a caller. The fetched
+ * resource is re-validated and then routed through upload-intent finalization.
+ */
+export interface RemoteMediaIngestInput {
+  readonly sourceUrl: string;
+  readonly idempotencyKey: string;
+  readonly receivedAt: string;
+  readonly rights: Readonly<Record<string, unknown>>;
+}
+
+export interface RemoteMediaIngestor {
+  ingestRemote(scope: MediaScope, input: RemoteMediaIngestInput): Promise<MediaAssetSummary>;
+}
+
 export interface MediaReferenceInput {
   readonly assetId: string;
   readonly ownerType: string;
