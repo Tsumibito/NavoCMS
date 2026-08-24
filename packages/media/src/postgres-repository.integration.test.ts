@@ -379,8 +379,20 @@ integration("atomic media repository", () => {
     const missingKey = originalKey(scope, missing.asset.sha256!);
     await storage.deleteRecoverable(missingKey, new Date(Date.now() - 1));
     await storage.reclaim(missingKey, new Date());
-    const result = await repository.reconcile(scope, { idempotencyKey: `${key}-batch`, limit: 10 });
-    expect(result).toMatchObject({ orphanedStorageObjects: 1, missingStorageObjects: 1 });
+    let cursor: string | undefined;
+    let orphanedStorageObjects = 0;
+    let missingStorageObjects = 0;
+    for (let page = 0; page < 100; page += 1) {
+      const result = await repository.reconcile(scope, {
+        idempotencyKey: `${key}-batch`, limit: 10, ...(cursor ? { cursor } : {})
+      });
+      orphanedStorageObjects += result.orphanedStorageObjects;
+      missingStorageObjects += result.missingStorageObjects;
+      cursor = result.nextCursor;
+      if (!cursor) break;
+    }
+    expect(orphanedStorageObjects).toBe(1);
+    expect(missingStorageObjects).toBeGreaterThanOrEqual(1);
     expect(await storage.head(orphanKey)).toBeUndefined();
     expect(await storage.head(foreignKey)).toBeDefined();
     await expect(repository.getAsset(scope, missing.asset.id)).resolves.toMatchObject({ state: "quarantined" });

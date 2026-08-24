@@ -41,6 +41,10 @@ not declare the Sprint 8A.3 gate closed.
 - The first PostgreSQL CI run exposed a contradictory lifecycle CHECK that
   rejected a valid `reconcile_missing` checkpoint. The redundant condition
   was removed and the SQL suite now inserts that valid state explicitly.
+- The second run exposed a shared-fixture assumption in the reconciliation
+  test: the corrected scanner also found missing originals created by earlier
+  scenarios. The test now consumes every bounded page and asserts the target
+  state without assuming an otherwise empty integration tenant.
 
 ## Negative coverage
 
