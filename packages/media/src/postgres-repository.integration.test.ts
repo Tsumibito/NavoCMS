@@ -48,7 +48,7 @@ integration("atomic media repository", () => {
     await expect(repository.finalizeUpload(scope, finalizeInput(sizeIntent, `${key}-size`))).rejects.toThrow("SIZE");
     const mimeIntent = uploadIntent(await repository.createUploadIntent(scope, createInput(`${key}-mime`, "image/jpeg")));
     await putUpload(storage, mimeIntent.storageKey, `${key}-mime`);
-    await expect(repository.finalizeUpload(scope, finalizeInput(mimeIntent, `${key}-mime`))).rejects.toThrow("TYPE");
+    await expect(repository.finalizeUpload(scope, finalizeInput(mimeIntent, `${key}-mime`))).rejects.toThrow("MEDIA_STORAGE_MIME_MISMATCH");
     const checksumIntent = uploadIntent(await repository.createUploadIntent(scope, createInput(`${key}-checksum`)));
     const checksumBytes = mediaBytes(`${key}-checksum`); const lastByte = checksumBytes.length - 1;
     checksumBytes[lastByte] = (checksumBytes[lastByte] ?? 0) ^ 1;

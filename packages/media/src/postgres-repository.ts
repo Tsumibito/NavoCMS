@@ -109,13 +109,20 @@ export class PostgresMediaRepository implements MediaRepository {
 
   public async finalizeUpload(scope: MediaScope, input: FinalizeUploadInput): Promise<MediaAssetSummary> {
     assertIdempotencyKey(input.idempotencyKey);
+    const fingerprint = fingerprintOf(input);
     const existing = await this.#idempotency.lookup<MediaAssetSummary>(
-      scope, "media_upload_finalize", input.idempotencyKey, fingerprintOf(input)
+      scope, "media_upload_finalize", input.idempotencyKey, fingerprint
     );
     if (existing?.status === "completed") return existing.value;
     if (existing) throw new Error("MEDIA_IDEMPOTENCY_INCOMPLETE");
     const preflight = await this.loadIntentForValidation(scope, input.intentId);
-    if (preflight.finalized_at) throw new Error("MEDIA_INTENT_ALREADY_FINALIZED");
+    if (preflight.finalized_at) {
+      const replay = await this.#idempotency.lookup<MediaAssetSummary>(
+        scope, "media_upload_finalize", input.idempotencyKey, fingerprint
+      );
+      if (replay?.status === "completed") return replay.value;
+      throw new Error("MEDIA_INTENT_ALREADY_FINALIZED");
+    }
     if (new Date(preflight.expires_at).getTime() <= Date.now()) throw new Error("MEDIA_INTENT_EXPIRED");
     if (preflight.storage_key !== input.uploadedStorageKey) throw new Error("MEDIA_FINALIZATION_MISMATCH");
     const header = await this.#storage.head(input.uploadedStorageKey);
