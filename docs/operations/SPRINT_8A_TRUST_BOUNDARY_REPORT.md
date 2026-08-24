@@ -2,10 +2,10 @@
 
 ## Status
 
-**Trust-boundary code is implemented; the gate is not closed yet.** Local checks do not execute
-the PostgreSQL suite because no integration database URL is available. The gate may be marked
-closed only after the GitHub Actions PostgreSQL job applies migration `0007` and runs its media
-isolation suite without skipped persistence tests.
+**Trust-boundary gate is closed.** GitHub Actions run
+[`32727867816`](https://github.com/Tsumibito/NavoCMS/actions/runs/32727867816) applied all seven
+registered migrations, ran the complete PostgreSQL persistence suite without skipped tests, and
+completed `media-isolation.sql` successfully.
 
 No external media, R2, S3, Astro, or Cloudflare provider is active in the production profile.
 
@@ -50,9 +50,11 @@ Validated 7 schemas and 10 contract fixtures.
 4 visual tests passed.
 ```
 
-## Required before declaring the gate closed
+## Closure evidence
 
-1. Push this branch and retain the green GitHub Actions run URL.
-2. Confirm the CI PostgreSQL job applies `0007` through the migration registry and executes
-   `media-isolation.sql` with no skipped persistence tests.
-3. Review the retained CI output; only then change this report's status to closed.
+- Migration runner reported `Applied 7 migration(s)`, covering the ordered registry through
+  `0007_media_pipeline.sql`.
+- Vitest reported 24 test files and 80 tests passed, with no skipped tests.
+- The standalone SQL gate reported `Media isolation checks passed`.
+- The complete GitHub job, including four visual checks and the production container build,
+  completed successfully in 1 minute 34 seconds.
