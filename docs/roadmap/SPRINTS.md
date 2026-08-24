@@ -187,6 +187,13 @@ only publication provider.
 
 ### Sprint 8A — Media trust boundary
 
+**Status:** Code scope accepted through [PR #28](https://github.com/Tsumibito/NavoCMS/pull/28).
+Post-merge [run 32768204792](https://github.com/Tsumibito/NavoCMS/actions/runs/32768204792)
+applied all nine migrations and passed 30 test files / 133 tests without skips, 5 visual tests,
+PostgreSQL tenant/media isolation, and the production-container build. External media and remote
+ingest remain inactive. This status does not close the Sprint 7.1 operational gate or the P5/P6
+real-publication gates in Sprint 8C.
+
 - immutable originals, provenance and rights, hashes, deduplication, references, retention, and
   recoverable garbage reconciliation;
 - site-prefixed R2/S3 storage, signed direct upload, safe remote ingest, redirect/DNS/private-network
