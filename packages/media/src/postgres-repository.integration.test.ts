@@ -61,7 +61,12 @@ integration("atomic media repository", () => {
       code: "MEDIA_DECODE_LIMIT"
     });
     await expect(repository.finalizeUpload({ ...scope, siteId: "22222222-2222-4222-8222-222222222222" }, finalizeInput(intent, key))).rejects.toThrow("NOT_FOUND");
-    await database!.withScope(scope, (client) => client.query("UPDATE navocms.media_upload_intents SET expires_at = now() - interval '1 second' WHERE id = $1", [intent.intentId]));
+    await database!.withScope(scope, (client) => client.query(
+      `UPDATE navocms.media_upload_intents
+          SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second'
+        WHERE id = $1`,
+      [intent.intentId]
+    ));
     await expect(repository.finalizeUpload(scope, finalizeInput(intent, `${key}-expired`))).rejects.toThrow("EXPIRED");
     expect(await countsFor(intent.asset.id, [key])).toMatchObject({ assets: "1", originals: "0", finalized: "0", idempotency: "1" });
   });
