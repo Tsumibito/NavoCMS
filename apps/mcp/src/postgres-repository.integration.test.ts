@@ -7,7 +7,7 @@ import {
 } from "@navocms/persistence-postgres";
 import type { EventStore } from "@navocms/kernel";
 import { randomUUID } from "node:crypto";
-import { NAVOCMS_PERMISSIONS, type AuthorizationContext } from "@navocms/security";
+import { NAVOCMS_PERMISSIONS, effectivePermissions, type AuthorizationContext } from "@navocms/security";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { PostgresEditingRepository } from "./postgres-repository.js";
@@ -140,6 +140,36 @@ integration("Neon production persistence", () => {
       siteId,
       principal: { id: principalId, subject: "sprint-6" }
     });
+  });
+
+  it("maps a WorkOS Connect role and intersects it with persisted site membership", async () => {
+    const resolver = new PostgresIdentityResolver(database!, { tenantId, siteId }, {
+      issuerRolePermissions: {
+        "navocms-owner": ["content:read", "content:draft", "content:publish"]
+      }
+    });
+    const authorization = await resolver.resolve({
+      claims: {
+        iss: "urn:navocms:integration",
+        sub: "sprint-6",
+        aud: "https://staging-cms.navocms.test/mcp",
+        exp: Math.floor(Date.now() / 1000) + 60,
+        org_id: "org-navocms",
+        role: "navocms-owner"
+      },
+      principal: {
+        id: "urn:navocms:integration|sprint-6",
+        kind: "human",
+        issuer: "urn:navocms:integration",
+        subject: "sprint-6"
+      },
+      tenantId,
+      siteId,
+      scopes: ["openid"]
+    });
+    expect(effectivePermissions(authorization.layers)).toEqual([
+      "content:read", "content:draft", "content:publish"
+    ]);
   });
 
   it("executes the production path with the pinned host and charges durable policy usage once", async () => {

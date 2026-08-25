@@ -22,13 +22,21 @@ export interface DeploymentIdentityScope {
   readonly siteId: string;
 }
 
+export type IssuerRolePermissions = Readonly<Record<string, readonly Permission[]>>;
+
+export interface PostgresIdentityResolverOptions {
+  readonly issuerRolePermissions?: IssuerRolePermissions;
+}
+
 export class PostgresIdentityResolver {
   readonly #database: PostgresDatabase;
   readonly #scope: DeploymentIdentityScope;
+  readonly #issuerRolePermissions: IssuerRolePermissions | undefined;
 
-  public constructor(database: PostgresDatabase, scope: DeploymentIdentityScope) {
+  public constructor(database: PostgresDatabase, scope: DeploymentIdentityScope, options: PostgresIdentityResolverOptions = {}) {
     this.#database = database;
     this.#scope = Object.freeze({ ...scope });
+    this.#issuerRolePermissions = options.issuerRolePermissions;
   }
 
   public async resolve(token: VerifiedAccessToken): Promise<AuthorizationContext> {
@@ -44,7 +52,7 @@ export class PostgresIdentityResolver {
       [token.principal.issuer, token.principal.subject, this.#scope.tenantId, this.#scope.siteId]
     )).rows[0]);
     if (!row) throw new Error("OIDC identity is not a member of this NavoCMS site");
-    const tokenPermissions = knownPermissions(token.scopes);
+    const tokenPermissions = principalPermissions(token, this.#issuerRolePermissions);
     const membershipPermissions = knownPermissions(row.membership_permissions);
     return Object.freeze({
       ...this.#scope,
@@ -65,6 +73,35 @@ export class PostgresIdentityResolver {
       expiresAt: new Date(token.claims.exp * 1000).toISOString()
     });
   }
+}
+
+export function principalPermissions(
+  token: Pick<VerifiedAccessToken, "claims" | "scopes">,
+  issuerRolePermissions?: IssuerRolePermissions
+): readonly Permission[] {
+  const scopedPermissions = knownPermissions(token.scopes);
+  if (!issuerRolePermissions) return scopedPermissions;
+
+  const roles = tokenRoles(token.claims);
+  const rolePermissions = Object.freeze(NAVOCMS_PERMISSIONS.filter((permission) =>
+    roles.some((role) => issuerRolePermissions[role]?.includes(permission))
+  ));
+  if (rolePermissions.length === 0) return rolePermissions;
+  if (scopedPermissions.length === 0) return rolePermissions;
+  return Object.freeze(rolePermissions.filter((permission) => scopedPermissions.includes(permission)));
+}
+
+function tokenRoles(claims: VerifiedAccessToken["claims"]): readonly string[] {
+  const role = claims.role;
+  const roles = claims.roles;
+  if (role !== undefined && (typeof role !== "string" || role.length === 0)) return Object.freeze([]);
+  if (roles !== undefined && (!Array.isArray(roles) || roles.some((item) => typeof item !== "string" || item.length === 0))) {
+    return Object.freeze([]);
+  }
+  return Object.freeze([...new Set([
+    ...(typeof role === "string" ? [role] : []),
+    ...((roles as readonly string[] | undefined) ?? [])
+  ])]);
 }
 
 function knownPermissions(scopes: readonly string[]): readonly Permission[] {

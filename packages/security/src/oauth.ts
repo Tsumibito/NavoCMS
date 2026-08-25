@@ -60,6 +60,9 @@ export interface JwtClaims extends Record<string, unknown> {
   readonly nbf?: number;
   readonly scope?: string;
   readonly permissions?: readonly string[];
+  readonly org_id?: string;
+  readonly role?: string;
+  readonly roles?: readonly string[];
   readonly tenant_id?: string;
   readonly site_id?: string;
   readonly principal_kind?: "human" | "agent" | "service";
@@ -102,6 +105,7 @@ export interface OidcJwtVerifierOptions {
   readonly now?: () => number;
   readonly clockToleranceSeconds?: number;
   readonly deploymentScope?: Readonly<{ readonly tenantId: string; readonly siteId: string }>;
+  readonly organizationId?: string;
 }
 
 interface JwtHeader {
@@ -137,6 +141,7 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
   readonly #now: () => number;
   readonly #tolerance: number;
   readonly #deploymentScope: Readonly<{ readonly tenantId: string; readonly siteId: string }> | undefined;
+  readonly #organizationId: string | undefined;
 
   public constructor(options: OidcJwtVerifierOptions) {
     this.#issuer = canonicalHttpsUrl(options.issuer, "issuer");
@@ -145,6 +150,7 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
     this.#now = options.now ?? (() => Math.floor(Date.now() / 1000));
     this.#tolerance = options.clockToleranceSeconds ?? 30;
     this.#deploymentScope = options.deploymentScope;
+    this.#organizationId = options.organizationId;
   }
 
   public async verify(token: string, requiredScopes: readonly string[] = []): Promise<VerifiedAccessToken> {
@@ -176,6 +182,10 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
 
     const issuer = requireString(rawClaims, "iss");
     const subject = requireString(rawClaims, "sub");
+    const organizationId = optionalString(rawClaims, "org_id");
+    if (this.#organizationId && organizationId !== this.#organizationId) {
+      throw new SecurityError("OAUTH_CLAIM_INVALID", "Access token organization is invalid");
+    }
     const claimTenantId = optionalString(rawClaims, "tenant_id");
     const claimSiteId = optionalString(rawClaims, "site_id");
     if (claimTenantId && this.#deploymentScope && claimTenantId !== this.#deploymentScope.tenantId) {
