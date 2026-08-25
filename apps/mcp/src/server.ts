@@ -9,7 +9,7 @@ import {
 } from "@navocms/persistence-postgres";
 
 import { createMcpHttpServer } from "./http.js";
-import { environmentInteger } from "./config.js";
+import { environmentInteger, environmentRolePermissions } from "./config.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
 import { PostgresMediaRepository } from "@navocms/media";
 import { McpMediaService } from "./media-service.js";
@@ -25,6 +25,11 @@ const jwksUrl = required("NAVOCMS_OIDC_JWKS_URL");
 const runtimeMode = process.env.NAVOCMS_RUNTIME_MODE ?? (process.env.NODE_ENV === "production" ? "production" : "development");
 const pluginHost = runtimeMode === "production" ? await bootPinnedProductionPluginHost() : undefined;
 const databaseUrl = process.env.NAVOCMS_DATABASE_URL;
+const issuerRolePermissions = environmentRolePermissions("NAVOCMS_OIDC_ROLE_PERMISSIONS");
+const organizationId = process.env.NAVOCMS_OIDC_ORGANIZATION_ID;
+if (issuerRolePermissions && !organizationId) {
+  throw new Error("NAVOCMS_OIDC_ORGANIZATION_ID is required with NAVOCMS_OIDC_ROLE_PERMISSIONS");
+}
 const deploymentScope = Object.freeze({
   tenantId: databaseUrl ? required("NAVOCMS_TENANT_ID") : required("NAVOCMS_DEVELOPMENT_TENANT_ID"),
   siteId: databaseUrl ? required("NAVOCMS_SITE_ID") : required("NAVOCMS_DEVELOPMENT_SITE_ID")
@@ -43,7 +48,9 @@ const database = databaseUrl ? new PostgresDatabase({
     }
   } : {})
 }) : undefined;
-const identityResolver = database ? new PostgresIdentityResolver(database, deploymentScope) : undefined;
+const identityResolver = database ? new PostgresIdentityResolver(database, deploymentScope, {
+  ...(issuerRolePermissions ? { issuerRolePermissions } : {})
+}) : undefined;
 // The pinned production profile deliberately has no media storage provider.
 // Read-only media review can still use PostgreSQL; upload tools require an
 // explicit future storage capability injection.
@@ -95,6 +102,7 @@ const verifier = new OidcJwtVerifier({
   issuer,
   audience: resource,
   deploymentScope,
+  ...(organizationId ? { organizationId } : {}),
   jwks: createRemoteJwksProvider(jwksUrl)
 });
 const server = createMcpHttpServer({

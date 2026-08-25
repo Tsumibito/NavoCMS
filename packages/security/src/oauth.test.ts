@@ -115,6 +115,32 @@ describe("MCP OAuth resource server", () => {
     });
   });
 
+  it("binds a Connect token to the configured organization", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const publicJwk = publicKey.export({ format: "jwk" });
+    const verifier = new OidcJwtVerifier({
+      issuer,
+      audience: resource,
+      deploymentScope: { tenantId: "tenant-from-resource", siteId: "site-from-resource" },
+      organizationId: "org-navocms",
+      jwks: async () => ({ keys: [{ ...publicJwk, kty: "RSA", kid: "test-key" }] }),
+      now: () => 100
+    });
+    const token = (orgId?: string) => jwt({
+      iss: issuer,
+      sub: "workos-user-1",
+      aud: resource,
+      exp: 200,
+      ...(orgId ? { org_id: orgId } : {})
+    }, privateKey);
+
+    await expect(verifier.verify(token("org-navocms"))).resolves.toMatchObject({
+      claims: { org_id: "org-navocms" }
+    });
+    await expect(verifier.verify(token("org-other"))).rejects.toMatchObject({ code: "OAUTH_CLAIM_INVALID" });
+    await expect(verifier.verify(token())).rejects.toMatchObject({ code: "OAUTH_CLAIM_INVALID" });
+  });
+
   it("accepts permission-array claims alongside the standard scope claim", async () => {
     const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const publicJwk = publicKey.export({ format: "jwk" });
