@@ -2,7 +2,8 @@
 
 ## Status
 
-Review changes required / Pending CI. This report does not close the Sprint 8B gate.
+CI passed / Ready for review. This report does not close the Sprint 8B gate or
+authorize deployment.
 
 ## Scope
 
@@ -28,6 +29,13 @@ idempotency mechanism is included.
 - manifest determinism, drift, tamper, and invalid-input evidence;
 - production container build; retained CI URL added here after success.
 
+## Retained CI evidence
+
+- [GitHub Quality checks run 32829843564](https://github.com/Tsumibito/NavoCMS/actions/runs/32829843564)
+  passed on commit `3546c83d25f96a81b1bece221ff16ae7c92dbe3c`.
+- The run provisioned PostgreSQL, executed the full suite and isolation SQL, and
+  built the production container without skipped persistence coverage.
+
 ## Local completion evidence
 
 - strict verifier rejects malformed schema/format, unsafe or duplicate paths,
@@ -41,6 +49,6 @@ idempotency mechanism is included.
   normalized before identity calculation;
 - all runtime inputs have per-item and aggregate bounds.
 
-Local PostgreSQL skips are accepted only for this pre-CI renderer handoff. This
-report remains **Review changes required / Pending CI** and does not claim a
-closed code or operational gate.
+Local PostgreSQL skips were limited to the pre-CI handoff; the retained GitHub run
+has real PostgreSQL coverage. This report remains **CI passed / Ready for review**
+and does not claim a closed operational gate.
