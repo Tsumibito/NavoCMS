@@ -1,0 +1,8 @@
+[
+  {"name":"double slash","path":"src//page.astro"},
+  {"name":"trailing slash","path":"src/page/"},
+  {"name":"traversal","path":"src/../page.astro"},
+  {"name":"absolute","path":"/src/page.astro"},
+  {"name":"invalid tenant","tenantId":"tenant/site"},
+  {"name":"invalid site","siteId":"site name"}
+]
