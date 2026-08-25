@@ -15,10 +15,10 @@ Acceptance has three separate states:
 3. **Operational gate closed** — the same artifact and workflow pass in staging or production-like
    infrastructure with retained evidence.
 
-A merged pull request does not close an operational gate by itself. The 2026-08-24 acceptance audit
-keeps the Sprint 0 contracts accepted, preserves the merged Sprint 1–7 work, and moves the remaining
-cross-cutting and operational proof into mandatory Sprint 7.1 before a real delivery provider is
-allowed to publish.
+A merged pull request does not close an operational gate by itself. The retained 2026-08-25
+staging trajectory and restart proof close the mandatory Sprint 7.1 operational gate for the merged
+Sprint 1–7 foundation. A real delivery provider still cannot publish until its own Sprint 8 gate is
+closed.
 
 ## Program gates
 
@@ -72,9 +72,10 @@ Gate: P0 closed.
 
 ## Sprint 1 — TypeScript microkernel and plugin graph
 
-**Status:** Implementation merged in [PR #4](https://github.com/Tsumibito/NavoCMS/pull/4).
-The isolated kernel tests are accepted; runtime profile boot and atomic trajectory evidence are
-re-opened for Sprint 7.1 before a real publication provider is activated.
+**Status:** Completed and operationally accepted. Implementation merged in
+[PR #4](https://github.com/Tsumibito/NavoCMS/pull/4); pinned runtime boot and the retained atomic
+trajectory were accepted in the
+[Sprint 7.1 report](../operations/SPRINT_7_1_REPORT.md).
 
 - workspace boundaries for kernel, SDK, first-party plugins, and examples;
 - Fastify service shell and stable domain API boundary;
@@ -83,31 +84,30 @@ re-opened for Sprint 7.1 before a real publication provider is activated.
 - CloudEvents-compatible external events and OpenTelemetry correlation;
 - one external no-op service plugin and unload/failure tests.
 
-Gate: P1 closes operationally in Sprint 7.1.
+Gate: P1 closed.
 
 ## Sprint 2 — Multitenancy, identity, RLS, secrets, and quotas
 
-**Status:** Core isolation implementation merged in
-[PR #5](https://github.com/Tsumibito/NavoCMS/pull/5). Existing RLS tests are accepted; release-table
-RLS, persistent quota/kill-switch enforcement, and production-path integration remain in Sprint 7.1.
+**Status:** Completed and operationally accepted. Core isolation implementation merged in
+[PR #5](https://github.com/Tsumibito/NavoCMS/pull/5); complete-schema RLS, persistent policy
+enforcement, production-path integration, and post-restart readiness were accepted in Sprint 7.1.
 
 - tenants, sites, environments, memberships, roles, service accounts, OAuth/OIDC, and MCP OAuth;
 - PostgreSQL RLS, separate migration identity, site-scoped storage, secret broker, usage, quotas,
   kill switches, and adversarial isolation tests.
 
-Gate: P2 closes across the complete current schema in Sprint 7.1.
+Gate: P2 closed across the complete current schema.
 
 ## Sprint 3 — Content schemas, Markdown AST, and revisions
 
-**Status:** Content engine implementation merged in
-[PR #6](https://github.com/Tsumibito/NavoCMS/pull/6). Portable content and immutable revisions are
-accepted; bounded diff complexity and PostgreSQL metadata/source consistency are hardened in Sprint
-7.1.
+**Status:** Completed and accepted. Content engine implementation merged in
+[PR #6](https://github.com/Tsumibito/NavoCMS/pull/6); bounded diff complexity and PostgreSQL
+metadata/source consistency were accepted in Sprint 7.1.
 
 - declarative types and packs, revisions, relations, variants, stable AST patches, conflict handling,
   import/export, and representative legacy-editor conversion.
 
-Gate: P3 closes after the Sprint 7.1 content hardening checks.
+Gate: P3 closed.
 
 ## Sprint 4 — Design-system contract and catalogue
 
@@ -121,27 +121,28 @@ design digest and verified media artifacts into a real release.
 
 ## Sprint 5 — Agent/MCP editing product
 
-**Status:** MCP implementation merged in [PR #11](https://github.com/Tsumibito/NavoCMS/pull/11).
-The editing flow is code-complete; permission-scoped tool discovery, meaningful agent evaluations,
-and an authenticated staging client proof remain in Sprint 7.1.
+**Status:** Completed and operationally accepted. MCP implementation merged in
+[PR #11](https://github.com/Tsumibito/NavoCMS/pull/11); permission-scoped discovery, executable
+agent evaluations, and the organization-bound staging client trajectory were accepted in Sprint
+7.1.
 
 - goal-oriented MCP tools and resources, scoped discovery, Markdown/diff/draft/workflow widgets,
   non-UI fallbacks, bounded outputs, redaction, and agent evaluations.
 
-Gate: P4 closes operationally in Sprint 7.1.
+Gate: P4 closed.
 
 ## Sprint 6 — Production runtime and deployment foundation
 
-**Status:** Runtime implementation merged in [PR #13](https://github.com/Tsumibito/NavoCMS/pull/13)
-and staging is deployed. Health and readiness are live; forced-RLS/current-migration readiness,
-restart persistence, and retained same-artifact evidence remain in Sprint 7.1.
+**Status:** Completed and operationally accepted. Runtime implementation merged in
+[PR #13](https://github.com/Tsumibito/NavoCMS/pull/13); staging runs the retained
+`c17c1fea9d1232196812afdcc412622d4045dadc` artifact, and forced-RLS/current-migration readiness,
+restart persistence, and same-artifact evidence passed in Sprint 7.1.
 
 - Neon production/staging topology with scale-to-zero, direct migration and pooled runtime
   identities, durable MCP persistence, event ledger and idempotency, Docker image, health/readiness,
   and matching applications on an operator-managed Coolify Docker host.
 
-Operational gate: Sprint 7.1 must prove migrations, forced RLS, restart persistence, and the same
-container artifact that production will run.
+Operational gate: closed by the [Sprint 7.1 report](../operations/SPRINT_7_1_REPORT.md).
 
 ## Sprint 7 — Durable workflow, preview, release, and rollback
 
@@ -155,6 +156,11 @@ provider. It is not evidence of an Astro or Cloudflare publication and does not 
 Gate: P6A. P6 closes with the real staging vertical in Sprint 8.
 
 ## Sprint 7.1 — Acceptance hardening and authenticated staging proof
+
+**Status:** Completed and accepted on 2026-08-25. Code and post-merge PostgreSQL CI evidence,
+organization-bound OAuth, human-only exact-hash publication, idempotent retry, and post-restart
+persistence/reconciliation are retained in the
+[Sprint 7.1 report](../operations/SPRINT_7_1_REPORT.md).
 
 **Entry rule:** mandatory before Sprint 8 can activate an external media or deployment provider.
 
@@ -174,8 +180,8 @@ Gate: P6A. P6 closes with the real staging vertical in Sprint 8.
 - keep persisted Markdown metadata consistent after structural patches;
 - expose only permission-appropriate MCP tools and replace routing assertions with executable
   authorized/unauthorized agent evaluations;
-- complete Claude re-auth against the `NavoCMS` organization and retain one authenticated staging
-  `draft -> preview -> approve -> publish -> reconcile/status` trajectory;
+- complete an MCP client re-auth against the `NavoCMS` organization and retain one authenticated
+  staging `draft -> preview -> approve -> publish -> reconcile/status` trajectory;
 - restart the staging container and prove content, events, approvals, checkpoints, idempotent results,
   and RLS isolation survive unchanged.
 
@@ -191,8 +197,8 @@ only publication provider.
 Post-merge [run 32768204792](https://github.com/Tsumibito/NavoCMS/actions/runs/32768204792)
 applied all nine migrations and passed 30 test files / 133 tests without skips, 5 visual tests,
 PostgreSQL tenant/media isolation, and the production-container build. External media and remote
-ingest remain inactive. This status does not close the Sprint 7.1 operational gate or the P5/P6
-real-publication gates in Sprint 8C.
+ingest remain inactive. Sprint 7.1 is closed independently; the P5/P6 real-publication gates remain
+in Sprint 8C.
 
 - immutable originals, provenance and rights, hashes, deduplication, references, retention, and
   recoverable garbage reconciliation;

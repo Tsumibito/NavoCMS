@@ -1,68 +1,122 @@
-# Sprint 7.1 hardening report
+# Sprint 7.1 hardening and operational acceptance report
 
-**Date:** 2026-08-24
+**Acceptance date:** 2026-08-25
 
-**Implementation state:** code gate closed on commit `e489d33`; operational gate open. The work is
-ready to merge and is not yet merged.
+**Implementation state:** completed and accepted. The code gate and operational gate are closed on
+`main` commit `c17c1fea9d1232196812afdcc412622d4045dadc`. Production remains private and the embedded
+proving provider remains the only active publication provider.
 
-## Verified local code checks
+## Code-gate evidence
 
-The local code gate passed against an isolated PostgreSQL 17 instance provisioned through the same
-migration/runtime-role/bootstrap path as CI:
+The Sprint 7.1 hardening entered `main` through the reviewed completion work and the WorkOS
+organization/role binding fix in PR #31. The post-merge GitHub workflow passed on 2026-08-25:
 
-- contract, boundary, secret, Markdown, and local-link checks;
-- TypeScript build and package smoke checks;
-- all six ordered migrations applied with checksum registration;
-- 73 unit, agent-evaluation, and PostgreSQL integration tests passed with no skipped persistence
-  test;
-- four visual/accessibility checks passed.
-- the tenant, content, runtime, and release-workflow SQL RLS adversarial suites passed.
+- [GitHub Actions run 32889095328](https://github.com/Tsumibito/NavoCMS/actions/runs/32889095328);
+- all ordered migrations through `0009` applied with checksum registration;
+- the complete PostgreSQL persistence and RLS isolation suites ran without skipped database tests;
+- the production container and visual checks passed.
 
-The GitHub workflow now applies all migrations through the ordered runner, provisions the
-`NOBYPASSRLS` runtime login and integration deployment scope, runs the complete TypeScript
-persistence suite without skips, runs all four SQL RLS suites, and builds the production container.
-The workflow passed for commit `e489d33` in GitHub Actions on 2026-08-24 with the complete
-PostgreSQL suite enabled and no skipped persistence test.
+The implemented invariants include:
 
-The completion scope and its acceptance criteria are recorded in
+- state mutation, operation-aware idempotency, Event Ledger append, and transactional outbox append
+  in one PostgreSQL transaction;
+- one document-root correlation trajectory across preview, approval, publication, reconciliation,
+  verification, and rollback;
+- human-only exact-hash approval with persisted policy version, evidence, scope, expiry, and
+  revocation;
+- atomic migration/checksum registration, bounded Markdown diff, and synchronized
+  `metadata.body`;
+- a digest-pinned production profile booted through `PluginHost`, durable quotas and kill switches,
+  exact migration readiness, runtime `NOBYPASSRLS`, forced RLS, and deployment-scope checks;
+- permission-scoped MCP discovery and executable authorization tests.
+
+The detailed completion criteria remain recorded in
 [`SPRINT_7_1_CODE_GATE_TASK.md`](SPRINT_7_1_CODE_GATE_TASK.md).
 
-## Implemented hardening
+## Staging deployment evidence
 
-- Migration 0005 introduces approval policy/evidence/scope/expiry/revocation fields and a
-  site-scoped transactional outbox. Event idempotency is now unique by site, operation, and key.
-- Release approval is human-only. Publication re-checks a live, non-revoked approval bound to the
-  exact release hash and environment. Publication events are classified as G2.
-- Migration execution commits a migration body and its checksum registry record in one
-  transaction.
-- The persistence suite contains failure injection that writes the ledger/outbox and then fails;
-  its PostgreSQL 17 run proves the shared rollback boundary.
-- Markdown comparison is linear-space/linear-time for adversarial documents. Structural patches
-  keep mirrored `metadata.body` synchronized with the resulting Markdown.
-- The production runtime boots and shuts down a digest-pinned, validated embedded-provider profile
-  through `PluginHost`; readiness requires the host to be healthy.
-- Migration 0006 adds durable, retry-safe PostgreSQL quotas and kill switches with runtime
-  least-privilege grants and site-scoped RLS.
-- Readiness verifies exact migration checksums, a non-superuser `NOBYPASSRLS` runtime role, forced
-  RLS across the complete application schema, and the deployment-bound site/environment.
-- MCP discovery exposes only tools allowed by effective permissions and hides human approval from
-  agent and service principals. Executable MCP evaluations cover viewer, editor, publisher, agent,
-  expired, and cross-site contexts.
+The accepted artifact was deployed to the Coolify application `navocms-staging` from the exact
+`main` commit above.
 
-## Operational gate — still open
+- image digest: `sha256:7bc07b6adc4b31c94c24ffc4cd31a109b618c7a3313819bc3c53371ae46f0973`;
+- `/healthz`: `{"status":"ok"}`;
+- `/readyz`: `{"status":"ready","pluginHost":{"state":"healthy","activePlugins":["navocms.release.embedded"],"profile":"embedded-release-production@0.1.0"}}`;
+- readiness was captured before and after the container restart. A `ready` response on this build
+  requires the expected migration checksums, a non-superuser `NOBYPASSRLS` runtime role, forced RLS
+  on the complete current application schema, the configured deployment scope, and a healthy pinned
+  `PluginHost`.
 
-No Neon/Coolify staging credentials, deployed image digest, or authenticated Claude session were
-available in this checkout. Therefore the following evidence has not been produced and must be run
-against the same deployed artifact before the gate is closed:
+The encrypted staging env file remains mounted at `/run/navocms/.env`. WorkOS organization binding
+and the server-side role ceiling were added as dotenvx-encrypted values; no application secret or
+plaintext authorization configuration was added to Coolify platform variables.
 
-1. run migrations with the dedicated migration owner, then use the runtime role only to capture
-   readiness showing current checksums, forced RLS, and `NOBYPASSRLS`;
-2. run the authenticated Claude trajectory: draft, preview, human approval, embedded publish,
-   reconciliation/status;
-3. restart the staging container and prove persisted content, events, approval, checkpoints,
-   idempotency, and cross-site RLS behavior;
-4. retain the command output, image digest, release hashes, and timestamped evidence in the
-   deployment record.
+## Organization-bound OAuth evidence
 
-Until that evidence exists, P1–P4 and the Sprint 6 staging gate remain operationally open, and the
-embedded provider remains the only permitted publication provider.
+The WorkOS staging JWT Template now emits the exact organization membership role. Its preview and
+three fresh authorization flows produced:
+
+- organization: `org_01M0SK87T1XJJ0RWSFKV2P05GX` (`NavoCMS`);
+- role: `navocms-owner`;
+- MCP audience: the staging `/mcp` resource;
+- effective tools bounded by the persisted site membership and the configured server-side role
+  ceiling: `content:read`, `content:draft`, and `content:publish`.
+
+The operational client was Codex using the same public MCP OAuth flow intended for third-party MCP
+clients. The client brand is not an authorization invariant: the retained proof is the exact WorkOS
+organization claim, human principal, audience, site membership, and effective permission
+intersection.
+
+## Retained publication trajectory
+
+The authenticated human trajectory completed against staging on 2026-08-25:
+
+| Evidence | Value |
+|---|---|
+| Site | `2e0bcd4f-6780-470c-844b-d72abb6737ca` (`navocms.com`) |
+| Draft document | `65f06b32-4cd8-4fc3-9580-13bd7f1cef63` |
+| Revision | `49e5bfa6-77e6-4b64-83f3-bc74fd79762d` |
+| Source hash | `1bb7918eee558c772f1dd06cad99b4eea52147bd6e72c0b65ef578c28596a6c2` |
+| Release | `425bc6fa-0be7-413b-8995-bf9921a7ebb5` |
+| Release hash | `0b9c20e8dbeaa5ce4aec4d90a9da8d155854e49d7aea4717b10cd6353c9d7e1a` |
+| Artifact hash | `92c861ff6de180a5e5d6a20f5f604473464b245b8421985b3f4b4db8d7e7a197` |
+| Preview created | `2026-08-25T19:43:10.766Z` |
+| Human approval | `2026-08-25T19:43:17.325Z` |
+| Publication | `ab7379c4-68f4-4734-8e81-7ca4eac4d443` |
+| Published/verified | `2026-08-25T19:45:01.859Z` |
+| Provider | `navocms.embedded.v1` |
+
+The sequence was `draft_create -> preview_prepare -> release_approve -> release_publish ->
+release_status/release_reconcile`. Approval was accepted only for the exact release hash and the
+publication retained the identical artifact hash.
+
+The first publish HTTP attempt received a transient `502` while the durable release remained
+`approved`. Reusing the same operation and idempotency key completed publication exactly once. A
+second replay returned the same publication ID and hashes. This is retained retry evidence, not a
+hidden duplicate effect.
+
+## Restart and persistence proof
+
+After the successful publication, the Coolify container was restarted without rebuilding. The
+following checks then passed through a new organization-bound OAuth session:
+
+- `/readyz` returned `ready` with the same pinned healthy profile;
+- `release_status` returned the same release as `published` with unchanged release/artifact hashes;
+- `release_reconcile` returned publication `ab7379c4-68f4-4734-8e81-7ca4eac4d443` as `verified`;
+- replaying the original draft operation with the original idempotency key returned the same
+  document, revision, source hash, revision number, and timestamp;
+- post-merge PostgreSQL RLS suites retained alongside this exact commit cover cross-site reads and
+  writes for the complete current schema, while staging readiness re-proved forced RLS and the
+  runtime-role/deployment constraints after restart.
+
+## Gate decision and follow-up
+
+Sprint 7.1 is accepted. P1, P2, P3, and P4 are operationally closed, and the Sprint 6 staging gate
+is closed. P5, P6, and public production publication remain open for the real Astro/Cloudflare
+vertical.
+
+Two observations are non-blocking follow-up for Sprint 8 delivery operations:
+
+- Coolify had the previous commit SHA pinned, so the accepted `main` SHA had to be promoted
+  explicitly before the successful deployment;
+- the transient first-attempt `502` should be included in delivery-provider telemetry and SLO
+  tests, although the required exact-once retry behavior already passed.
