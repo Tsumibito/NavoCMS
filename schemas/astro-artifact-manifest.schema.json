@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v1/astro-artifact-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "format", "tenantId", "siteId", "digests", "files"],
+  "properties": {
+    "schema": { "const": "io.navocms.astro-artifact.v1" },
+    "format": { "const": "navocms-astro-source-bundle/v1" },
+    "tenantId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+    "siteId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+    "digests": { "type": "object", "additionalProperties": false, "required": ["content", "design", "delivery", "governance", "registrations", "media"], "properties": { "content": { "$ref": "#/$defs/digest" }, "design": { "$ref": "#/$defs/digest" }, "delivery": { "$ref": "#/$defs/digest" }, "governance": { "$ref": "#/$defs/digest" }, "registrations": { "$ref": "#/$defs/digest" }, "media": { "$ref": "#/$defs/digest" } } },
+    "files": { "type": "array", "minItems": 1, "maxItems": 255, "items": { "type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": { "path": { "type": "string", "maxLength": 512, "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\/$)[A-Za-z0-9][A-Za-z0-9._/-]*$" }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" } } } }
+  },
+  "$defs": { "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" } }
+}

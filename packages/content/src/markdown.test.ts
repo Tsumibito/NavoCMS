@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canonicalMarkdown, parseMarkdown } from "./markdown.js";
+import { canonicalMarkdown, parseMarkdown, renderSemanticMarkdownHtml } from "./markdown.js";
 import { applyStructuralPatch, compareMarkdown } from "./patches.js";
 
 const directives = [
@@ -16,6 +16,15 @@ describe("canonical Markdown and structural patches", () => {
     expect(() => canonicalMarkdown("::unknown{x=y}\n", directives)).toThrow(/is not allowed/);
     expect(() => canonicalMarkdown("[bad](javascript:alert(1))\n", directives)).toThrow(/Unsafe URL/);
     expect(() => canonicalMarkdown("::cta{label=Bad href=javascript:alert(1)}\n", directives)).toThrow(/Unsafe URL/);
+  });
+
+  it("renders validated Markdown and declared directives as semantic HTML", () => {
+    const html = renderSemanticMarkdownHtml("# Hello\n\n- One\n- [Two](/two)\n\n:::callout{tone=note}\nSafe.\n:::\n\n::cta{label=Read href=/read}\n", directives);
+    expect(html).toContain("<h1>Hello</h1>");
+    expect(html).toContain("<ul>");
+    expect(html).toContain('<a href="/two">Two</a>');
+    expect(html).toContain('data-navocms-directive="callout"');
+    expect(html).toContain('data-navocms-directive="cta"');
   });
 
   it("keeps IDs stable for unchanged unique nodes across unrelated insertions", () => {

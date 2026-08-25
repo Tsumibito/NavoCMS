@@ -9,8 +9,12 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "dependencies": {
-    "@navocms/design": "workspace:*"
+    "@navocms/content": "workspace:*",
+    "@navocms/design": "workspace:*",
+    "parse5": "7.2.1"
   }
 }

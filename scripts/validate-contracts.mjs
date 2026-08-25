@@ -30,7 +30,8 @@ const schemaPaths = {
   designOverride: "schemas/design-override.schema.json",
   designSystem: "schemas/design-system.schema.json",
   event: "schemas/event-envelope.schema.json",
-  mediaAsset: "schemas/media-asset.schema.json"
+  mediaAsset: "schemas/media-asset.schema.json",
+  astroArtifact: "schemas/astro-artifact-manifest.schema.json"
 };
 
 const validators = {};
@@ -97,6 +98,13 @@ function semanticMediaAsset(document, file) {
   if (document.spec.state === "rejected") assert(document.spec.rejectionReason, `${file}: rejected media needs a reason`);
 }
 
+function semanticAstroArtifact(document, file) {
+  unique(document.files.map((entry) => entry.path), `${file}: artifact paths`);
+  for (const entry of document.files) {
+    assert(!entry.path.startsWith("/") && !entry.path.split("/").some((part) => part === "." || part === ".."), `${file}: unsafe artifact path`);
+  }
+}
+
 function tokenPaths(group, prefix = "") {
   return Object.entries(group).flatMap(([name, value]) => {
     const tokenPath = prefix ? `${prefix}.${name}` : name;
@@ -136,7 +144,8 @@ const fixtureKinds = [
   { suffix: ".design-override.json", validator: "designOverride", semantic: semanticDesignOverride },
   { suffix: ".design-system.json", validator: "designSystem", semantic: semanticDesignSystem },
   { suffix: ".event.json", validator: "event", semantic: semanticEvent },
-  { suffix: ".media-asset.json", validator: "mediaAsset", semantic: semanticMediaAsset }
+  { suffix: ".media-asset.json", validator: "mediaAsset", semantic: semanticMediaAsset },
+  { suffix: ".astro-artifact-manifest.json", validator: "astroArtifact", semantic: semanticAstroArtifact }
 ];
 
 let validated = 0;
@@ -158,11 +167,34 @@ const negativeChecks = [
   ["designOverride", { apiVersion: "navocms.io/v0alpha1", kind: "DesignOverride" }],
   ["designSystem", { apiVersion: "navocms.io/v0alpha1", kind: "DesignSystem" }],
   ["event", { specversion: "1.0" }],
-  ["mediaAsset", { apiVersion: "navocms.io/v0alpha1", kind: "MediaAsset" }]
+  ["mediaAsset", { apiVersion: "navocms.io/v0alpha1", kind: "MediaAsset" }],
+  ["astroArtifact", { schema: "io.navocms.astro-artifact.v1" }]
 ];
 
 for (const [name, invalidDocument] of negativeChecks) {
   assert(!validators[name](invalidDocument), `${name} schema unexpectedly accepted an invalid fixture`);
+}
+
+const astroAdversarialFixtures = fixtureFiles.filter((file) => file.endsWith(".astro-artifact-manifest.invalid.json"));
+assert(astroAdversarialFixtures.length > 0, "Expected an adversarial Astro artifact fixture");
+for (const file of astroAdversarialFixtures) {
+  const document = await readJson(file);
+  if (!validators.astroArtifact(document)) continue;
+  let semanticRejected = false;
+  try { semanticAstroArtifact(document, file); } catch { semanticRejected = true; }
+  assert(semanticRejected, `${file}: invalid Astro artifact fixture was accepted`);
+}
+
+const astroCorpus = await readJson("examples/astro/path-and-identifier-corpus.json");
+const validAstroManifest = await readJson("examples/astro/valid.astro-artifact-manifest.json");
+for (const mutation of astroCorpus) {
+  const document = {
+    ...validAstroManifest,
+    ...(mutation.tenantId ? { tenantId: mutation.tenantId } : {}),
+    ...(mutation.siteId ? { siteId: mutation.siteId } : {}),
+    ...(mutation.path ? { files: [{ ...validAstroManifest.files[0], path: mutation.path }] } : {})
+  };
+  assert(!validators.astroArtifact(document), `Astro corpus accepted ${mutation.name}`);
 }
 
 assert(validated >= 9, `Expected at least nine contract fixtures, validated ${validated}`);

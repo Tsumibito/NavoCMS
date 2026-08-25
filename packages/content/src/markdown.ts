@@ -20,6 +20,8 @@ interface MarkdownNode {
   readonly url?: string;
   readonly depth?: number;
   readonly lang?: string | null;
+  readonly alt?: string;
+  readonly ordered?: boolean;
   readonly attributes?: Record<string, string | null> | null;
   readonly children?: readonly MarkdownNode[];
   readonly position?: { readonly start: PositionPoint; readonly end: PositionPoint };
@@ -96,6 +98,18 @@ export function parseMarkdown(source: string, directives: readonly DirectiveDefi
   });
 }
 
+/**
+ * Renders canonical, validated Markdown into a deliberately small semantic HTML subset.
+ * It never passes raw HTML through and renders declared directives as data-marked elements.
+ */
+export function renderSemanticMarkdownHtml(source: string, directives: readonly DirectiveDefinition[] = []): string {
+  const canonical = canonicalMarkdown(source, directives);
+  const root = processor.parse(canonical) as MarkdownNode;
+  validateTree(root, directives);
+  const definitions = new Map(directives.map((definition) => [definition.name, definition]));
+  return (root.children ?? []).map((node) => renderHtmlNode(node, definitions)).join("");
+}
+
 function normalizeInput(source: string): string {
   if (source.includes("\0")) throw new ContentError("MARKDOWN_NUL_REJECTED", "Markdown cannot contain NUL bytes");
   return source.replace(/\r\n?/g, "\n");
@@ -163,4 +177,58 @@ function safeContentUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function renderHtmlNode(node: MarkdownNode, directives: ReadonlyMap<string, DirectiveDefinition>): string {
+  const children = () => (node.children ?? []).map((child) => renderHtmlNode(child, directives)).join("");
+  switch (node.type) {
+    case "text": return escapeHtml(node.value ?? "");
+    case "paragraph": return `<p>${children()}</p>`;
+    case "heading": return `<h${node.depth ?? 1}>${children()}</h${node.depth ?? 1}>`;
+    case "strong": return `<strong>${children()}</strong>`;
+    case "emphasis": return `<em>${children()}</em>`;
+    case "delete": return `<del>${children()}</del>`;
+    case "inlineCode": return `<code>${escapeHtml(node.value ?? "")}</code>`;
+    case "code": return `<pre><code${node.lang ? ` class="language-${escapeAttribute(node.lang)}"` : ""}>${escapeHtml(node.value ?? "")}</code></pre>`;
+    case "link": return `<a href="${escapeAttribute(node.url ?? "")}">${children()}</a>`;
+    case "image": return `<img src="${escapeAttribute(node.url ?? "")}" alt="${escapeAttribute(node.alt ?? "")}">`;
+    case "list": return node.ordered ? `<ol>${children()}</ol>` : `<ul>${children()}</ul>`;
+    case "listItem": return `<li>${children()}</li>`;
+    case "blockquote": return `<blockquote>${children()}</blockquote>`;
+    case "thematicBreak": return "<hr>";
+    case "break": return "<br>";
+    case "containerDirective": {
+      const definition = directives.get(node.name ?? "");
+      if (!definition) throw new ContentError("MARKDOWN_DIRECTIVE_UNKNOWN", "Undeclared renderer directive");
+      return `<section${directiveAttributes(definition.name, node.attributes)}>${children()}</section>`;
+    }
+    case "leafDirective": {
+      const definition = directives.get(node.name ?? "");
+      if (!definition) throw new ContentError("MARKDOWN_DIRECTIVE_UNKNOWN", "Undeclared renderer directive");
+      const attributes = stringAttributes(node.attributes);
+      const label = attributes.label ?? definition.name;
+      return attributes.href
+        ? `<a${directiveAttributes(definition.name, node.attributes)} href="${escapeAttribute(attributes.href)}">${escapeHtml(label)}</a>`
+        : `<span${directiveAttributes(definition.name, node.attributes)}>${escapeHtml(label)}</span>`;
+    }
+    case "textDirective": {
+      const definition = directives.get(node.name ?? "");
+      if (!definition) throw new ContentError("MARKDOWN_DIRECTIVE_UNKNOWN", "Undeclared renderer directive");
+      return `<span${directiveAttributes(definition.name, node.attributes)}>${children()}</span>`;
+    }
+    default: throw new ContentError("MARKDOWN_NODE_UNSUPPORTED", `Unsupported Markdown node ${node.type}`);
+  }
+}
+
+function directiveAttributes(name: string, attributes: MarkdownNode["attributes"]): string {
+  const values = stringAttributes(attributes);
+  return ` data-navocms-directive="${escapeAttribute(name)}"${Object.entries(values).map(([key, value]) => ` data-navocms-${escapeAttribute(key)}="${escapeAttribute(value)}"`).join("")}`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+}
+
+function escapeAttribute(value: string): string {
+  return escapeHtml(value);
 }

@@ -3,6 +3,7 @@ import path from "node:path";
 import process from "node:process";
 
 const files = [
+  "astro-artifact-manifest.schema.json",
   "content-type.schema.json",
   "design-override.schema.json",
   "design-system.schema.json",
