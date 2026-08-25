@@ -1,0 +1,23 @@
+{
+  "schema": "io.navocms.cloudflare-artifact-reference.v1",
+  "releaseHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "releaseArtifactHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "astroArtifactHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "outputHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "routeDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "sourceCommitSha": "ffffffffffffffffffffffffffffffffffffffff",
+  "fileCount": 2,
+  "byteSize": 30,
+  "files": [
+    {
+      "path": "en/index.html",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "byteSize": 15
+    },
+    {
+      "path": "fr/index.html",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "byteSize": 15
+    }
+  ]
+}

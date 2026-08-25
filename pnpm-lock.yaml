@@ -91,6 +91,9 @@ importers:
       '@navocms/content':
         specifier: workspace:*
         version: link:../../packages/content
+      '@navocms/delivery-cloudflare':
+        specifier: workspace:*
+        version: link:../../packages/delivery-cloudflare
       '@navocms/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
@@ -152,6 +155,15 @@ importers:
       ajv-formats:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.20.0)
+
+  packages/delivery-cloudflare:
+    dependencies:
+      '@navocms/design-astro':
+        specifier: workspace:*
+        version: link:../design-astro
+      '@navocms/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
   packages/design:
     dependencies:

@@ -5,12 +5,13 @@ import {
   PostgresIdempotencyStore,
   PostgresRuntimePolicyGuard
 } from "@navocms/persistence-postgres";
-import type { EventStore } from "@navocms/kernel";
+import { sha256, type EventStore, type ReleaseProvider, type ReleaseProviderPublication, type ReleaseProviderPublishInput } from "@navocms/kernel";
 import { randomUUID } from "node:crypto";
 import { NAVOCMS_PERMISSIONS, effectivePermissions, type AuthorizationContext } from "@navocms/security";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { PostgresEditingRepository } from "./postgres-repository.js";
+import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
 import { McpEditingService, type IdempotencyStore } from "./service.js";
@@ -115,6 +116,70 @@ integration("Neon production persistence", () => {
       releaseHash: preview.releaseHash,
       idempotencyKey: "sprint-seven-neon-publish-0001"
     })).resolves.toMatchObject({ release: { status: "published", artifactHash: preview.artifactHash } });
+  });
+
+  it("persists rollback.pending across a service restart and completes it only after reconcile", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const provider = new InterruptingRollbackProvider();
+    const firstService = service(new PostgresEventStore(database!), undefined, provider);
+    const first = await approvedRelease(firstService, suffix, "first");
+    await firstService.publishRelease(context(), { releaseId: first.releaseId, releaseHash: first.releaseHash, idempotencyKey: `publish-${suffix}-first` });
+    const second = await approvedRelease(firstService, suffix, "second");
+    await firstService.publishRelease(context(), { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: `publish-${suffix}-second` });
+    provider.interruptOnce = true;
+    await expect(firstService.rollbackRelease(context(), { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: `rollback-${suffix}` })).rejects.toThrow("injected rollback interruption");
+
+    const restartedService = service(new PostgresEventStore(database!), undefined, provider);
+    await expect(restartedService.reconcileRelease(context(), { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: `reconcile-${suffix}` })).resolves.toMatchObject({ release: { status: "rolled_back" }, publication: { releaseId: first.releaseId } });
+    const steps = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ step_key: string }>(
+        `SELECT checkpoint.step_key FROM navocms.workflow_checkpoints checkpoint
+           JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id
+          WHERE run.tenant_id = $1 AND run.site_id = $2 AND run.release_id = $3
+            AND checkpoint.step_key IN ('rollback.pending', 'rollback.completed')
+          ORDER BY checkpoint.completed_at`,
+        [tenantId, siteId, second.releaseId]
+      )).rows.map((row) => row.step_key)
+    );
+    expect(steps).toEqual(["rollback.pending", "rollback.completed"]);
+    expect(provider.rollbackCalls).toBe(2);
+
+    const descriptor = await new PostgresEditingRepository(database!).getSite({ tenantId, siteId, principalId });
+    if (!descriptor) throw new Error("integration site missing");
+    const phaseInput = { releaseId: second.releaseId, referenceHash: "a".repeat(64), phase: "rollback.coolify" };
+    const phaseBeforeRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    await expect(phaseBeforeRestart.reserve(phaseInput)).resolves.toBe("new");
+    await phaseBeforeRestart.complete({ ...phaseInput, externalId: "coolify-restarted-1" });
+    const phaseAfterRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    await expect(phaseAfterRestart.reserve(phaseInput)).resolves.toBe("completed");
+    await expect(phaseAfterRestart.externalId(phaseInput)).resolves.toBe("coolify-restarted-1");
+
+    const concurrentInput = { releaseId: second.releaseId, referenceHash: "b".repeat(64), phase: "publish.coolify" };
+    const firstConcurrent = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    const secondConcurrent = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    const reservations = await Promise.all([firstConcurrent.reserve(concurrentInput), secondConcurrent.reserve(concurrentInput)]);
+    expect([...reservations].sort()).toEqual(["new", "reserved"]);
+    const reservationStep = `delivery.${sha256(`${concurrentInput.referenceHash}:${concurrentInput.phase}`)}.reserved`;
+    const reservationCount = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM navocms.workflow_checkpoints checkpoint
+           JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id AND run.tenant_id = checkpoint.tenant_id AND run.site_id = checkpoint.site_id
+          WHERE run.tenant_id = $1 AND run.site_id = $2 AND run.release_id = $3 AND checkpoint.step_key = $4`,
+        [tenantId, siteId, second.releaseId, reservationStep]
+      )).rows[0]!.count
+    );
+    expect(reservationCount).toBe("1");
+
+    const unknownInput = { releaseId: second.releaseId, referenceHash: "c".repeat(64), phase: "rollback.coolify" };
+    const reservedBeforeRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    await expect(reservedBeforeRestart.reserve(unknownInput)).resolves.toBe("new");
+    const reservedAfterRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    await expect(reservedAfterRestart.reserve(unknownInput)).resolves.toBe("reserved");
+    await reservedAfterRestart.resolve({ ...unknownInput, externalId: "coolify-human-resolved-1", actor: { kind: "human", id: "release-operator" }, evidenceHash: "d".repeat(64), observedAt: "2026-08-25T00:00:00.000Z" });
+    await expect(reservedAfterRestart.resolution(unknownInput)).resolves.toMatchObject({ externalId: "coolify-human-resolved-1", actor: { kind: "human", id: "release-operator" } });
+    await reservedAfterRestart.complete({ ...unknownInput, externalId: "coolify-human-resolved-1" });
+    const completedAfterRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    await expect(completedAfterRestart.reserve(unknownInput)).resolves.toBe("completed");
   });
 
   it("maps a standard issuer subject to persisted site membership", async () => {
@@ -235,17 +300,37 @@ integration("Neon production persistence", () => {
 
 function service(
   events: EventStore = new PostgresEventStore(database!),
-  policyGuard?: PostgresRuntimePolicyGuard
+  policyGuard?: PostgresRuntimePolicyGuard,
+  provider: ReleaseProvider = new EmbeddedReleaseProvider()
 ): McpEditingService {
   return new McpEditingService(
     new PostgresEditingRepository(database!),
     events,
     new PostgresIdempotencyStore(database!) as IdempotencyStore,
     new PostgresReleaseWorkflowRepository(database!),
-    new EmbeddedReleaseProvider(),
+    provider,
     { environmentKey: "staging", previewBaseUrl: "https://staging-cms.navocms.test" },
     database!, policyGuard
   );
+}
+
+async function approvedRelease(releaseService: McpEditingService, suffix: string, label: string): Promise<{ releaseId: string; releaseHash: string }> {
+  const created = await releaseService.createDraft(context(), {
+    typeName: "article", slug: `rollback-${label}-${suffix}`, locale: "en", title: `Rollback ${label}`,
+    markdown: `# Rollback ${label}\n`, idempotencyKey: `draft-${suffix}-${label}`
+  }) as { draft: { revisionId: string } };
+  const preview = await releaseService.preparePreview(context(), created.draft.revisionId, `preview-${suffix}-${label}`);
+  await releaseService.approveRelease(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `approve-${suffix}-${label}` });
+  return preview;
+}
+
+class InterruptingRollbackProvider implements ReleaseProvider {
+  public readonly key = "test.postgres-rollback.v1";
+  public interruptOnce = false;
+  public rollbackCalls = 0;
+  public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> { return { providerKey: this.key, providerReference: `postgres:${input.releaseHash}:${input.artifact.hash}`, artifactHash: input.artifact.hash }; }
+  public async verify(): Promise<boolean> { return true; }
+  public async rollback(): Promise<void> { this.rollbackCalls += 1; if (this.interruptOnce) { this.interruptOnce = false; throw new Error("injected rollback interruption"); } }
 }
 
 function context(): { authorization: AuthorizationContext } {

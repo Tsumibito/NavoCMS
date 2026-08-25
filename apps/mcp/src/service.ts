@@ -359,7 +359,7 @@ export class McpEditingService {
         artifactHash: publication.artifactHash, providerKey: publication.providerKey
       }, "G2", (await this.#releases.getRelease(repositoryContext, input.releaseId)).correlationId);
       return safe({ release: releaseProjection(await this.#releases.getRelease(repositoryContext, input.releaseId)), publication });
-    });
+    }, false);
   }
 
   public async reconcileRelease(context: McpRequestContext, input: {
@@ -372,7 +372,11 @@ export class McpEditingService {
       const state = await this.#releases.reconcile(repositoryContext, input.releaseId);
       if (state.release.releaseHash !== input.releaseHash) throw new McpEditingError("STALE_RELEASE_APPROVAL", "Release hash does not match the previewed candidate");
       let publication = state.publication;
-      if (state.release.status === "publishing" && !publication) {
+      if (state.rollback) {
+        await this.#releaseProvider.rollback(state.rollback.current, state.rollback.target);
+        await this.#releases.completeRollback(repositoryContext, input.releaseId, state.rollback.current.id, state.rollback.target.id);
+        publication = state.rollback.target;
+      } else if (state.release.status === "publishing" && !publication) {
         publication = await this.applyAndVerify(repositoryContext, input.releaseId, input.releaseHash);
       } else if (publication && (state.release.status === "verification_failed" || publication.status === "verification_failed")) {
         const valid = await this.#releaseProvider.verify(publication);
@@ -381,10 +385,10 @@ export class McpEditingService {
       }
       const release = await this.#releases.getRelease(repositoryContext, input.releaseId);
       await this.appendEvent(context, "io.navocms.release.reconciled.v1", release.id, input.idempotencyKey, {
-        phase: "verified", releaseId: release.id, releaseHash: release.releaseHash, status: release.status
+        phase: state.rollback ? "rolled_back" : "verified", releaseId: release.id, releaseHash: release.releaseHash, status: release.status
       }, "G1", release.correlationId);
       return safe({ release: releaseProjection(release), ...(publication ? { publication } : {}) });
-    });
+    }, false);
   }
 
   public async rollbackRelease(context: McpRequestContext, input: {
@@ -402,7 +406,7 @@ export class McpEditingService {
         restoredPublicationId: prepared.target.id, restoredArtifactHash: prepared.target.artifactHash
       }, "G1", release.correlationId);
       return safe({ release: releaseProjection(release), restoredPublication: prepared.target });
-    });
+    }, false);
   }
 
   public async resolvePreview(token: string): Promise<{ readonly mediaType: string; readonly body: string } | undefined> {
@@ -448,10 +452,14 @@ export class McpEditingService {
     operation: string,
     key: string,
     input: unknown,
-    create: () => Promise<T>
+    create: () => Promise<T>,
+    transactional = true
   ): Promise<T> {
     await this.#policyGuard?.consume({ ...scope, operation, idempotencyKey: key });
-    if (this.#database) return this.#database.withScope(scope, () => this.idempotentInTransaction(scope, operation, key, input, create));
+    // Provider calls cross an external trust boundary. Their durable prepare
+    // state must commit before an effect, so they cannot share an outer SQL
+    // transaction that would roll it back when the provider crashes.
+    if (this.#database && transactional) return this.#database.withScope(scope, () => this.idempotentInTransaction(scope, operation, key, input, create));
     return this.idempotentInTransaction(scope, operation, key, input, create);
   }
 

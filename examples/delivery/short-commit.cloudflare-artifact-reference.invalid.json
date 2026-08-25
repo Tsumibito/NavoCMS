@@ -1,0 +1,11 @@
+{
+  "schema": "io.navocms.cloudflare-artifact-reference.v1",
+  "releaseHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "releaseArtifactHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "astroArtifactHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "outputHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "routeDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "sourceCommitSha": "ffffffffffff",
+  "fileCount": 2,
+  "byteSize": 30
+}

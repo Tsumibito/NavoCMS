@@ -53,6 +53,12 @@ const rules = [
     reason: "the Astro design adapter cannot depend on applications, plugins, the kernel, or transport"
   },
   {
+    directory: "packages/delivery-cloudflare/src",
+    forbidden: ["apps/", "plugins/", "fastify"],
+    allowedWorkspaceImports: ["@navocms/design-astro", "@navocms/kernel"],
+    reason: "the Cloudflare delivery adapter may depend only on immutable renderer and release contracts"
+  },
+  {
     directory: "packages/media/src",
     forbidden: ["apps/", "plugins/", "fastify"],
     allowedWorkspaceImports: ["@navocms/kernel", "@navocms/persistence-postgres", "@navocms/security"],
