@@ -255,7 +255,18 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
           ORDER BY p.applied_at DESC LIMIT 1`,
         [context.site.tenantId, context.site.siteId, releaseId]
       )).rows[0];
-      return Object.freeze({ release: toRelease(release), ...(publication ? { publication: toPublication(publication) } : {}) });
+      const checkpoints = (await client.query<{ step_key: string; output_json: unknown }>(
+        `SELECT c.step_key, c.output_json FROM navocms.workflow_checkpoints c
+           JOIN navocms.workflow_runs r ON r.id = c.run_id AND r.tenant_id = c.tenant_id AND r.site_id = c.site_id
+          WHERE r.tenant_id = $1 AND r.site_id = $2 AND r.release_id = $3
+            AND c.step_key IN ('rollback.pending','rollback.completed')
+          ORDER BY c.completed_at DESC LIMIT 1`,
+        [context.site.tenantId, context.site.siteId, releaseId]
+      )).rows[0];
+      const rollback = checkpoints?.step_key === "rollback.pending"
+        ? await pendingRollback(client, context, releaseId, checkpoints.output_json) ?? await pendingRollbackRun(client, context, releaseId)
+        : await pendingRollbackRun(client, context, releaseId);
+      return Object.freeze({ release: toRelease(release), ...(publication ? { publication: toPublication(publication) } : {}), ...(rollback ? { rollback } : {}) });
     });
   }
 
@@ -276,6 +287,16 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
         [context.site.tenantId, context.site.siteId, current.previous_publication_id]
       )).rows[0];
       if (!target) throw new McpEditingError("ROLLBACK_TARGET_MISSING", "Previous publication no longer exists");
+      await writeCheckpoint(client, context, releaseId, "rollback.pending", release.release_hash, { currentPublicationId: current.id, targetPublicationId: target.id });
+      // The workflow run is a durable intent index for recovery. The precise
+      // publication IDs remain in the checkpoint, while this state lets a
+      // restarted reconciler safely recompute the same linked pair if a stale
+      // checkpoint projection cannot be read.
+      await client.query(
+        `UPDATE navocms.workflow_runs SET current_step = 'rollback.pending', updated_at = now()
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'`,
+        [context.site.tenantId, context.site.siteId, releaseId]
+      );
       return Object.freeze({ release: toRelease(release), current: toPublication(current), target: toPublication(target) });
     });
   }
@@ -304,9 +325,49 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
           WHERE tenant_id = $1 AND site_id = $2 AND id = $3`,
         [context.site.tenantId, context.site.siteId, releaseId]
       );
+      await writeCheckpoint(client, context, releaseId, "rollback.completed", release.release_hash, { currentPublicationId, targetPublicationId });
+      await succeedRun(client, context, releaseId);
       return toRelease(await requireRelease(client, context, releaseId, false, true));
     });
   }
+}
+
+async function pendingRollback(client: SqlClient, context: RepositoryContext, releaseId: string, value: unknown): Promise<{ readonly current: PublicationRecord; readonly target: PublicationRecord } | undefined> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const payload = value as Record<string, unknown>;
+  if (typeof payload.currentPublicationId !== "string" || typeof payload.targetPublicationId !== "string" || !isUuid(payload.currentPublicationId) || !isUuid(payload.targetPublicationId)) return undefined;
+  const current = (await client.query<PublicationRow>(
+    `${publicationSelect()} WHERE p.tenant_id = $1 AND p.site_id = $2 AND p.id = $3 AND p.release_id = $4`,
+    [context.site.tenantId, context.site.siteId, payload.currentPublicationId, releaseId]
+  )).rows[0];
+  const target = (await client.query<PublicationRow>(
+    `${publicationSelect()} WHERE p.tenant_id = $1 AND p.site_id = $2 AND p.id = $3`,
+    [context.site.tenantId, context.site.siteId, payload.targetPublicationId]
+  )).rows[0];
+  return current && target && current.previous_publication_id === target.id ? Object.freeze({ current: toPublication(current), target: toPublication(target) }) : undefined;
+}
+
+async function pendingRollbackRun(client: SqlClient, context: RepositoryContext, releaseId: string): Promise<{ readonly current: PublicationRecord; readonly target: PublicationRecord } | undefined> {
+  const pending = (await client.query<{ pending: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM navocms.workflow_runs
+        WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3
+          AND status = 'running' AND current_step = 'rollback.pending'
+     ) AS pending`,
+    [context.site.tenantId, context.site.siteId, releaseId]
+  )).rows[0]?.pending;
+  if (!pending) return undefined;
+  const current = (await client.query<PublicationRow>(
+    `${publicationSelect()} WHERE p.tenant_id = $1 AND p.site_id = $2 AND p.release_id = $3
+      AND p.status IN ('applied','verified','verification_failed') ORDER BY p.applied_at DESC LIMIT 1`,
+    [context.site.tenantId, context.site.siteId, releaseId]
+  )).rows[0];
+  if (!current?.previous_publication_id) return undefined;
+  const target = (await client.query<PublicationRow>(
+    `${publicationSelect()} WHERE p.tenant_id = $1 AND p.site_id = $2 AND p.id = $3`,
+    [context.site.tenantId, context.site.siteId, current.previous_publication_id]
+  )).rows[0];
+  return target ? Object.freeze({ current: toPublication(current), target: toPublication(target) }) : undefined;
 }
 
 async function requireEnvironment(client: SqlClient, context: RepositoryContext, environmentKey: string): Promise<string> {

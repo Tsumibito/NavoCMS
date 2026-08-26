@@ -82,7 +82,7 @@ export interface ReleaseWorkflowRepository {
   completePublication(context: RepositoryContext, releaseId: string, publication: ReleaseProviderPublication): Promise<PublicationRecord>;
   markVerificationFailed(context: RepositoryContext, releaseId: string, publicationId: string): Promise<void>;
   markVerified(context: RepositoryContext, releaseId: string, publicationId: string): Promise<StoredRelease>;
-  reconcile(context: RepositoryContext, releaseId: string): Promise<{ readonly release: StoredRelease; readonly publication?: PublicationRecord }>;
+  reconcile(context: RepositoryContext, releaseId: string): Promise<{ readonly release: StoredRelease; readonly publication?: PublicationRecord; readonly rollback?: { readonly current: PublicationRecord; readonly target: PublicationRecord } }>;
   rollback(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<{
     readonly release: StoredRelease;
     readonly current: PublicationRecord;
@@ -116,6 +116,7 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
   readonly #releases = new Map<string, MutableRelease>();
   readonly #previews = new Map<string, PreviewDocument>();
   readonly #publications = new Map<string, PublicationRecord>();
+  readonly #pendingRollbacks = new Map<string, { readonly current: PublicationRecord; readonly target: PublicationRecord }>();
 
   public constructor(environmentId = "33333333-3333-4333-8333-333333333333") {
     this.#environmentId = environmentId;
@@ -213,7 +214,8 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
   public async reconcile(context: RepositoryContext, releaseId: string) {
     const release = this.requireScoped(context, releaseId);
     const publication = [...this.#publications.values()].find((candidate) => candidate.releaseId === releaseId);
-    return Object.freeze({ release: freezeRelease(release), ...(publication ? { publication } : {}) });
+    const rollback = this.#pendingRollbacks.get(releaseId);
+    return Object.freeze({ release: freezeRelease(release), ...(publication ? { publication } : {}), ...(rollback ? { rollback } : {}) });
   }
 
   public async rollback(context: RepositoryContext, releaseId: string, releaseHash: string) {
@@ -226,7 +228,9 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     );
     const target = current?.previousPublicationId ? this.#publications.get(current.previousPublicationId) : undefined;
     if (!current || !target) throw new McpEditingError("ROLLBACK_TARGET_MISSING", "No previous verified publication is available");
-    return Object.freeze({ release: freezeRelease(release), current, target });
+    const prepared = Object.freeze({ release: freezeRelease(release), current, target });
+    this.#pendingRollbacks.set(releaseId, { current, target });
+    return prepared;
   }
 
   public async completeRollback(context: RepositoryContext, releaseId: string, currentPublicationId: string, targetPublicationId: string): Promise<StoredRelease> {
@@ -238,6 +242,7 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     this.#publications.set(target.id, Object.freeze({ ...target, status: "verified" }));
     release.status = releaseTransition(release.status, "rolled_back");
     release.updatedAt = new Date().toISOString();
+    this.#pendingRollbacks.delete(releaseId);
     return freezeRelease(release);
   }
 

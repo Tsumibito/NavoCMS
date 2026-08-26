@@ -88,6 +88,21 @@ describe("durable release workflow", () => {
     });
     expect(provider.rollbackCount).toBe(1);
   });
+
+  it("persists a rollback checkpoint and resumes the exact target after an interrupted provider rollback", async () => {
+    const provider = new RecoverableProvider();
+    const repository = new InMemoryEditingRepository(); repository.registerSite(site);
+    const service = new McpEditingService(repository, new InMemoryEventStore(), undefined, new InMemoryReleaseWorkflowRepository(), provider);
+    const context = requestContext();
+    const first = await draftPreviewApprove(service, context, "rollback-first", "Rollback first", "rollback-first");
+    await service.publishRelease(context, { releaseId: first.releaseId, releaseHash: first.releaseHash, idempotencyKey: "publish-rollback-first-001" });
+    const second = await draftPreviewApprove(service, context, "rollback-second", "Rollback second", "rollback-second");
+    await service.publishRelease(context, { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: "publish-rollback-second-001" });
+    provider.failRollbackOnce = true;
+    await expect(service.rollbackRelease(context, { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: "rollback-interrupted-001" })).rejects.toThrow("interrupted rollback");
+    await expect(service.reconcileRelease(context, { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: "reconcile-rollback-001" })).resolves.toMatchObject({ release: { status: "rolled_back" }, publication: { releaseId: first.releaseId } });
+    expect(provider.rollbackCount).toBe(2);
+  });
 });
 
 class RecoverableProvider implements ReleaseProvider {
@@ -95,6 +110,7 @@ class RecoverableProvider implements ReleaseProvider {
   public publishCount = 0;
   public rollbackCount = 0;
   public verifyLive = true;
+  public failRollbackOnce = false;
 
   public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
     this.publishCount += 1;
@@ -111,6 +127,7 @@ class RecoverableProvider implements ReleaseProvider {
 
   public async rollback(): Promise<void> {
     this.rollbackCount += 1;
+    if (this.failRollbackOnce) { this.failRollbackOnce = false; throw new Error("interrupted rollback"); }
   }
 }
 

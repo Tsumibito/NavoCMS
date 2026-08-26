@@ -7,6 +7,7 @@
     { "path": "packages/design" },
     { "path": "packages/design-astro" },
     { "path": "packages/kernel" },
+    { "path": "packages/delivery-cloudflare" },
     { "path": "packages/persistence-postgres" },
     { "path": "packages/media" },
     { "path": "apps/api" },

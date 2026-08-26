@@ -19,6 +19,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0012](0012-provider-neutral-mcp-oauth.md) | Accepted | Provider-neutral MCP OAuth with deployment-bound tenant/site membership |
 | [0013](0013-media-persistence-boundary.md) | Accepted | Media domain facade with a constrained PostgreSQL transactional adapter |
 | [0016](0016-astro-renderer-artifact-boundary.md) | Proposed | Deterministic Astro source artifact and delivery-layout boundary |
+| [0017](0017-cloudflare-preview-delivery-provider.md) | Proposed | Immutable Cloudflare preview and exact-commit Coolify delivery boundary |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

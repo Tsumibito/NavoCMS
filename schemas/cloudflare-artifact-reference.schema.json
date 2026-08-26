@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v1/cloudflare-artifact-reference.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "releaseHash", "releaseArtifactHash", "astroArtifactHash", "outputHash", "routeDigest", "sourceCommitSha", "fileCount", "byteSize", "files"],
+  "properties": {
+    "schema": { "const": "io.navocms.cloudflare-artifact-reference.v1" },
+    "releaseHash": { "$ref": "#/$defs/hash" },
+    "releaseArtifactHash": { "$ref": "#/$defs/hash" },
+    "astroArtifactHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "outputHash": { "$ref": "#/$defs/hash" },
+    "routeDigest": { "$ref": "#/$defs/hash" },
+    "sourceCommitSha": { "type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
+    "fileCount": { "type": "integer", "minimum": 1, "maximum": 512 },
+    "byteSize": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+    "files": { "type": "array", "minItems": 1, "maxItems": 512, "items": { "$ref": "#/$defs/file" } }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "byteSize"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*/$)[A-Za-z0-9][A-Za-z0-9._/-]*$" },
+        "sha256": { "$ref": "#/$defs/hash" },
+        "byteSize": { "type": "integer", "minimum": 1, "maximum": 8388608 }
+      }
+    }
+  }
+}
