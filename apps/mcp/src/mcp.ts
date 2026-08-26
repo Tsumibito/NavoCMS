@@ -8,6 +8,7 @@ import {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ContentError } from "@navocms/content";
+import { publicCloudflareDeliveryErrorCode } from "@navocms/delivery-cloudflare";
 import { KernelError } from "@navocms/kernel";
 import { effectivePermissions, SecurityError, type Permission } from "@navocms/security";
 import { z } from "zod";
@@ -388,7 +389,7 @@ function safeTool<TArgs extends Record<string, unknown>>(
     } catch (error) {
       const code = error instanceof SecurityError || error instanceof ContentError || error instanceof KernelError || error instanceof McpEditingError
         ? error.code
-        : "REQUEST_REJECTED";
+        : publicCloudflareDeliveryErrorCode(error) ?? "REQUEST_REJECTED";
       return {
         isError: true as const,
         content: [{ type: "text" as const, text: `NavoCMS rejected the request (${code}). No content was published.` }]

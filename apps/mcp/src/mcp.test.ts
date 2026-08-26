@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { InMemoryEventStore } from "@navocms/kernel";
+import { CloudflareDeliveryError } from "@navocms/delivery-cloudflare";
+import { InMemoryEventStore, type ReleaseProvider } from "@navocms/kernel";
 import {
   NAVOCMS_PERMISSIONS,
   SecurityError,
@@ -302,7 +303,62 @@ describe("MCP protocol and agent evaluations", () => {
     await expect(service.listSites(requestContext("publisher", "33333333-3333-4333-8333-333333333333"))).rejects.toMatchObject({ code: "SITE_NOT_REGISTERED" });
   });
 
+  it("exposes only the statically validated Cloudflare recovery code", async () => {
+    const known = await releasePublishError(new CloudflareDeliveryError("CLOUDFLARE_HTTP_403", "token=must-not-leak", 403));
+    expect(known.isError).toBe(true);
+    expect(known.content).toEqual([{ type: "text", text: "NavoCMS rejected the request (CLOUDFLARE_HTTP_403). No content was published." }]);
+
+    const unknown = await releasePublishError(new Error("provider body: token=must-not-leak"));
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content).toEqual([{ type: "text", text: "NavoCMS rejected the request (REQUEST_REJECTED). No content was published." }]);
+
+    const unsafeProviderCode = await releasePublishError(new CloudflareDeliveryError("CLOUDFLARE_HTTP_403_SECRET", "token=must-not-leak"));
+    expect(unsafeProviderCode.isError).toBe(true);
+    expect(unsafeProviderCode.content).toEqual([{ type: "text", text: "NavoCMS rejected the request (REQUEST_REJECTED). No content was published." }]);
+  });
+
 });
+
+async function releasePublishError(error: Error) {
+  const provider: ReleaseProvider = {
+    key: "test-throwing-provider",
+    async publish() { throw error; },
+    async verify() { return false; },
+    async rollback() {}
+  };
+  const repository = new InMemoryEditingRepository();
+  repository.registerSite(site);
+  const service = new McpEditingService(repository, new InMemoryEventStore(), undefined, undefined, provider);
+  const context = requestContext("publisher");
+  const draft = await service.createDraft(context, {
+    typeName: "article",
+    slug: "provider-error-surface",
+    locale: "en",
+    title: "Provider error surface",
+    markdown: "# Provider error surface\n",
+    idempotencyKey: "provider-error-draft-001"
+  }) as DraftResult;
+  const preview = await service.preparePreview(context, draft.draft.revisionId, "provider-error-preview-001") as { releaseId: string; releaseHash: string };
+  await service.approveRelease(context, {
+    releaseId: preview.releaseId,
+    releaseHash: preview.releaseHash,
+    idempotencyKey: "provider-error-approve-001"
+  });
+  const server = createMcpServer(service, context);
+  const client = new Client({ name: "navocms-provider-error-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    return await client.callTool({ name: "release_publish", arguments: {
+      releaseId: preview.releaseId,
+      releaseHash: preview.releaseHash,
+      idempotencyKey: "provider-error-publish-001"
+    } });
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
 
 function fixture(role: SiteRole) {
   const repository = new InMemoryEditingRepository();
