@@ -78,7 +78,8 @@ record a candidate deployment UUID plus evidence hash. The provider then
 inspects that exact candidate against the commit/reference binding before it
 marks the phase completed. Missing, zero, or invalid evidence stays fail-closed
 but remains resolvable by another authenticated, permission-scoped human
-resolution record. A separately recorded, evidence-bound `not_applied` outcome
+resolution record. Each attempt has exactly one terminal human outcome:
+an applied candidate or evidence-bound `not_applied`, never both. The latter
 may prove that the first reservation stopped before its request; it creates
 exactly one numbered second reservation and never removes the first.
 
@@ -113,7 +114,7 @@ production activation is part of this decision.
 
 | Interruption | Retry / reconciliation behavior |
 |---|---|
-| Before a reserved effect reaches a provider | An authenticated human may append exact `not_applied` evidence to the Event Ledger. It authorizes exactly one numbered second attempt; absent proof remains fail-closed. |
+| Before a reserved effect reaches a provider | An authenticated human may append exact `not_applied` evidence to the Event Ledger. It authorizes exactly one numbered second attempt; an existing applied candidate conflicts, and absent proof remains fail-closed. |
 | After Pages effect, before PostgreSQL checkpoint | Discovery finds the Pages environment-specific commit-message marker and returns the same deployment. |
 | Pages 502 during discovery or live verification | At most three bounded read-only attempts emit sanitized telemetry; a failed live verification remains reconcilable. |
 | Pages/Coolify/rollback 502 during mutation | No in-call retry occurs. The phase remains reserved and reconciliation must prove completion or record evidence-bound `not_applied` before the sole second attempt. |
@@ -122,7 +123,7 @@ production activation is part of this decision.
 | Same commit, different reference | Coolify's commit-only history is not reused; a bounded exact-commit promotion is required. |
 | After provider effect, before publication record | The durable release remains `publishing`; existing `release_reconcile` re-enters the provider without replaying a reserved external effect. |
 | Cloudflare rollback after effect, before checkpoint | `release_reconcile` proves the project canonical deployment, target byte hashes, and cache policy, then completes the reserved phase without another rollback POST. |
-| Coolify effect after reservation, before checkpoint | The provider does not replay because Coolify cannot search by immutable reference. An authenticated human with `content:publish` records a candidate UUID and evidence hash, atomically including an Event Ledger entry; only a subsequent exact inspect completes the phase. Missing or invalid candidates remain fail-closed. |
+| Coolify effect after reservation, before checkpoint | The provider does not replay because Coolify cannot search by immutable reference. An authenticated human with `content:publish` records a candidate UUID and evidence hash, atomically including an Event Ledger entry; only a subsequent exact inspect completes the phase. The authenticated authority cannot be constructed without that Ledger. Missing or invalid candidates remain fail-closed. |
 
 ## Consequences
 

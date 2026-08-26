@@ -107,6 +107,23 @@ describe("Cloudflare Pages release provider", () => {
     await expect(phases.notApplied({ ...phase, evidenceHash: "f".repeat(64), observedAt: "2026-08-26T00:00:01.000Z" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_NOT_APPLIED_INVALID" });
   });
 
+  it("keeps applied-candidate and not-applied outcomes mutually exclusive per attempt", async () => {
+    const phases = new InMemoryDeliveryPhaseStore();
+    const phase = { releaseId: input.releaseId, referenceHash, phase: "publish.coolify" };
+    await phases.reserve(phase);
+    await phases.resolve({ ...phase, externalId: "coolify-candidate-1", evidenceHash: "d".repeat(64), observedAt: "2026-08-26T00:00:00.000Z" });
+    await expect(phases.notApplied({ ...phase, evidenceHash: "e".repeat(64), observedAt: "2026-08-26T00:00:01.000Z" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_OUTCOME_CONFLICT" });
+    expect(await phases.attempt(phase)).toBe(1);
+
+    const retried = { ...phase, phase: "rollback.coolify" };
+    await phases.reserve(retried);
+    await phases.notApplied({ ...retried, evidenceHash: "e".repeat(64), observedAt: "2026-08-26T00:00:00.000Z" });
+    await expect(phases.resolve({ ...retried, externalId: "coolify-candidate-2", evidenceHash: "d".repeat(64), observedAt: "2026-08-26T00:00:01.000Z" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_OUTCOME_CONFLICT" });
+    await phases.reserve(retried);
+    await phases.resolve({ ...retried, externalId: "coolify-candidate-2", evidenceHash: "d".repeat(64), observedAt: "2026-08-26T00:00:01.000Z" });
+    await expect(phases.resolution(retried)).resolves.toMatchObject({ attempt: 2, externalId: "coolify-candidate-2" });
+  });
+
   it("fails closed before any provider effect when a resolver returns a different immutable artifact", async () => {
     const cloudflare = new FakeCloudflare();
     const coolify = new FakeCoolify();

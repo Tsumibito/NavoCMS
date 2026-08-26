@@ -36,7 +36,9 @@ or release/idempotency implementation.
 - A crash after reservation but before an external request is recoverable only
   through authenticated human, evidence-bound `not_applied` proof. It creates
   one numbered second attempt and emits an Event Ledger record; arbitrary input
-  can neither name the human actor nor grant this authority.
+  can neither name the human actor nor grant this authority. Each attempt
+  accepts exactly one of applied-candidate and not-applied, and the authority
+  cannot be constructed without the Ledger.
 - Retry telemetry records stable operation/status metadata only and can append
   to the existing Event Ledger. Tests cover a transient 502; no credential or
   upstream response text enters errors.
@@ -46,7 +48,7 @@ or release/idempotency implementation.
 
 ## Local evidence before CI
 
-- focused provider/release-workflow tests: **21 passed** locally after the
+- focused provider/release-workflow tests: **22 passed** locally after the
   final review-fix package;
 - PostgreSQL integration adds concurrent phase reservation and a persisted
   `reserved → restart → human resolution → completed` recovery trajectory; it
@@ -69,11 +71,11 @@ or release/idempotency implementation.
 - The correction commits the existing prepare/checkpoint and idempotency state
   before any provider call, and retains the workflow run's `rollback.pending`
   state as the recovery index.
-- The previously accepted PR head passed the full PostgreSQL, isolation,
-  visual, and production-container gate: [Quality checks run
-  32904318446](https://github.com/Tsumibito/NavoCMS/actions/runs/32904318446).
-  This evidence predates the current review-fix package and is not evidence of
-  its acceptance.
+- The current pre-fix PR head passed the full PostgreSQL, isolation, visual,
+  and production-container gate: [Quality checks run
+  32949186343](https://github.com/Tsumibito/NavoCMS/actions/runs/32949186343).
+  This evidence predates the current final review-fix package and is not
+  evidence of its acceptance.
 
 ## Remaining activation work
 

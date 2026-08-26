@@ -34,6 +34,7 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
   readonly #events: EventStore | undefined;
 
   public constructor(database: PostgresDatabase, context: RepositoryContext, options: Readonly<{ authority?: AuthenticatedDeliveryPhaseAuthority; events?: EventStore }> = {}) {
+    if (options.authority && !options.events) throw new McpEditingError("DELIVERY_PHASE_LEDGER_REQUIRED", "Authenticated delivery-phase authority requires the Event Ledger");
     this.#database = database;
     this.#context = context;
     this.#authority = options.authority;
@@ -83,13 +84,17 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
   }
 
   public async resolve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string; evidenceHash: string; observedAt: string }>): Promise<void> {
-    const resolution = resolutionInput({ ...input, actor: this.#humanActor() });
+    const actor = this.#humanActor();
     await this.#database.withScope(scope(this.#context), async (client) => {
       await lock(client, this.#context, input);
       if (await phase(client, this.#context, input, "completed")) return;
       if (!await phase(client, this.#context, input, "reserved")) throw new McpEditingError("DELIVERY_PHASE_MISSING", "Cannot resolve a provider phase that was not reserved");
+      const attempt = await activeAttempt(client, this.#context, input);
+      if (attempt === 1 && await phase(client, this.#context, input, "not-applied")) throw new McpEditingError("DELIVERY_PHASE_OUTCOME_CONFLICT", "Attempt one is already proven not applied");
+      if (await resolutionForAttempt(client, this.#context, input, attempt)) throw new McpEditingError("DELIVERY_PHASE_OUTCOME_CONFLICT", "This delivery attempt already has an applied candidate");
+      const resolution = resolutionInput({ ...input, actor, attempt });
       await checkpoint(client, this.#context, input.releaseId, resolutionKey(input, resolution), input.referenceHash, {
-        referenceHash: input.referenceHash, phase: input.phase, externalId: resolution.externalId,
+        referenceHash: input.referenceHash, phase: input.phase, attempt: resolution.attempt, externalId: resolution.externalId,
         actor: resolution.actor, evidenceHash: resolution.evidenceHash, observedAt: resolution.observedAt
       });
       if (this.#events) {
@@ -107,6 +112,7 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
       if (await phase(client, this.#context, input, "completed")) return;
       if (!await phase(client, this.#context, input, "reserved")) throw new McpEditingError("DELIVERY_PHASE_MISSING", "Cannot retry a provider phase that was not reserved");
       if (await phase(client, this.#context, input, "reserved-2")) throw new McpEditingError("DELIVERY_PHASE_NOT_APPLIED_INVALID", "The bounded recovery attempt was already consumed");
+      if (await resolutionForAttempt(client, this.#context, input, 1)) throw new McpEditingError("DELIVERY_PHASE_OUTCOME_CONFLICT", "Attempt one already has an applied candidate");
       await checkpoint(client, this.#context, input.releaseId, key(input, "not-applied"), input.referenceHash, { referenceHash: input.referenceHash, phase: input.phase, attempt: 1, actor, evidenceHash: input.evidenceHash, observedAt: input.observedAt });
       if (this.#events) {
         const factory = new DomainEventFactory({ source: "urn:navocms:delivery", tenantId: this.#context.site.tenantId, siteId: this.#context.site.siteId, correlationId: input.releaseId, actor: { type: "human", id: actor.id } });
@@ -116,7 +122,7 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
   }
 
   public async attempt(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2> {
-    return this.#database.withScope(scope(this.#context), async (client) => (await phase(client, this.#context, input, "reserved-2")) ? 2 : 1);
+    return this.#database.withScope(scope(this.#context), async (client) => activeAttempt(client, this.#context, input));
   }
 
   #humanActor(): Readonly<{ kind: "human"; id: string }> {
@@ -127,21 +133,14 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
 
   public async resolution(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<DeliveryPhaseResolution | undefined> {
     return this.#database.withScope(scope(this.#context), async (client) => {
-      const row = (await client.query<{ output_json: unknown }>(
-        `SELECT checkpoint.output_json FROM navocms.workflow_checkpoints checkpoint
-           JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id AND run.tenant_id = checkpoint.tenant_id AND run.site_id = checkpoint.site_id
-          WHERE run.tenant_id = $1 AND run.site_id = $2 AND run.release_id = $3 AND checkpoint.step_key LIKE $4
-          ORDER BY checkpoint.completed_at DESC LIMIT 1`,
-        [this.#context.site.tenantId, this.#context.site.siteId, input.releaseId, `${key(input, "resolution")}.%`]
-      )).rows[0];
-      return row ? storedResolution(row.output_json) : undefined;
+      return resolutionForAttempt(client, this.#context, input, await activeAttempt(client, this.#context, input));
     });
   }
 }
 
 function scope(context: RepositoryContext) { return { tenantId: context.site.tenantId, siteId: context.site.siteId, principalId: context.principalId }; }
 function key(input: Readonly<{ referenceHash: string; phase: string }>, state: "reserved" | "reserved-2" | "completed" | "resolution" | "not-applied"): string { return `delivery.${sha256(`${input.referenceHash}:${input.phase}`)}.${state}`; }
-function resolutionKey(input: Readonly<{ referenceHash: string; phase: string }>, resolution: DeliveryPhaseResolution): string { return `delivery.${sha256(`${input.referenceHash}:${input.phase}`)}.resolution.${sha256(`${resolution.externalId}:${resolution.actor.id}:${resolution.evidenceHash}:${resolution.observedAt}`)}`; }
+function resolutionKey(input: Readonly<{ referenceHash: string; phase: string }>, resolution: DeliveryPhaseResolution): string { return `delivery.${sha256(`${input.referenceHash}:${input.phase}`)}.resolution.${resolution.attempt}.${sha256(`${resolution.externalId}:${resolution.actor.id}:${resolution.evidenceHash}:${resolution.observedAt}`)}`; }
 
 async function phase(client: SqlClient, context: RepositoryContext, input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>, state: "reserved" | "reserved-2" | "completed" | "not-applied"): Promise<{ output_json: unknown } | undefined> {
   return (await client.query<{ output_json: unknown }>(
@@ -151,6 +150,22 @@ async function phase(client: SqlClient, context: RepositoryContext, input: Reado
       ORDER BY checkpoint.completed_at DESC LIMIT 1`,
     [context.site.tenantId, context.site.siteId, input.releaseId, key(input, state)]
   )).rows[0];
+}
+
+async function activeAttempt(client: SqlClient, context: RepositoryContext, input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2> {
+  return (await phase(client, context, input, "reserved-2")) ? 2 : 1;
+}
+
+async function resolutionForAttempt(client: SqlClient, context: RepositoryContext, input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>, attempt: 1 | 2): Promise<DeliveryPhaseResolution | undefined> {
+  const row = (await client.query<{ output_json: unknown }>(
+    `SELECT checkpoint.output_json FROM navocms.workflow_checkpoints checkpoint
+       JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id AND run.tenant_id = checkpoint.tenant_id AND run.site_id = checkpoint.site_id
+      WHERE run.tenant_id = $1 AND run.site_id = $2 AND run.release_id = $3 AND checkpoint.step_key LIKE $4
+        AND checkpoint.output_json->>'attempt' = $5
+      ORDER BY checkpoint.completed_at DESC LIMIT 1`,
+    [context.site.tenantId, context.site.siteId, input.releaseId, `${key(input, "resolution")}.%`, String(attempt)]
+  )).rows[0];
+  return row ? storedResolution(row.output_json) : undefined;
 }
 
 async function checkpoint(client: SqlClient, context: RepositoryContext, releaseId: string, step: string, inputHash: string, output: object): Promise<void> {
@@ -180,18 +195,18 @@ function externalId(value: unknown): string | undefined {
   return value && typeof value === "object" && !Array.isArray(value) && typeof (value as Record<string, unknown>).externalId === "string" ? (value as Record<string, string>).externalId : undefined;
 }
 
-function resolutionInput(input: Readonly<{ externalId: unknown; actor: unknown; evidenceHash: unknown; observedAt: unknown }>): DeliveryPhaseResolution {
+function resolutionInput(input: Readonly<{ attempt: unknown; externalId: unknown; actor: unknown; evidenceHash: unknown; observedAt: unknown }>): DeliveryPhaseResolution {
   const actor = input.actor && typeof input.actor === "object" && !Array.isArray(input.actor) ? input.actor as Record<string, unknown> : undefined;
-  if (typeof input.externalId !== "string" || typeof input.evidenceHash !== "string" || typeof input.observedAt !== "string" || !actor || actor.kind !== "human" || typeof actor.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(input.externalId) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(actor.id) || !/^[a-f0-9]{64}$/.test(input.evidenceHash) || !Number.isFinite(Date.parse(input.observedAt))) {
+  if ((input.attempt !== 1 && input.attempt !== 2) || typeof input.externalId !== "string" || typeof input.evidenceHash !== "string" || typeof input.observedAt !== "string" || !actor || actor.kind !== "human" || typeof actor.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(input.externalId) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(actor.id) || !/^[a-f0-9]{64}$/.test(input.evidenceHash) || !Number.isFinite(Date.parse(input.observedAt))) {
     throw new CloudflareDeliveryError("DELIVERY_PHASE_RESOLUTION_INVALID", "Human delivery-phase resolution is invalid");
   }
-  return Object.freeze({ externalId: input.externalId, actor: Object.freeze({ kind: "human", id: actor.id }), evidenceHash: input.evidenceHash, observedAt: input.observedAt });
+  return Object.freeze({ attempt: input.attempt, externalId: input.externalId, actor: Object.freeze({ kind: "human", id: actor.id }), evidenceHash: input.evidenceHash, observedAt: input.observedAt });
 }
 
 function storedResolution(value: unknown): DeliveryPhaseResolution | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const row = value as Record<string, unknown>;
   try {
-    return resolutionInput({ externalId: row.externalId, actor: row.actor as { kind: "human"; id: string }, evidenceHash: row.evidenceHash, observedAt: row.observedAt });
+    return resolutionInput({ attempt: row.attempt, externalId: row.externalId, actor: row.actor as { kind: "human"; id: string }, evidenceHash: row.evidenceHash, observedAt: row.observedAt });
   } catch { return undefined; }
 }

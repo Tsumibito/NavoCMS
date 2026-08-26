@@ -241,6 +241,7 @@ export interface DeliveryPhaseStore {
 }
 
 export interface DeliveryPhaseResolution {
+  readonly attempt: 1 | 2;
   readonly externalId: string;
   readonly actor: Readonly<{ kind: "human"; id: string }>;
   readonly evidenceHash: string;
@@ -248,30 +249,32 @@ export interface DeliveryPhaseResolution {
 }
 
 export class InMemoryDeliveryPhaseStore implements DeliveryPhaseStore {
-  readonly #entries = new Map<string, { readonly attempt: 1 | 2; readonly externalId?: string; readonly resolutions: readonly DeliveryPhaseResolution[]; readonly notApplied?: Readonly<{ evidenceHash: string; observedAt: string }> }>();
+  readonly #entries = new Map<string, { readonly attempt: 1 | 2; readonly externalId?: string; readonly resolutions: readonly DeliveryPhaseResolution[]; readonly notAppliedAttempts: readonly (1 | 2)[] }>();
   public async reserve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<"new" | "reserved" | "completed"> {
     const key = phaseKey(input);
     const current = this.#entries.get(key);
     if (current?.externalId) return "completed";
-    if (current?.notApplied && current.attempt === 1) {
-      this.#entries.set(key, Object.freeze({ attempt: 2, resolutions: current.resolutions }));
+    if (current?.notAppliedAttempts.includes(1) && current.attempt === 1) {
+      this.#entries.set(key, Object.freeze({ attempt: 2, resolutions: current.resolutions, notAppliedAttempts: current.notAppliedAttempts }));
       return "new";
     }
     if (current) return "reserved";
-    this.#entries.set(key, Object.freeze({ attempt: 1, resolutions: Object.freeze([]) }));
+    this.#entries.set(key, Object.freeze({ attempt: 1, resolutions: Object.freeze([]), notAppliedAttempts: Object.freeze([]) }));
     return "new";
   }
   public async complete(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string }>): Promise<void> {
     const key = phaseKey(input); const current = this.#entries.get(key);
     if (current?.externalId && current.externalId !== input.externalId) throw new CloudflareDeliveryError("DELIVERY_PHASE_CONFLICT", "Provider phase already has another external identifier");
-    this.#entries.set(key, Object.freeze({ attempt: current?.attempt ?? 1, externalId: input.externalId, resolutions: current?.resolutions ?? Object.freeze([]), ...(current?.notApplied ? { notApplied: current.notApplied } : {}) }));
+    this.#entries.set(key, Object.freeze({ attempt: current?.attempt ?? 1, externalId: input.externalId, resolutions: current?.resolutions ?? Object.freeze([]), notAppliedAttempts: current?.notAppliedAttempts ?? Object.freeze([]) }));
   }
   public async externalId(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<string | undefined> { return this.#entries.get(phaseKey(input))?.externalId; }
   public async resolve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string; evidenceHash: string; observedAt: string }>): Promise<void> {
-    const resolution = assertHumanResolution({ ...input, actor: { kind: "human", id: "in-memory-operator" } });
     const key = phaseKey(input); const current = this.#entries.get(key);
     if (!current) throw new CloudflareDeliveryError("DELIVERY_PHASE_MISSING", "Cannot resolve a phase that was not reserved");
     if (current.externalId) return;
+    if (current.notAppliedAttempts.includes(current.attempt)) throw new CloudflareDeliveryError("DELIVERY_PHASE_OUTCOME_CONFLICT", "A not-applied outcome already owns this delivery attempt");
+    const resolution = assertHumanResolution({ ...input, actor: { kind: "human", id: "in-memory-operator" }, attempt: current.attempt });
+    if (current.resolutions.some((value) => value.attempt === current.attempt)) throw new CloudflareDeliveryError("DELIVERY_PHASE_OUTCOME_CONFLICT", "An applied candidate already owns this delivery attempt");
     this.#entries.set(key, Object.freeze({ ...current, resolutions: Object.freeze([...current.resolutions, resolution]) }));
   }
   public async resolution(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<DeliveryPhaseResolution | undefined> {
@@ -281,8 +284,9 @@ export class InMemoryDeliveryPhaseStore implements DeliveryPhaseStore {
     if (!/^[a-f0-9]{64}$/.test(input.evidenceHash) || !Number.isFinite(Date.parse(input.observedAt))) throw new CloudflareDeliveryError("DELIVERY_PHASE_RESOLUTION_INVALID", "Not-applied evidence is invalid");
     const key = phaseKey(input); const current = this.#entries.get(key);
     if (!current || current.externalId || current.attempt !== 1) throw new CloudflareDeliveryError("DELIVERY_PHASE_NOT_APPLIED_INVALID", "Only the first unresolved reservation may be retried");
-    if (current.notApplied && (current.notApplied.evidenceHash !== input.evidenceHash || current.notApplied.observedAt !== input.observedAt)) throw new CloudflareDeliveryError("DELIVERY_PHASE_CONFLICT", "Not-applied evidence conflicts with the existing record");
-    this.#entries.set(key, Object.freeze({ ...current, notApplied: Object.freeze({ evidenceHash: input.evidenceHash, observedAt: input.observedAt }) }));
+    if (current.resolutions.some((value) => value.attempt === 1)) throw new CloudflareDeliveryError("DELIVERY_PHASE_OUTCOME_CONFLICT", "An applied candidate already owns this delivery attempt");
+    if (current.notAppliedAttempts.includes(1)) return;
+    this.#entries.set(key, Object.freeze({ ...current, notAppliedAttempts: Object.freeze([...current.notAppliedAttempts, 1 as const]) }));
   }
   public async attempt(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2> { return this.#entries.get(phaseKey(input))?.attempt ?? 1; }
 }
@@ -715,11 +719,11 @@ function validFileManifest(files: unknown): files is readonly ImmutableArtifactF
   const seen = new Set<string>();
   return files.every((file) => Boolean(file && typeof file === "object" && !Array.isArray(file) && exactKeys(file, ["path", "sha256", "byteSize"]) && safeOutputPath((file as ImmutableArtifactFile).path) && hash((file as ImmutableArtifactFile).sha256) && Number.isSafeInteger((file as ImmutableArtifactFile).byteSize) && (file as ImmutableArtifactFile).byteSize > 0 && (file as ImmutableArtifactFile).byteSize <= CLOUDFLARE_DELIVERY_LIMITS.outputBytes && !seen.has((file as ImmutableArtifactFile).path) && (seen.add((file as ImmutableArtifactFile).path), true)));
 }
-function assertHumanResolution(input: Readonly<{ externalId: string; actor: Readonly<{ kind: "human"; id: string }>; evidenceHash: string; observedAt: string }>): DeliveryPhaseResolution {
-  if (!safeIdentifier(input.externalId) || input.actor?.kind !== "human" || !safeIdentifier(input.actor.id) || !hash(input.evidenceHash) || !Number.isFinite(Date.parse(input.observedAt))) {
+function assertHumanResolution(input: Readonly<{ attempt: 1 | 2; externalId: string; actor: Readonly<{ kind: "human"; id: string }>; evidenceHash: string; observedAt: string }>): DeliveryPhaseResolution {
+  if ((input.attempt !== 1 && input.attempt !== 2) || !safeIdentifier(input.externalId) || input.actor?.kind !== "human" || !safeIdentifier(input.actor.id) || !hash(input.evidenceHash) || !Number.isFinite(Date.parse(input.observedAt))) {
     throw new CloudflareDeliveryError("DELIVERY_PHASE_RESOLUTION_INVALID", "Human delivery-phase resolution is invalid");
   }
-  return Object.freeze({ externalId: input.externalId, actor: Object.freeze({ kind: "human", id: input.actor.id }), evidenceHash: input.evidenceHash, observedAt: input.observedAt });
+  return Object.freeze({ attempt: input.attempt, externalId: input.externalId, actor: Object.freeze({ kind: "human", id: input.actor.id }), evidenceHash: input.evidenceHash, observedAt: input.observedAt });
 }
 
 function boundedAttempts(value: number | undefined): number {
