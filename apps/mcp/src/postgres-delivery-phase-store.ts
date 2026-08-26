@@ -94,7 +94,7 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
       });
       if (this.#events) {
         const factory = new DomainEventFactory({ source: "urn:navocms:delivery", tenantId: this.#context.site.tenantId, siteId: this.#context.site.siteId, correlationId: input.releaseId, actor: { type: "human", id: resolution.actor.id } });
-        await this.#events.append(factory.create({ type: "io.navocms.delivery.phase.resolved.v1", subject: `release:${input.releaseId}`, consequence: "G2", idempotencyKey: `delivery_phase_resolution:${sha256(`${input.referenceHash}:${input.phase}:${resolution.evidenceHash}`)}`, data: { phase: input.phase, referenceHash: input.referenceHash, externalId: input.externalId, evidenceHash: input.evidenceHash, observedAt: input.observedAt } }));
+        await this.#events.append(factory.create({ type: "io.navocms.delivery.phase-resolved.v1", subject: `release:${input.releaseId}`, consequence: "G2", idempotencyKey: `delivery_phase_resolution:${sha256(`${input.referenceHash}:${input.phase}:${resolution.evidenceHash}`)}`, data: { phase: input.phase, referenceHash: input.referenceHash, externalId: input.externalId, evidenceHash: input.evidenceHash, observedAt: input.observedAt } }));
       }
     });
   }
@@ -110,7 +110,7 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
       await checkpoint(client, this.#context, input.releaseId, key(input, "not-applied"), input.referenceHash, { referenceHash: input.referenceHash, phase: input.phase, attempt: 1, actor, evidenceHash: input.evidenceHash, observedAt: input.observedAt });
       if (this.#events) {
         const factory = new DomainEventFactory({ source: "urn:navocms:delivery", tenantId: this.#context.site.tenantId, siteId: this.#context.site.siteId, correlationId: input.releaseId, actor: { type: "human", id: actor.id } });
-        await this.#events.append(factory.create({ type: "io.navocms.delivery.phase.not_applied.v1", subject: `release:${input.releaseId}`, consequence: "G2", idempotencyKey: `delivery_phase_not_applied:${sha256(`${input.referenceHash}:${input.phase}:${input.evidenceHash}`)}`, data: { phase: input.phase, referenceHash: input.referenceHash, evidenceHash: input.evidenceHash, observedAt: input.observedAt } }));
+        await this.#events.append(factory.create({ type: "io.navocms.delivery.phase-not-applied.v1", subject: `release:${input.releaseId}`, consequence: "G2", idempotencyKey: `delivery_phase_not_applied:${sha256(`${input.referenceHash}:${input.phase}:${input.evidenceHash}`)}`, data: { phase: input.phase, referenceHash: input.referenceHash, evidenceHash: input.evidenceHash, observedAt: input.observedAt } }));
       }
     });
   }
