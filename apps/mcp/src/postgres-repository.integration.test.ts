@@ -188,7 +188,7 @@ integration("Neon production persistence", () => {
     await expect(recovery.reserve(beforeEffect)).resolves.toBe("new");
     await expect(recovery.attempt(beforeEffect)).resolves.toBe(2);
     await expect(recovery.notApplied({ ...beforeEffect, evidenceHash: "a".repeat(64), observedAt: "2026-08-26T00:00:01.000Z" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_NOT_APPLIED_INVALID" });
-    const resolutionEvents = await new PostgresEventStore(database!).query({ correlationId: unknownInput.releaseId });
+    const resolutionEvents = await new PostgresEventStore(database!).query({ tenantId, siteId, principalId, correlationId: unknownInput.releaseId });
     expect(resolutionEvents.some(({ event }) => event.type === "io.navocms.delivery.phase-resolved.v1" && event.data.externalId === "coolify-human-resolved-1")).toBe(true);
   });
 
