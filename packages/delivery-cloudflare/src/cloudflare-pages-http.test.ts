@@ -193,15 +193,17 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
   });
 
   it("accepts the exact canonical Pages deployment URL when aliases are null", async () => {
+    const requested: string[] = [];
     const responses = [
       json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: null, url: "https://a1b2c3d4.pages-project.pages.dev/" } } }),
       new Response("<html>en</html>", { status: 200, headers: { "x-navocms-artifact-reference": referenceHash, "x-navocms-release-hash": reference.releaseHash, "x-navocms-output-hash": reference.outputHash, "cache-control": "public, max-age=300, must-revalidate" } })
     ];
     const transport = new FetchCloudflarePagesTransport({
       accountId: "account-1", projectKey: "pages-project", productionBranch: "main", productionHostname: "pages-project.pages.dev", apiToken: async () => "api-token-0123456789",
-      fetcher: async () => responses.shift()!
+      fetcher: async (url) => { requested.push(String(url)); return responses.shift()!; }
     });
     await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).resolves.toMatchObject({ status: 200, referenceHash });
+    expect(requested[1]).toBe("https://a1b2c3d4.pages-project.pages.dev/en/");
   });
 
   it("does not broaden a custom production hostname to deployment subdomains", async () => {

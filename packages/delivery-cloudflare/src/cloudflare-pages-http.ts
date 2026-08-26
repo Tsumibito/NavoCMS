@@ -159,7 +159,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     const files: ImmutableArtifactFile[] = [];
     let headers: Headers | undefined;
     for (const expected of input.reference.files) {
-      const live = await this.#request(new URL(expected.path, url.endsWith("/") ? url : `${url}/`), { method: "GET", redirect: "error", headers: { "accept": "*/*" } }, async (response, signal) => {
+      const live = await this.#request(new URL(livePath(expected.path), url.endsWith("/") ? url : `${url}/`), { method: "GET", redirect: "error", headers: { "accept": "*/*" } }, async (response, signal) => {
         if (!response.ok) return { status: response.status, headers: response.headers };
         return { status: response.status, headers: response.headers, body: await boundedBody(response, expected.byteSize, signal) };
       }, remaining(deadline));
@@ -291,6 +291,11 @@ function canonicalAlias(row: Record<string, unknown>, suffix: string, expectedHo
     } catch { /* bounded hostile alias is ignored */ }
   }
   throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment has no allowed Pages alias");
+}
+
+function livePath(path: string): string {
+  if (path === "index.html") return "";
+  return path.endsWith("/index.html") ? path.slice(0, -"index.html".length) : path;
 }
 
 function deployment(row: Record<string, unknown>, projectKey: string, referenceHash: string): CloudflareDeployment {
