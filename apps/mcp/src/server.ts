@@ -19,9 +19,11 @@ import { InMemoryEditingRepository } from "./repository.js";
 import { McpEditingService, type IdempotencyStore } from "./service.js";
 import { bootPinnedProductionPluginHost } from "./production-profile.js";
 import { bootCloudflareStagingProfile } from "./staging-profile.js";
-import { assertStagingActivationGuard, createDotenvxSecretBroker, releaseProviderForSelection, safeStagingRuntimeIdentifiers, selectReleaseProvider, stagingBindingFromEnvironment, stagingExpectationFromEnvironment, stagingPublishReady } from "./staging-runtime.js";
+import { assertStagingActivationGuard, createDotenvxSecretBroker, safeStagingRuntimeIdentifiers, selectReleaseProvider, stagingBindingFromEnvironment, stagingExpectationFromEnvironment } from "./staging-runtime.js";
 import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
-import { CloudflareDeliveryError, CloudflarePagesReleaseProvider, FetchCloudflarePagesTransport, FetchCoolifyCommitTransport } from "@navocms/delivery-cloudflare";
+import { PostgresReviewedAstroArtifactStore } from "./postgres-reviewed-astro-artifact-store.js";
+import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
+import { composeCloudflareStagingReleaseProvider } from "./staging-composition.js";
 
 const resource = required("NAVOCMS_MCP_RESOURCE");
 const issuer = required("NAVOCMS_OIDC_ISSUER");
@@ -39,6 +41,9 @@ const deploymentScope = Object.freeze({
 });
 const environmentKey = runtimeMode === "production" ? required("NAVOCMS_ENVIRONMENT") : (process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode);
 const deploymentEnvironmentKey = process.env.NAVOCMS_ENVIRONMENT_KEY ?? "default";
+const runtimePrincipalId = databaseUrl && runtimeMode === "production"
+  ? required("NAVOCMS_RUNTIME_PRINCIPAL_ID")
+  : undefined;
 const database = databaseUrl ? new PostgresDatabase({
   connectionString: requireDatabaseUrl(databaseUrl),
   applicationName: `navocms-mcp-${environmentKey}`,
@@ -46,7 +51,7 @@ const database = databaseUrl ? new PostgresDatabase({
   ...(runtimeMode === "production" ? {
     readinessScope: {
       ...deploymentScope,
-      principalId: required("NAVOCMS_RUNTIME_PRINCIPAL_ID"),
+      principalId: runtimePrincipalId!,
       environmentKey: deploymentEnvironmentKey
     }
   } : {})
@@ -70,23 +75,23 @@ const identityResolver = database ? new PostgresIdentityResolver(database, deplo
 const media = database ? new McpMediaService(new PostgresMediaRepository(database), { storageInjected: false }) : undefined;
 
 let service: McpEditingService;
+let reviewedAstroResolver: ReviewedAstroArtifactResolver | undefined;
 if (database) {
-  const stagedProvider = stagingRuntime.selection === "cloudflare-staging"
-    ? new CloudflarePagesReleaseProvider({
-      projectKey: stagingRuntime.binding.cloudflare.projectId,
-      previewBranch: stagingRuntime.binding.cloudflare.previewBranch,
-      productionBranch: stagingRuntime.binding.cloudflare.productionBranch,
-      coolifyApplicationKey: stagingRuntime.binding.coolify.applicationUuid,
-      resolver: { resolve: async () => { throw new CloudflareDeliveryError("STAGING_ARTIFACT_RESOLVER_UNAVAILABLE", "No reviewed Astro artifact resolver is configured"); } },
-      cloudflare: new FetchCloudflarePagesTransport({ accountId: stagingRuntime.binding.cloudflare.accountId, projectKey: stagingRuntime.binding.cloudflare.projectId, productionBranch: stagingRuntime.binding.cloudflare.productionBranch, previewHostnameSuffix: stagingRuntime.binding.cloudflare.previewHostnameSuffix, productionHostname: stagingRuntime.binding.cloudflare.allowedHostname, apiToken: () => stagingRuntime.secrets.use(stagingRuntime.binding.cloudflare.tokenSecretRef, async (value) => value) }),
-      coolify: new FetchCoolifyCommitTransport({ applicationKey: stagingRuntime.binding.coolify.applicationUuid, baseUrl: stagingRuntime.binding.coolify.baseUrl, apiToken: () => stagingRuntime.secrets.use(stagingRuntime.binding.coolify.tokenSecretRef, async (value) => value) }),
-      phases: new PostgresDeliveryPhaseStore(database, { site: { ...deploymentScope, name: "staging-delivery", primaryLocale: "en", locales: ["en"] }, principalId: required("NAVOCMS_RUNTIME_PRINCIPAL_ID") }, { events: new PostgresEventStore(database) })
+  const deliveryRepositoryContext = {
+    site: { ...deploymentScope, name: "staging-delivery", primaryLocale: "en", locales: ["en"] },
+    principalId: runtimePrincipalId!
+  };
+  const stagingComposition = stagingRuntime.selection === "cloudflare-staging"
+    ? composeCloudflareStagingReleaseProvider({
+      binding: stagingRuntime.binding,
+      environmentKey: deploymentEnvironmentKey,
+      store: new PostgresReviewedAstroArtifactStore(database, deliveryRepositoryContext, deploymentEnvironmentKey),
+      phases: new PostgresDeliveryPhaseStore(database, deliveryRepositoryContext, { events: new PostgresEventStore(database) }),
+      secrets: stagingRuntime.secrets
     })
     : undefined;
-  // Package 1 deliberately leaves the candidate external provider disconnected
-  // until the reviewed Astro artifact resolver exists. This makes /readyz honest.
-  void stagedProvider;
-  const releaseProvider = stagingRuntime.selection === "cloudflare-staging" ? releaseProviderForSelection(stagingRuntime.selection) : new EmbeddedReleaseProvider();
+  reviewedAstroResolver = stagingComposition?.resolver;
+  const releaseProvider = stagingComposition?.provider ?? new EmbeddedReleaseProvider();
   service = new McpEditingService(
     new PostgresEditingRepository(database),
     new PostgresEventStore(database),
@@ -143,11 +148,20 @@ const server = createMcpHttpServer({
   scopes: ["openid"],
   ...(identityResolver ? { resolveAuthorization: (token) => identityResolver.resolve(token) } : {}),
   ...(database ? {
-    readiness: async () => ({
-      ready: await database.ready() && (pluginHost?.state === "healthy") && (stagingRuntime.selection !== "cloudflare-staging" || stagingPublishReady(false)),
-      ...(pluginHost ? { pluginHost: pluginHost.status() } : {}),
-      ...(stagingRuntime.selection === "cloudflare-staging" ? { staging: safeStagingRuntimeIdentifiers(stagingRuntime) } : { provider: "embedded" })
-    })
+    readiness: async () => {
+      const databaseReady = await database.ready();
+      const resolverReady = reviewedAstroResolver ? await reviewedAstroResolver.ready() : true;
+      const providerReady = stagingRuntime.selection !== "cloudflare-staging" || resolverReady;
+      return {
+        ready: databaseReady && (pluginHost?.state === "healthy") && providerReady,
+        ...(pluginHost ? { pluginHost: pluginHost.status() } : {}),
+        ...(stagingRuntime.selection === "cloudflare-staging" ? {
+          provider: { key: "cloudflare-staging" as const, ready: providerReady },
+          resolver: { ready: resolverReady, environment: "staging" as const, environmentKey: deploymentEnvironmentKey },
+          staging: safeStagingRuntimeIdentifiers(stagingRuntime)
+        } : { provider: { key: "embedded" as const, ready: true } })
+      };
+    }
   } : {})
 });
 const port = Number(process.env.PORT ?? "8788");

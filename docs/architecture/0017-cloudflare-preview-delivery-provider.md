@@ -106,9 +106,32 @@ hashes, operation names, attempt counts, stable error codes, and optional HTTP
 status. Credentials, URLs, headers, bodies, and provider error text are
 excluded.
 
-The checked-in production profile remains pinned to the embedded provider. No
-Cloudflare token, Coolify token, binding, environment variable, deployment, or
-production activation is part of this decision.
+Sprint 8B.3B supplies the required resolver boundary. A reviewed Astro source
+bundle and its complete built output are registered once for the exact
+tenant/site/staging-environment/release/release-hash/release-artifact-hash
+tuple. Registration verifies source and output before SQL, uses the existing
+PostgreSQL idempotency store, Event Ledger, and transactional outbox in one
+transaction, and emits an internal `G1` registration event under the release
+document correlation ID. PostgreSQL enforces the exact composite release and
+environment bindings, row-level scope, append-only privileges, and an
+immutable trigger. Resolver readiness checks the migration, table, forced RLS,
+site policy, and configured staging environment; the absence of a particular
+release record is a release-level failure, not a capability-wide readiness
+failure. The resolver rechecks both bundles and release binding before a
+provider can construct its immutable reference.
+
+The checked-in production profile remains pinned to the embedded provider. A
+Cloudflare provider is composed only for `cloudflare-staging`, and its resolver
+fails closed before any transport can be reached when readiness or the exact
+record is absent. No Cloudflare token, Coolify token, binding, environment
+variable, deployment, or production activation is part of this decision.
+
+The durable resolver is a registration boundary, not a trusted build producer.
+The follow-on builder must derive `sourceCommitSha` from the checked-out,
+reviewed commit it actually builds and bind that value to the reviewed record;
+it must not accept a source commit from untrusted MCP input. Until that producer
+exists, the resolver/profile package cannot by itself execute an operational
+staging dry run.
 
 ## Failure model
 

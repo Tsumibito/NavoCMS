@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertStagingActivationGuard, createDotenvxSecretBroker, releaseProviderForSelection, selectReleaseProvider, stagingPublishReady } from "./staging-runtime.js";
-import { InMemoryEditingRepository } from "./repository.js";
-import { McpEditingService } from "./service.js";
+import { assertStagingActivationGuard, createDotenvxSecretBroker, selectReleaseProvider } from "./staging-runtime.js";
 import { stagingBindingDigest } from "./staging-profile.js";
 import { FetchCloudflarePagesTransport, FetchCoolifyCommitTransport } from "@navocms/delivery-cloudflare";
 
@@ -35,10 +33,9 @@ describe("staging provider selection", () => {
   it("keeps embedded as the only default and production path", () => {
     expect(selectReleaseProvider({ requested: undefined, environment: "production", binding: {}, expected, secrets: createDotenvxSecretBroker({}) })).toEqual({ selection: "embedded" });
   });
-  it("requires a production-grade runtime and remains not-ready without a reviewed resolver", () => {
+  it("requires a production-grade runtime before a reviewed resolver can be composed", () => {
     expect(() => assertStagingActivationGuard({ runtimeMode: "development", environment: "staging", hasPostgresReadinessScope: false, organizationId: "org" })).toThrow("Cloudflare staging requires");
     expect(() => assertStagingActivationGuard({ runtimeMode: "production", environment: "staging", hasPostgresReadinessScope: true, organizationId: undefined })).toThrow("Cloudflare staging requires");
-    expect(stagingPublishReady(false)).toBe(false);
   });
   it("assembles real transports without a network effect before publish", () => {
     let fetchCalls = 0;
@@ -46,11 +43,5 @@ describe("staging provider selection", () => {
     new FetchCloudflarePagesTransport({ accountId: binding.cloudflare.accountId, projectKey: binding.cloudflare.projectId, productionBranch: binding.cloudflare.productionBranch, previewHostnameSuffix: binding.cloudflare.previewHostnameSuffix, productionHostname: binding.cloudflare.allowedHostname, apiToken: async () => "x".repeat(16), fetcher });
     new FetchCoolifyCommitTransport({ applicationKey: binding.coolify.applicationUuid, baseUrl: binding.coolify.baseUrl, apiToken: async () => "x".repeat(16), fetcher });
     expect(fetchCalls).toBe(0);
-  });
-  it("wires the selected unavailable provider into the service with no embedded fallback", async () => {
-    const provider = releaseProviderForSelection("cloudflare-staging");
-    const service = new McpEditingService(new InMemoryEditingRepository(), undefined, undefined, undefined, provider);
-    await expect(provider.publish({ releaseId: "release-1", releaseHash: "a".repeat(64), artifact: { mediaType: "text/html; charset=utf-8", body: "x", hash: "b".repeat(64) } })).rejects.toMatchObject({ code: "STAGING_ARTIFACT_RESOLVER_UNAVAILABLE" });
-    expect(service.releaseProviderKey()).toBe("navocms.cloudflare-staging.unavailable"); expect(service.releaseProviderKey()).not.toContain("embedded");
   });
 });

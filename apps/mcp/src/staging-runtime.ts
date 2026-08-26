@@ -1,6 +1,4 @@
 import { parseCloudflareStagingBinding, type CloudflareStagingBinding } from "@navocms/contracts";
-import { CloudflareDeliveryError } from "@navocms/delivery-cloudflare";
-import type { ReleaseProvider, ReleaseProviderPublication, ReleaseProviderPublishInput } from "@navocms/kernel";
 
 import { assertStagingReadiness, stagingBindingDigest, type StagingReadiness, type StagingReadinessExpectation } from "./staging-profile.js";
 
@@ -47,27 +45,6 @@ export function selectReleaseProvider(input: Readonly<{ requested: string | unde
 
 export function assertStagingActivationGuard(input: Readonly<{ runtimeMode: string; environment: string; hasPostgresReadinessScope: boolean; organizationId: string | undefined }>): void {
   if (input.runtimeMode !== "production" || input.environment !== "staging" || !input.hasPostgresReadinessScope || !input.organizationId) throw new StagingRuntimeError("STAGING_ACTIVATION_DENIED", "Cloudflare staging requires production runtime, PostgreSQL readiness scope, and WorkOS organization binding");
-}
-
-/** Package 1 has no reviewed artifact resolver, so its external candidate is intentionally not ready or injected. */
-export function stagingPublishReady(resolverAvailable: boolean): boolean { return resolverAvailable; }
-
-/** Explicit selected-provider failure while a reviewed Astro resolver is unavailable; never falls back to embedded. */
-export class UnavailableStagingReleaseProvider implements ReleaseProvider {
-  readonly key = "navocms.cloudflare-staging.unavailable";
-  public async publish(_input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> { throw new CloudflareDeliveryError("STAGING_ARTIFACT_RESOLVER_UNAVAILABLE", "Reviewed Astro artifact resolver is unavailable"); }
-  public async verify(_publication: ReleaseProviderPublication): Promise<boolean> { return false; }
-  public async rollback(_current: ReleaseProviderPublication, _target: ReleaseProviderPublication): Promise<void> { throw new CloudflareDeliveryError("STAGING_ARTIFACT_RESOLVER_UNAVAILABLE", "Reviewed Astro artifact resolver is unavailable"); }
-}
-
-/** The sole release-provider selection used by service composition. */
-export function releaseProviderForSelection(selection: ReleaseProviderSelection): ReleaseProvider {
-  return selection === "cloudflare-staging" ? new UnavailableStagingReleaseProvider() : new (class implements ReleaseProvider {
-    readonly key = "navocms.embedded.placeholder";
-    async publish(): Promise<ReleaseProviderPublication> { throw new StagingRuntimeError("EMBEDDED_FACTORY_MISUSE", "Embedded provider must be supplied by the composition root"); }
-    async verify(): Promise<boolean> { return false; }
-    async rollback(): Promise<void> { throw new StagingRuntimeError("EMBEDDED_FACTORY_MISUSE", "Embedded provider must be supplied by the composition root"); }
-  })();
 }
 
 export function stagingBindingFromEnvironment(environment: Readonly<Record<string, string | undefined>> = process.env): unknown {
