@@ -1,14 +1,39 @@
 # Sprint 8B.3A — staging activation boundary
 
-**Status:** Review changes required / no external effects performed
+**Status:** Review required / Pending CI / no external effects performed
 
 ## Scope
 
-This package introduces the dry-run-only `cloudflare-staging` profile and the
-versioned `io.navocms.cloudflare-staging-binding.v2` contract. The default and
-production profiles remain the pinned embedded release provider. This package
-does not create a Cloudflare project, call a provider API, forward a secret to
-a transport, or publish an artifact.
+This package pins the reviewed, external-effect-capable `cloudflare-staging`
+profile and the versioned `io.navocms.cloudflare-staging-binding.v2` contract.
+The default and production profiles remain the pinned embedded release
+provider. This package does not create a Cloudflare project, call a provider
+API, forward a secret to a transport, or publish an artifact.
+
+## Implemented 8B.3B local boundary
+
+The staging composition now reads a durable reviewed Astro record from
+PostgreSQL and injects the strict resolver into the real Cloudflare provider
+only when `NAVOCMS_RELEASE_PROVIDER=cloudflare-staging`. Embedded remains the
+default and production provider. `/readyz` exposes only non-secret provider
+and resolver readiness coordinates. It never reports a specific release as a
+global readiness dependency; the dry run for that release still requires its
+exact persisted record.
+
+No provider transport is called by resolver readiness, record registration, or
+the persisted dry-run proof. Missing readiness, missing record, scope/hash
+drift, tampered source, or tampered output fails closed before secret forwarding
+or Cloudflare/Coolify transport use.
+
+## Prerequisite not delivered by 8B.3B
+
+There is not yet a trusted reviewed-build registration producer. This package
+does not expose a public MCP tool for Astro source/output payloads, so the
+operational dry run cannot be executed from this code boundary alone. The next
+package must build from the checked-out reviewed commit, derive and bind
+`sourceCommitSha` from that checkout, and register the verified source/output
+record under trusted authority. It must never accept `sourceCommitSha` from
+untrusted MCP input.
 
 ## Operator input for 8B.3B
 
@@ -27,18 +52,19 @@ staging profile has passed readiness.
 
 ## 8B.3B execution checklist
 
-1. Confirm the deployment is `staging`; reject the profile for production.
-2. Validate the binding schema, tenant/site scope, distinct Pages branches,
+1. Deliver and review the trusted builder/registration prerequisite above.
+2. Confirm the deployment is `staging`; reject the profile for production.
+3. Validate the binding schema, tenant/site scope, distinct Pages branches,
    HTTPS Coolify endpoint, and secret-reference names.
-3. Run the dry proof as an authenticated WorkOS human with `content:publish`:
+4. Run the dry proof as an authenticated WorkOS human with `content:publish`:
    resolver → immutable artifact → provider coordinates. Retain its digest.
-4. Inject short-lived secrets through the private dotenvx overlay; never print
+5. Inject short-lived secrets through the private dotenvx overlay; never print
    them. Boot only the reviewed staging provider capability.
-5. Execute and retain one trajectory: draft → preview → exact human approval →
+6. Execute and retain one trajectory: draft → preview → exact human approval →
    publish → live-byte verification.
-6. Restart after a durable phase reservation and use reconciliation rather than
+7. Restart after a durable phase reservation and use reconciliation rather than
    reissuing a mutation. Retain checkpoint, Ledger/outbox, and provider IDs.
-7. Roll back to the exact previous immutable reference, verify canonical Pages
+8. Roll back to the exact previous immutable reference, verify canonical Pages
    bytes/cache contract and the finished Coolify deployment, then reconcile
    after a second restart.
 

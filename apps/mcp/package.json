@@ -21,6 +21,7 @@
     "@navocms/content": "workspace:*",
     "@navocms/contracts": "workspace:*",
     "@navocms/delivery-cloudflare": "workspace:*",
+    "@navocms/design-astro": "workspace:*",
     "@navocms/kernel": "workspace:*",
     "@navocms/media": "workspace:*",
     "@navocms/persistence-postgres": "workspace:*",

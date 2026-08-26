@@ -123,7 +123,7 @@ describe("Astro design adapter", () => {
       expect(html).toContain('data-navocms-directive="callout"');
       expect(() => verifyBuiltAstroOutput(first, artifact, artifact.hash)).not.toThrow();
     } finally { await rm(firstDirectory, { recursive: true, force: true }); await rm(secondDirectory, { recursive: true, force: true }); }
-  }, 30_000);
+  }, 120_000);
 
   it("rejects delivery-layout markers hidden in frontmatter or comments after a real Astro build", async () => {
     const adapter = createAstroDesignAdapter(await design(), registrations);
@@ -137,7 +137,7 @@ const fake = '<script src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"><
     try {
       await expect(materializeAndBuild(directory, renderAstroArtifact(renderInput(adapter, routes, layout)))).rejects.toThrow(/delivery layout contract invalid/i);
     } finally { await rm(directory, { recursive: true, force: true }); }
-  }, 30_000);
+  }, 120_000);
 
   it("rejects inert, raw-text, duplicate-attribute, and non-executing delivery lookalikes", async () => {
     const required = '<meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1">';

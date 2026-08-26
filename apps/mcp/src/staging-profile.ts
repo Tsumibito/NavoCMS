@@ -14,21 +14,21 @@ export const CLOUDFLARE_STAGING_PLUGIN_ID = "navocms.release.cloudflare-staging"
 /** Non-secret deployment coordinates. Credential values remain operator-owned. */
 export const CLOUDFLARE_STAGING_PROFILE: SiteProfile = deepFreeze({
   apiVersion: "navocms.io/v0alpha1", kind: "SiteProfile",
-  metadata: { name: "cloudflare-staging", version: "0.1.0", displayName: "Cloudflare staging delivery" },
+  metadata: { name: "cloudflare-staging", version: "0.2.0", displayName: "Cloudflare staging delivery" },
   spec: {
     environment: "staging", locales: { default: "en", supported: ["en"] },
     anchors: {
       content: { ref: "@navocms/content", version: "0.1.0", digest: "sha256:89a4d26a8d6818fb749b2e8b1f0ff4e1c138f0e0fd38307db628d200a8901c94" },
       design: { ref: "@navocms/design", version: "0.1.0", digest: "sha256:d0fbafcfcc67780a2a0ecb7952d1b76dbd28029cfbaf3014aa346bd855329268" },
-      delivery: { ref: "@navocms/delivery-cloudflare", version: "0.1.0", digest: "sha256:9f2bc86b2ac67e0904f913e1b94fc91d3f4a6e1672c4ea869f9551dc28a941c9" },
+      delivery: { ref: "@navocms/delivery-cloudflare", version: "0.2.0", digest: "sha256:5c68717d47f4238c1cc478688098911655b63b1072350103284612a0f8a2f0b6" },
       governance: { ref: "@navocms/kernel", version: "0.1.0", digest: "sha256:e529c059c90462da5f27c4521c4c68fd05e3d56e4c6a610c4d6180bda3e3020e" }
     },
-    plugins: [{ id: CLOUDFLARE_STAGING_PLUGIN_ID, version: "0.1.0", enabled: true, configRef: "staging:cloudflare" }],
+    plugins: [{ id: CLOUDFLARE_STAGING_PLUGIN_ID, version: "0.2.0", enabled: true, configRef: "staging:cloudflare" }],
     bindings: [{ capability: "release.provider", version: 1, provider: CLOUDFLARE_STAGING_PLUGIN_ID }],
     urlPolicy: { canonicalHost: "staging.invalid", immutablePublicUrls: true }
   }
 } as const);
-export const CLOUDFLARE_STAGING_PROFILE_DIGEST = "sha256:4d0fa03c1fac583936c86c642ff898d4004f707617a3e75572c60e0f00f8ffaa";
+export const CLOUDFLARE_STAGING_PROFILE_DIGEST = "sha256:68e2bcef8db9a19153d1306b47c92b3632279cf74c1a780f8956d68aa0827fe1";
 
 export function assertCloudflareStagingBinding(value: unknown): asserts value is CloudflareStagingBinding {
   parseCloudflareStagingBinding(value);
@@ -46,7 +46,7 @@ export async function dryRunCloudflareStaging(input: Readonly<{ context: McpRequ
   return Object.freeze({ referenceHash: immutableReferenceHash(deployable.reference), cloudflareProjectId: input.binding.cloudflare.projectId, coolifyApplicationUuid: input.binding.coolify.applicationUuid });
 }
 
-/** The staging graph is deliberately dry-run-only; it contains no secret resolver or transport. */
+/** The profile pins the external staging capability; transports are composed separately and only in staging. */
 export type StagingReadinessExpectation = Readonly<{ tenantId: string; siteId: string; allowedHostname: string; bindingDigest: string }>;
 export type StagingReadiness = Readonly<{ profileId: string; profileDigest: string; bindingDigest: string; tenantId: string; siteId: string; allowedHostname: string }>;
 
@@ -63,20 +63,59 @@ export function assertStagingReadiness(bindingValue: unknown, expected: StagingR
 export async function bootCloudflareStagingProfile(binding: unknown, expected: StagingReadinessExpectation): Promise<PluginHost> {
   const readiness = assertStagingReadiness(binding, expected);
   const parsedBinding = deepFreeze(structuredClone(parseCloudflareStagingBinding(binding)));
+  const manifest = cloudflareStagingManifest(parsedBinding);
   const runtime: PluginRuntime = {
     pluginId: CLOUDFLARE_STAGING_PLUGIN_ID,
     health: async () => { try { assertStagingReadiness(parsedBinding, expected); return { ok: true, detail: `${readiness.profileId}:${readiness.bindingDigest}` }; } catch { return { ok: false, detail: "staging readiness pin mismatch" }; } },
     activate: async (context) => {
-      context.track(context.capabilities.registerDefinition({ name: "release.provider", version: 1, owner: CLOUDFLARE_STAGING_PLUGIN_ID, description: "Staging-only Cloudflare delivery dry-run boundary" }));
-      context.track(context.capabilities.registerProvider({ name: "release.provider", version: 1, pluginId: CLOUDFLARE_STAGING_PLUGIN_ID, value: Object.freeze({ mode: "dry-run", bindingDigest: stagingBindingDigest(parsedBinding) }) }));
+      context.track(context.capabilities.registerDefinition({ name: "release.provider", version: 1, owner: CLOUDFLARE_STAGING_PLUGIN_ID, description: "Reviewed-artifact-gated Cloudflare/Coolify staging delivery provider" }));
+      context.track(context.capabilities.registerProvider({ name: "release.provider", version: 1, pluginId: CLOUDFLARE_STAGING_PLUGIN_ID, value: Object.freeze({ mode: "external-staging", resolver: "reviewed-astro-artifact.v1", bindingDigest: stagingBindingDigest(parsedBinding), permissions: manifest.spec.permissions }) }));
     }
   };
   const host = new PluginHost();
-  await host.boot(CLOUDFLARE_STAGING_PROFILE, [stagingManifest()], [runtime]);
+  await host.boot(CLOUDFLARE_STAGING_PROFILE, [manifest], [runtime]);
   return host;
 }
 
-function stagingManifest() { return { apiVersion: "navocms.io/v0alpha1" as const, kind: "PluginManifest" as const, metadata: { id: CLOUDFLARE_STAGING_PLUGIN_ID, version: "0.1.0", displayName: "Cloudflare staging delivery", description: "Dry-run-only staging delivery boundary" }, spec: { runtime: "kernel" as const, provides: [{ name: "release.provider", version: 1 }], requires: [], permissions: { data: { read: [], write: [] }, network: [], scopes: [] }, effects: [{ name: "release.publish", consequence: "G2" as const, idempotent: true }] } }; }
+/** The binding digest is checked before this derived manifest can be booted. */
+export function cloudflareStagingManifest(binding: CloudflareStagingBinding) {
+  const network = cloudflareStagingNetworkDestinations(binding);
+  return deepFreeze({
+    apiVersion: "navocms.io/v0alpha1" as const,
+    kind: "PluginManifest" as const,
+    metadata: {
+      id: CLOUDFLARE_STAGING_PLUGIN_ID,
+      version: "0.2.0",
+      displayName: "Cloudflare staging delivery",
+      description: "Reviewed-artifact-gated external Cloudflare Pages and Coolify staging delivery provider"
+    },
+    spec: {
+      runtime: "kernel" as const,
+      provides: [{ name: "release.provider", version: 1 }],
+      requires: [],
+      permissions: {
+        data: {
+          read: ["environments", "release_candidates", "reviewed_astro_artifacts", "workflow_runs", "workflow_checkpoints"],
+          write: ["workflow_runs", "workflow_checkpoints", "event_ledger", "domain_outbox"]
+        },
+        network,
+        scopes: ["content:publish"]
+      },
+      effects: [{ name: "release.publish", consequence: "G2" as const, idempotent: true }]
+    }
+  });
+}
+
+function cloudflareStagingNetworkDestinations(binding: CloudflareStagingBinding): readonly string[] {
+  const coolify = new URL(binding.coolify.baseUrl);
+  const coolifyDestination = `${coolify.hostname}${coolify.port ? `:${coolify.port}` : ""}`;
+  return Object.freeze([...new Set([
+    "api.cloudflare.com",
+    `*.${binding.cloudflare.projectId}${binding.cloudflare.previewHostnameSuffix}`,
+    binding.cloudflare.allowedHostname,
+    coolifyDestination
+  ])].sort());
+}
 export function stagingBindingDigest(binding: CloudflareStagingBinding) { return `sha256:${createHash("sha256").update(canonical(binding)).digest("hex")}`; }
 export function stagingProfileDigest(profile: SiteProfile = CLOUDFLARE_STAGING_PROFILE) { return `sha256:${createHash("sha256").update(JSON.stringify(profile)).digest("hex")}`; }
 function deepFreeze<T>(value: T): T { if (value && typeof value === "object") { Object.freeze(value); for (const child of Object.values(value as object)) deepFreeze(child); } return value; }

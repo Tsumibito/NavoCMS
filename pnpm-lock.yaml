@@ -97,6 +97,9 @@ importers:
       '@navocms/delivery-cloudflare':
         specifier: workspace:*
         version: link:../../packages/delivery-cloudflare
+      '@navocms/design-astro':
+        specifier: workspace:*
+        version: link:../../packages/design-astro
       '@navocms/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
