@@ -2,6 +2,7 @@
 
 ARG NODE_VERSION=24.17.0
 ARG PNPM_VERSION=10.24.0
+ARG SOURCE_COMMIT=unbound
 
 FROM node:${NODE_VERSION}-bookworm-slim AS builder
 ARG PNPM_VERSION
@@ -17,11 +18,14 @@ RUN --mount=type=cache,target=/pnpm/store \
   pnpm --filter @navocms/mcp --prod deploy --legacy /opt/navocms
 
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
+ARG SOURCE_COMMIT
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NAVOCMS_RUNTIME_MODE=production
 ENV NAVOCMS_HOST=0.0.0.0
 ENV PORT=8788
+ENV NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN=/app/node_modules
+ENV NAVOCMS_REVIEWED_SOURCE_COMMIT=${SOURCE_COMMIT}
 
 RUN apt-get update && \
   apt-get install --yes --no-install-recommends tini ca-certificates curl && \

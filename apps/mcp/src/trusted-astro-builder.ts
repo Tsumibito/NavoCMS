@@ -181,6 +181,59 @@ export class GitPinnedAstroBuildRunner implements TrustedAstroBuildRunner {
   }
 }
 
+/**
+ * Production runner for the immutable Coolify image. Unlike the developer
+ * checkout runner it deliberately does not need `.git`: Coolify injects the
+ * exact reviewed source commit and the image bundles a pinned, read-only
+ * Astro toolchain. Both are re-attested around the two clean builds.
+ */
+export class ImageAttestedAstroBuildRunner implements TrustedAstroBuildRunner {
+  readonly #sourceCommitSha: string;
+  readonly #toolchainDirectory: string;
+  readonly #timeoutMs: number;
+
+  public constructor(input: Readonly<{ sourceCommitSha: string; toolchainDirectory: string; processTimeoutMs?: number }>) {
+    this.#sourceCommitSha = input.sourceCommitSha;
+    this.#toolchainDirectory = resolve(input.toolchainDirectory);
+    this.#timeoutMs = boundedTimeout(input.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS);
+  }
+
+  public async attest(): Promise<ReviewedCheckoutAttestation> {
+    if (!COMMIT.test(this.#sourceCommitSha)) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "Image-attested source commit is invalid");
+    const toolchain = await verifyImageToolchain(this.#toolchainDirectory);
+    return Object.freeze({ sourceCommitSha: this.#sourceCommitSha, toolchainFingerprint: toolchain.fingerprint });
+  }
+
+  public async build(attestation: ReviewedCheckoutAttestation, artifact: AstroArtifact): Promise<CheckedOutAstroBuild> {
+    if (attestation.sourceCommitSha !== this.#sourceCommitSha || !/^sha256:[a-f0-9]{64}$/.test(attestation.toolchainFingerprint)) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "Image-attested Astro build attestation is invalid");
+    const before = await this.attest();
+    if (before.toolchainFingerprint !== attestation.toolchainFingerprint) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_DRIFT", "Image-attested Astro toolchain changed before build");
+    verifyPinnedArtifactPolicy(artifact);
+    const root = await mkdtemp(join(tmpdir(), "navocms-image-astro-")); const buildDirectory = join(root, "build");
+    let primaryFailure: unknown;
+    try {
+      const toolchain = await verifyImageToolchain(this.#toolchainDirectory);
+      if (toolchain.fingerprint !== attestation.toolchainFingerprint) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_DRIFT", "Image-attested Astro toolchain changed during build");
+      await materializeAstroArtifact(buildDirectory, artifact, artifact.hash);
+      await symlink(toolchain.directory, join(buildDirectory, "node_modules"), "dir");
+      await run(process.execPath, [toolchain.astroCli, "check"], this.#timeoutMs, buildDirectory);
+      await run(process.execPath, [toolchain.astroCli, "build"], this.#timeoutMs, buildDirectory);
+      const output = await readBoundedAstroOutput(join(buildDirectory, "dist"));
+      verifyBuiltAstroOutput(output, artifact, artifact.hash);
+      const after = await this.attest();
+      if (after.toolchainFingerprint !== attestation.toolchainFingerprint) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_DRIFT", "Image-attested Astro toolchain changed after build");
+      return Object.freeze({ sourceCommitSha: this.#sourceCommitSha, output: Object.freeze(output) });
+    } catch (error) { primaryFailure = error; throw error; }
+    finally {
+      const cleanupError = await rm(root, { recursive: true, force: true }).then(() => undefined).catch((error: unknown) => error);
+      if (cleanupError) {
+        if (primaryFailure) process.emitWarning(`Image-attested Astro build-directory cleanup failed after primary error: ${safeError(cleanupError)}`);
+        else throw new McpEditingError("REVIEWED_ASTRO_CLEANUP_FAILED", "Image-attested Astro build-directory cleanup failed");
+      }
+    }
+  }
+}
+
 export function reviewedAstroBuildBindingDigest(input: Readonly<{ releaseManifest: ReleaseManifestV1; releaseHash: string; releaseArtifactHash: string; render: AstroRenderInput }>): `sha256:${string}` {
   return `sha256:${sha256(canonical({ releaseManifest: input.releaseManifest, releaseHash: input.releaseHash, releaseArtifactHash: input.releaseArtifactHash, render: normalizedRenderInput(input.render) }))}`;
 }
@@ -257,6 +310,54 @@ async function verifyReviewedToolchain(checkout: string): Promise<Readonly<{ dir
   const fingerprint = await fingerprintReviewedToolchain(root, canonicalDirectory, lock);
   return Object.freeze({ directory: canonicalDirectory, astroCli, fingerprint });
   } catch (error) { if (error instanceof McpEditingError) throw error; throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro toolchain cannot be verified"); }
+}
+
+async function verifyImageToolchain(directory: string): Promise<Readonly<{ directory: string; astroCli: string; fingerprint: `sha256:${string}` }>> {
+  try {
+    const root = await realpath(directory); const stat = await lstat(root);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("toolchain directory invalid");
+    for (const [name, version] of Object.entries(TOOLCHAIN)) {
+      const packageDirectory = await realpath(join(root, name));
+      const packageJson = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8")) as { version?: unknown };
+      if (packageJson.version !== version) throw new Error("toolchain version mismatch");
+    }
+    const astroCli = await realpath(join(root, "astro/bin/astro.mjs"));
+    return Object.freeze({ directory: root, astroCli, fingerprint: await fingerprintImageToolchain(root) });
+  } catch {
+    throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Image-attested Astro toolchain is invalid");
+  }
+}
+
+/** Hash the complete deployed toolchain closure, not package manifests alone. */
+async function fingerprintImageToolchain(root: string): Promise<`sha256:${string}`> {
+  const digest = createHash("sha256"); const visitedDirectories = new Set<string>(); let files = 0; let bytes = 0;
+  const record = (kind: string, path: string, value?: string | Buffer) => { digest.update(`${kind}\0${relative(root, path).split("\\").join("/")}\0`); if (value !== undefined) digest.update(value); digest.update("\0"); };
+  const walk = async (path: string): Promise<void> => {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink()) {
+      const target = await realpath(path);
+      if (!inside(root, target)) throw new Error("image toolchain contains an escaping link");
+      record("link", path, relative(root, target));
+      await walk(target);
+      return;
+    }
+    const canonicalPath = await realpath(path);
+    if (!inside(root, canonicalPath)) throw new Error("image toolchain escapes its root");
+    if (stat.isFile()) {
+      files += 1; bytes += stat.size;
+      if (files > 100_000 || bytes > 512 * 1024 * 1024) throw new Error("toolchain closure exceeds bounds");
+      record("file", canonicalPath, await readFile(canonicalPath)); return;
+    }
+    if (!stat.isDirectory()) throw new Error("unsupported toolchain entry");
+    if (visitedDirectories.has(canonicalPath)) return;
+    visitedDirectories.add(canonicalPath);
+    record("directory", canonicalPath);
+    const entries = await readdir(canonicalPath, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) await walk(join(canonicalPath, entry.name));
+  };
+  record("policy", root, canonical(TOOLCHAIN));
+  for (const name of Object.keys(TOOLCHAIN).sort()) await walk(join(root, name));
+  return `sha256:${digest.digest("hex")}` as `sha256:${string}`;
 }
 
 /** Hash every checkout-local file reachable from the packages executed by Astro. */

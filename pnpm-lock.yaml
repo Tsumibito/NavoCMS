@@ -82,6 +82,9 @@ importers:
 
   apps/mcp:
     dependencies:
+      '@astrojs/check':
+        specifier: 0.9.10
+        version: 0.9.10(prettier@3.9.6)(typescript@5.9.3)
       '@modelcontextprotocol/ext-apps':
         specifier: 1.7.5
         version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(zod@4.4.3)
@@ -112,6 +115,12 @@ importers:
       '@navocms/security':
         specifier: workspace:*
         version: link:../../packages/security
+      astro:
+        specifier: 7.2.4
+        version: 7.2.4(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.10.1)(tsx@4.23.12)(yaml@2.9.0)
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
       zod:
         specifier: 4.4.3
         version: 4.4.3

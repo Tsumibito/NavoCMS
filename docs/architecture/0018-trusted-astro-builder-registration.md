@@ -1,6 +1,6 @@
 # ADR 0018 — Trusted Astro builder and reviewed-artifact registration
 
-**Status:** Proposed
+**Status:** Superseded by ADR 0019
 
 **Date:** 2026-08-26
 

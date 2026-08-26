@@ -4,11 +4,13 @@ import { dryRunCloudflareStaging } from "./staging-profile.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { PostgresReviewedAstroArtifactStore, reviewedAstroArtifactAuthority, type RegisterReviewedAstroArtifactInput } from "./postgres-reviewed-astro-artifact-store.js";
+import { PostgresReviewedAstroBuildInputStore } from "./postgres-reviewed-astro-build-input-store.js";
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
+import { StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
-import { McpEditingService, type IdempotencyStore } from "./service.js";
+import { McpEditingService, type IdempotencyStore, type StagingAstroOperations } from "./service.js";
 import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
-import { sha256, type EventStore } from "@navocms/kernel";
+import { createReleaseManifest, renderMarkdownProofArtifact, sha256, type EventStore } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, type AuthorizationContext } from "@navocms/security";
 import type { AstroArtifact } from "@navocms/design-astro";
 import { afterAll, describe, expect, it } from "vitest";
@@ -142,6 +144,84 @@ policyIntegration("reviewed Astro artifact readiness policy", () => {
   });
 });
 
+integration("reviewed Astro build-input PostgreSQL boundary", () => {
+  it("reloads exact durable release evidence across restart and rejects manifest/hash promotion", async () => {
+    const bound = await createBoundAstroRelease("input-restart");
+    const store = new PostgresReviewedAstroBuildInputStore(database!, humanRepositoryContext, "default");
+    await expect(store.ready()).resolves.toBe(true);
+    const input = { idempotencyKey: `astro-input-${randomUUID()}`, releaseId: bound.release.id, releaseHash: bound.release.releaseHash, releaseArtifactHash: bound.release.artifactHash, render: bound.render };
+    const first = await store.register(requestContext(), input);
+    await expect(store.register(requestContext(), structuredClone(input))).resolves.toEqual(first);
+    const restarted = new PostgresReviewedAstroBuildInputStore(database!, serviceRepositoryContext, "default");
+    await expect(restarted.get({ tenantId, siteId, environment: "staging", environmentKey: "default", releaseId: bound.release.id })).resolves.toMatchObject({ releaseHash: bound.release.releaseHash, bindingDigest: first.bindingDigest });
+    await expect(store.register(requestContext(), { ...input, idempotencyKey: `astro-drift-${randomUUID()}`, releaseHash: "f".repeat(64) })).rejects.toMatchObject({ code: "REVIEWED_ASTRO_RELEASE_BINDING_MISMATCH" });
+    await expect(store.register(requestContext(), { ...input, idempotencyKey: `astro-anchor-${randomUUID()}`, render: { ...bound.render, anchors: { ...bound.render.anchors, governance: `sha256:${"f".repeat(64)}` } } })).rejects.toMatchObject({ code: "REVIEWED_ASTRO_BUILD_INPUT_INVALID" });
+  });
+
+  it("rolls back snapshot, idempotency, ledger and outbox when event append fails", async () => {
+    const bound = await createBoundAstroRelease("input-rollback");
+    const idempotencyKey = `astro-input-failure-${randomUUID()}`;
+    const persisted = new PostgresEventStore(database!);
+    const failingEvents: EventStore = { append: async (event) => { await persisted.append(event); throw new Error("injected input event failure"); }, query: (query) => persisted.query(query) };
+    const store = new PostgresReviewedAstroBuildInputStore(database!, humanRepositoryContext, "default", { events: failingEvents });
+    await expect(store.register(requestContext(), { idempotencyKey, releaseId: bound.release.id, releaseHash: bound.release.releaseHash, releaseArtifactHash: bound.release.artifactHash, render: bound.render })).rejects.toThrow("injected input event failure");
+    const counts = await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => (
+      await client.query<{ input: string; idempotency: string; ledger: string; outbox: string }>(
+        `SELECT (SELECT count(*) FROM navocms.reviewed_astro_build_inputs WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3) AS input,
+                (SELECT count(*) FROM navocms.idempotency_records WHERE tenant_id = $1 AND site_id = $2 AND operation = $4 AND idempotency_key = $5) AS idempotency,
+                (SELECT count(*) FROM navocms.event_ledger WHERE tenant_id = $1 AND site_id = $2 AND idempotency_key = $6) AS ledger,
+                (SELECT count(*) FROM navocms.domain_outbox WHERE tenant_id = $1 AND site_id = $2 AND idempotency_key = $6) AS outbox`,
+        [tenantId, siteId, bound.release.id, "reviewed_astro_build_input.register.v1", idempotencyKey, `reviewed_astro_build_input.register.v1:${idempotencyKey}`]
+      )).rows[0]!
+    );
+    expect(counts).toEqual({ input: "0", idempotency: "0", ledger: "0", outbox: "0" });
+  });
+
+  it("atomically rolls back the preview release and reviewed input when post-registration composition fails", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const repository = new PostgresEditingRepository(database!);
+    const preparer = new StagingAstroPreviewPreparer();
+    let attemptedRelease: Parameters<StagingAstroOperations["persistPreviewInput"]>[2] | undefined;
+    const operations: StagingAstroOperations = {
+      prepare: (site, revision) => preparer.prepare(site, revision),
+      persistPreviewInput: async (context, repositoryContext, release, render) => {
+        attemptedRelease = release;
+        await new PostgresReviewedAstroBuildInputStore(database!, repositoryContext, "default").register(context, {
+          idempotencyKey: `astro-input:${release.releaseHash}`,
+          releaseId: release.id,
+          releaseHash: release.releaseHash,
+          releaseArtifactHash: release.artifactHash,
+          render
+        });
+        throw new Error("injected post-input failure");
+      },
+      ensureArtifact: async () => undefined
+    };
+    const service = new McpEditingService(repository, new PostgresEventStore(database!), new PostgresIdempotencyStore(database!) as IdempotencyStore,
+      new PostgresReleaseWorkflowRepository(database!), new EmbeddedReleaseProvider(), { environmentKey: "staging" }, database!, undefined, operations);
+    const draft = await service.createDraft(requestContext(), { typeName: "article", slug: `atomic-${suffix}`, locale: "en", title: "Atomic preview", markdown: "# Atomic preview\n", idempotencyKey: `atomic-draft-${suffix}` }) as { draft: { revisionId: string } };
+    const previewKey = `atomic-preview-${suffix}`;
+    await expect(service.preparePreview(requestContext(), draft.draft.revisionId, previewKey)).rejects.toThrow("injected post-input failure");
+    expect(attemptedRelease).toBeDefined();
+    const release = attemptedRelease!;
+    const inputKey = `astro-input:${release.releaseHash}`;
+    const eventKey = `reviewed_astro_build_input.register.v1:${inputKey}`;
+    const counts = await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => (
+      await client.query<{ releases: string; inputs: string; preview_idempotency: string; input_idempotency: string; ledger: string; outbox: string }>(
+        `SELECT
+           (SELECT count(*) FROM navocms.release_candidates WHERE tenant_id = $1 AND site_id = $2 AND id = $3) AS releases,
+           (SELECT count(*) FROM navocms.reviewed_astro_build_inputs WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3) AS inputs,
+           (SELECT count(*) FROM navocms.idempotency_records WHERE tenant_id = $1 AND site_id = $2 AND operation = 'preview_create' AND idempotency_key = $4) AS preview_idempotency,
+           (SELECT count(*) FROM navocms.idempotency_records WHERE tenant_id = $1 AND site_id = $2 AND operation = 'reviewed_astro_build_input.register.v1' AND idempotency_key = $5) AS input_idempotency,
+           (SELECT count(*) FROM navocms.event_ledger WHERE tenant_id = $1 AND site_id = $2 AND idempotency_key = $6) AS ledger,
+           (SELECT count(*) FROM navocms.domain_outbox WHERE tenant_id = $1 AND site_id = $2 AND idempotency_key = $6) AS outbox`,
+        [tenantId, siteId, release.id, previewKey, inputKey, eventKey]
+      )).rows[0]!
+    );
+    expect(counts).toEqual({ releases: "0", inputs: "0", preview_idempotency: "0", input_idempotency: "0", ledger: "0", outbox: "0" });
+  });
+});
+
 async function createRelease(label: string) {
   const service = new McpEditingService(
     new PostgresEditingRepository(database!),
@@ -160,6 +240,19 @@ async function createRelease(label: string) {
   const preview = await service.preparePreview(requestContext(), draft.draft.revisionId, `reviewed-preview-${suffix}`);
   const stored = await new PostgresReleaseWorkflowRepository(database!).getRelease(serviceRepositoryContext, preview.releaseId);
   return stored;
+}
+
+async function createBoundAstroRelease(label: string) {
+  const service = new McpEditingService(new PostgresEditingRepository(database!), new PostgresEventStore(database!), new PostgresIdempotencyStore(database!) as IdempotencyStore, new PostgresReleaseWorkflowRepository(database!), new EmbeddedReleaseProvider(), { environmentKey: "staging" }, database!);
+  const suffix = randomUUID().replace(/-/g, "");
+  const draft = await service.createDraft(requestContext(), { typeName: "article", slug: `astro-${label}-${suffix}`, locale: "en", title: `Astro ${label}`, markdown: "# Astro input\n", idempotencyKey: `astro-draft-${suffix}` }) as { draft: { revisionId: string } };
+  const repository = new PostgresEditingRepository(database!); const releases = new PostgresReleaseWorkflowRepository(database!);
+  const revision = await repository.getRevision(humanRepositoryContext, draft.draft.revisionId);
+  const render = new StagingAstroPreviewPreparer().prepare(humanRepositoryContext.site, revision);
+  const environmentId = await releases.environmentId(humanRepositoryContext, "staging");
+  const { manifest, releaseHash } = createReleaseManifest({ tenantId, siteId, environmentId, revisionId: revision.id, sourceHash: revision.sourceHash, workflow: await repository.workflowFor(humanRepositoryContext, revision.id), anchors: Object.fromEntries(Object.entries(render.anchors).map(([key, value]) => [key, value.slice(7)])) });
+  const release = await releases.createPreview({ context: humanRepositoryContext, environmentKey: "staging", revisionId: revision.id, workflow: manifest.workflow, manifest, releaseHash, artifact: renderMarkdownProofArtifact({ releaseHash, title: `Astro ${label}`, locale: "en", markdown: revision.source }), previewTokenHash: sha256(`preview-${suffix}`), previewExpiresAt: new Date(Date.now() + 60_000).toISOString(), correlationId: revision.documentId });
+  return { release, render };
 }
 
 function registrationInput(release: Awaited<ReturnType<typeof createRelease>>): RegisterReviewedAstroArtifactInput {

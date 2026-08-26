@@ -39,6 +39,7 @@ export interface ReadinessResult {
   readonly pluginHost?: Readonly<Record<string, unknown>>;
   readonly provider?: Readonly<{ key: "embedded" | "cloudflare-staging"; ready: boolean }>;
   readonly resolver?: Readonly<{ ready: boolean; environment: "staging"; environmentKey: string }>;
+  readonly builder?: Readonly<{ ready: boolean; environment: "staging"; environmentKey: string; policyDigest: string }>;
   readonly staging?: Readonly<{ provider: string; profileDigest: string; bindingDigest: string; tenantId: string; siteId: string; hostname: string }>;
 }
 
@@ -66,6 +67,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
           ...(readiness.pluginHost ? { pluginHost: readiness.pluginHost } : {}),
           ...(readiness.provider ? { provider: readiness.provider } : {}),
           ...(readiness.resolver ? { resolver: readiness.resolver } : {}),
+          ...(readiness.builder ? { builder: readiness.builder } : {}),
           ...(readiness.staging ? { staging: readiness.staging } : {})
         });
       } catch {
