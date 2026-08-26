@@ -124,6 +124,7 @@ export class PostgresReviewedAstroBuildInputStore implements ReviewedAstroBuildI
     return this.#database.withScope(databaseScope, async (client) => {
       const release = await exactRelease(client, this.#context, this.#environmentKey, input);
       const manifest = loadedManifest(release.manifest_json, input, this.#context);
+      assertRenderAnchors(manifest, render);
       const bindingDigest = reviewedAstroBuildBindingDigest({ releaseManifest: manifest, releaseHash: input.releaseHash, releaseArtifactHash: input.releaseArtifactHash, render });
       const reservation = await reserve(this.#idempotency, databaseScope, input.idempotencyKey, fingerprint);
       if (reservation.status === "completed") return persisted(reservation.value, this.#context, this.#environmentKey);
@@ -209,6 +210,12 @@ function loadedManifest(value: unknown, input: RegisterReviewedAstroBuildInput, 
     return freeze(created.manifest);
   } catch { throw new McpEditingError("REVIEWED_ASTRO_RELEASE_MANIFEST_INVALID", "Durable release manifest is invalid"); }
 }
+function assertRenderAnchors(manifest: ReleaseManifestV1, render: AstroRenderInput): void {
+  const unprefixed = (value: string) => value.startsWith("sha256:") ? value.slice("sha256:".length) : "";
+  if (manifest.anchors.content !== unprefixed(render.anchors.content) || manifest.anchors.design !== unprefixed(render.anchors.design) || manifest.anchors.delivery !== unprefixed(render.anchors.delivery) || manifest.anchors.governance !== unprefixed(render.anchors.governance)) {
+    throw new McpEditingError("REVIEWED_ASTRO_BUILD_INPUT_INVALID", "Reviewed Astro render anchors do not match the immutable release manifest");
+  }
+}
 async function findStored(client: SqlClient, context: RepositoryContext, environmentKey: string, releaseId: string): Promise<ReviewedAstroBuildInputs | undefined> {
   const row = (await client.query<StoredRow>(
     `SELECT b.tenant_id, b.site_id, b.environment_key, b.release_id, b.release_hash, b.artifact_hash, b.binding_digest, r.manifest_json, b.render_json
@@ -240,6 +247,7 @@ function persisted(value: unknown, context: RepositoryContext, environmentKey: s
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate) || !exactKeys(candidate, ["tenantId", "siteId", "environment", "environmentKey", "releaseId", "releaseHash", "releaseArtifactHash", "releaseManifest", "bindingDigest", "render"]) || candidate.tenantId !== context.site.tenantId || candidate.siteId !== context.site.siteId || candidate.environment !== "staging" || candidate.environmentKey !== environmentKey || !uuid(candidate.releaseId) || !hash(candidate.releaseHash) || !hash(candidate.releaseArtifactHash)) throw new Error("scope");
     const render = readStoredRender(candidate.render);
     const manifest = loadedManifest(candidate.releaseManifest, { idempotencyKey: "persisted-reviewed-astro-input", releaseId: candidate.releaseId, releaseHash: candidate.releaseHash, releaseArtifactHash: candidate.releaseArtifactHash, render }, context);
+    assertRenderAnchors(manifest, render);
     const digest = reviewedAstroBuildBindingDigest({ releaseManifest: manifest, releaseHash: candidate.releaseHash, releaseArtifactHash: candidate.releaseArtifactHash, render });
     if (candidate.bindingDigest !== digest) throw new Error("digest");
     return freeze({ ...candidate, releaseManifest: manifest, render });
