@@ -197,6 +197,51 @@ integration("Neon production persistence", () => {
     expect(resolutionEvents.some(({ event }) => event.type === "io.navocms.delivery.phase-resolved.v1" && event.data.externalId === "coolify-human-resolved-1")).toBe(true);
   });
 
+  it("reconciles a publishing checkpoint after its exact approval expires", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const provider = new InterruptingPublishProvider();
+    const firstService = service(new PostgresEventStore(database!), undefined, provider);
+    const release = await approvedRelease(firstService, suffix, "approval-expiry");
+    await expect(firstService.publishRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `publish-${suffix}-approval-expiry`
+    })).rejects.toThrow("injected publish interruption");
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `UPDATE navocms.release_approvals SET expires_at = now() - interval '1 second'
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3`,
+        [tenantId, siteId, release.releaseId]
+      );
+    });
+    const restartedService = service(new PostgresEventStore(database!), undefined, provider);
+    await expect(restartedService.reconcileRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `reconcile-${suffix}-approval-expiry`
+    })).resolves.toMatchObject({ release: { status: "published" } });
+    expect(provider.publishCalls).toBe(2);
+  });
+
+  it("denies publishing recovery after the validated approval is revoked", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const provider = new InterruptingPublishProvider();
+    const firstService = service(new PostgresEventStore(database!), undefined, provider);
+    const release = await approvedRelease(firstService, suffix, "approval-revoked");
+    await expect(firstService.publishRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `publish-${suffix}-approval-revoked`
+    })).rejects.toThrow("injected publish interruption");
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `UPDATE navocms.release_approvals
+            SET revoked_at = now(), revoked_by = $4, revocation_reason = 'integration recovery denial proof'
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3`,
+        [tenantId, siteId, release.releaseId, principalId]
+      );
+    });
+    const restartedService = service(new PostgresEventStore(database!), undefined, provider);
+    await expect(restartedService.reconcileRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `reconcile-${suffix}-approval-revoked`
+    })).rejects.toMatchObject({ code: "RELEASE_APPROVAL_CHECKPOINT_INVALID" });
+    expect(provider.publishCalls).toBe(1);
+  });
+
   it("maps a standard issuer subject to persisted site membership", async () => {
     const resolver = new PostgresIdentityResolver(database!, { tenantId, siteId });
     await expect(resolver.resolve({
@@ -346,6 +391,18 @@ class InterruptingRollbackProvider implements ReleaseProvider {
   public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> { return { providerKey: this.key, providerReference: `postgres:${input.releaseHash}:${input.artifact.hash}`, artifactHash: input.artifact.hash }; }
   public async verify(): Promise<boolean> { return true; }
   public async rollback(): Promise<void> { this.rollbackCalls += 1; if (this.interruptOnce) { this.interruptOnce = false; throw new Error("injected rollback interruption"); } }
+}
+
+class InterruptingPublishProvider implements ReleaseProvider {
+  public readonly key = "test.postgres-publish-recovery.v1";
+  public publishCalls = 0;
+  public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
+    this.publishCalls += 1;
+    if (this.publishCalls === 1) throw new Error("injected publish interruption");
+    return { providerKey: this.key, providerReference: `postgres:${input.releaseHash}:${input.artifact.hash}`, artifactHash: input.artifact.hash };
+  }
+  public async verify(): Promise<boolean> { return true; }
+  public async rollback(): Promise<void> { /* no-op for publication recovery proof */ }
 }
 
 function context(): { authorization: AuthorizationContext } {

@@ -172,10 +172,16 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
 
   public async beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string) {
     const release = this.requireExact(context, releaseId, releaseHash);
-    if (!release.approval || new Date(release.approval.expiresAt).getTime() <= Date.now()) {
-      throw new McpEditingError("RELEASE_APPROVAL_EXPIRED", "A current human approval is required before publication");
+    if (release.status !== "publishing") {
+      if (!release.approval || new Date(release.approval.expiresAt).getTime() <= Date.now()) {
+        throw new McpEditingError("RELEASE_APPROVAL_EXPIRED", "A current human approval is required before publication");
+      }
+      release.status = releaseTransition(release.status, "publishing");
+    } else if (!release.approval || release.approval.actorKind !== "human" ||
+      release.approval.scope.tenantId !== release.tenantId || release.approval.scope.siteId !== release.siteId ||
+      release.approval.scope.environmentId !== release.environmentId) {
+      throw new McpEditingError("RELEASE_APPROVAL_CHECKPOINT_INVALID", "Publication approval or its durable validation checkpoint is missing");
     }
-    if (release.status !== "publishing") release.status = releaseTransition(release.status, "publishing");
     release.updatedAt = new Date().toISOString();
     return Object.freeze({ release: freezeRelease(release), ...this.previousFor(release) });
   }

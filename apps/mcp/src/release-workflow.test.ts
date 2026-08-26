@@ -6,7 +6,7 @@ import type {
 import { InMemoryEventStore } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, siteRoleAuthority, type AuthorizationContext } from "@navocms/security";
 import type { AstroRenderInput } from "@navocms/design-astro";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { InMemoryReleaseWorkflowRepository } from "./release-repository.js";
 import { InMemoryEditingRepository } from "./repository.js";
@@ -133,6 +133,27 @@ describe("durable release workflow", () => {
     await restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approved-restart-002" });
     expect(provider.publishCount).toBe(1);
   });
+
+  it("reconciles an exact publishing checkpoint after its approval expires", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-26T20:00:00.000Z"));
+      const provider = new RecoverableProvider();
+      provider.failPublishOnce = true;
+      const repository = new InMemoryEditingRepository(); repository.registerSite(site);
+      const releases = new InMemoryReleaseWorkflowRepository(); const events = new InMemoryEventStore();
+      const first = new McpEditingService(repository, events, undefined, releases, provider, { approvalTtlSeconds: 1 });
+      const context = requestContext();
+      const preview = await draftPreviewApprove(first, context, "approval-expiry", "Approval expiry", "approval-expiry");
+      await expect(first.publishRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-approval-expiry-001" })).rejects.toThrow("interrupted publish");
+      vi.advanceTimersByTime(2_000);
+      const restarted = new McpEditingService(repository, events, undefined, releases, provider, { approvalTtlSeconds: 1 });
+      await expect(restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approval-expiry-001" })).resolves.toMatchObject({ release: { status: "published" } });
+      expect(provider.publishCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 class CapturingStagingOperations implements StagingAstroOperations {
@@ -149,9 +170,11 @@ class RecoverableProvider implements ReleaseProvider {
   public rollbackCount = 0;
   public verifyLive = true;
   public failRollbackOnce = false;
+  public failPublishOnce = false;
 
   public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
     this.publishCount += 1;
+    if (this.failPublishOnce) { this.failPublishOnce = false; throw new Error("interrupted publish"); }
     return {
       providerKey: this.key,
       providerReference: `test:${input.releaseHash}:${input.artifact.hash}`,
