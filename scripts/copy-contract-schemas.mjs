@@ -10,7 +10,8 @@ const files = [
   "event-envelope.schema.json",
   "media-asset.schema.json",
   "plugin-manifest.schema.json",
-  "site-profile.schema.json"
+  "site-profile.schema.json",
+  "cloudflare-staging-binding.schema.json"
 ];
 const destination = path.join(process.cwd(), "packages/contracts/dist/schemas");
 

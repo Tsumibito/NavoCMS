@@ -63,7 +63,7 @@ export interface SiteProfile {
     readonly displayName: string;
   };
   readonly spec: {
-    readonly environment: "development" | "preview" | "production";
+    readonly environment: "development" | "preview" | "staging" | "production";
     readonly locales: {
       readonly default: string;
       readonly supported: readonly string[];
@@ -90,6 +90,13 @@ export interface SiteProfile {
       readonly immutablePublicUrls: true;
     };
   };
+}
+
+export interface CloudflareStagingBinding {
+  readonly schema: "io.navocms.cloudflare-staging-binding.v1";
+  readonly tenantId: string; readonly siteId: string; readonly environment: "staging";
+  readonly cloudflare: { readonly accountId: string; readonly projectId: string; readonly productionBranch: string; readonly previewBranch: string; readonly allowedHostname: string; readonly tokenSecretRef: string };
+  readonly coolify: { readonly baseUrl: string; readonly applicationUuid: string; readonly tokenSecretRef: string };
 }
 
 export type MediaAssetState = "pending" | "quarantined" | "verified" | "processing" | "ready" | "rejected" | "deleted";

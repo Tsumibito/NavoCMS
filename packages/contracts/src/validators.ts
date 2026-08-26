@@ -6,6 +6,7 @@ import type { FormatsPlugin } from "ajv-formats";
 
 import type {
   ContentTypeDefinition,
+  CloudflareStagingBinding,
   DesignOverrideDefinition,
   DesignSystemDefinition,
   DesignToken,
@@ -23,8 +24,14 @@ const schemaFiles = {
   event: "event-envelope.schema.json",
   mediaAsset: "media-asset.schema.json",
   plugin: "plugin-manifest.schema.json",
-  profile: "site-profile.schema.json"
+  profile: "site-profile.schema.json",
+  cloudflareStagingBinding: "cloudflare-staging-binding.schema.json"
 } as const;
+
+/** Exact, versioned parser shared by every staging activation boundary. */
+export function parseCloudflareStagingBinding(value: unknown): CloudflareStagingBinding {
+  return contracts.cloudflareStagingBinding.parse(value);
+}
 const MAX_VALIDATION_ISSUES = 20;
 
 function readSchema(filename: string): object {
@@ -226,6 +233,16 @@ function mediaAssetSemantics(asset: MediaAsset): string[] {
   return issues;
 }
 
+function cloudflareStagingBindingSemantics(binding: CloudflareStagingBinding): string[] {
+  const issues: string[] = [];
+  if (binding.cloudflare.productionBranch === binding.cloudflare.previewBranch) issues.push("production and preview branches must differ");
+  try {
+    const endpoint = new URL(binding.coolify.baseUrl);
+    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) issues.push("Coolify endpoint must be a credential-free HTTPS origin");
+  } catch { issues.push("Coolify endpoint must be a credential-free HTTPS origin"); }
+  return issues;
+}
+
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 const addFormats = (
   "default" in addFormatsModule ? addFormatsModule.default : addFormatsModule
@@ -266,5 +283,6 @@ export const contracts = {
     "site profile",
     ajv.compile<SiteProfile>(readSchema(schemaFiles.profile)),
     profileSemantics
-  )
+  ),
+  cloudflareStagingBinding: new ContractValidator<CloudflareStagingBinding>("Cloudflare staging binding", ajv.compile<CloudflareStagingBinding>(readSchema(schemaFiles.cloudflareStagingBinding)), cloudflareStagingBindingSemantics)
 } as const;
