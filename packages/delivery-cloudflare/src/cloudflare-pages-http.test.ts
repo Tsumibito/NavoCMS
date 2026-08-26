@@ -59,7 +59,8 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     expect(form.get("branch")).toBe("preview");
     expect(form.get("commit_hash")).toBe(reference.sourceCommitSha);
     expect(form.get("commit_message")).toBe(`navocms:preview:${referenceHash}`);
-    expect(JSON.parse(String(form.get("manifest")))).toEqual({ "en/index.html": "d4eb547c199ef336cae19e3248b71bdc" });
+    expect(JSON.parse(String(form.get("manifest")))).toEqual({ "/en/index.html": "d4eb547c199ef336cae19e3248b71bdc" });
+    expect(form.get("pages_build_output_dir")).toBeNull();
     await expect((form.get("_headers") as Blob).text()).resolves.toContain(`X-NavoCMS-Artifact-Reference: ${referenceHash}`);
   });
 

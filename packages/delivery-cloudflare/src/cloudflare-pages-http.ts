@@ -122,8 +122,10 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     form.set("commit_dirty", "false");
     form.set("commit_hash", input.reference.sourceCommitSha);
     form.set("commit_message", marker(input.referenceHash, environment));
-    form.set("manifest", JSON.stringify(Object.fromEntries(fileEntries.map(([path, body]) => [path, pagesAssetHash(path, body)]))));
-    form.set("pages_build_output_dir", "dist");
+    // Pages Direct Upload uses URL-rooted manifest keys. The build output
+    // directory is a local Wrangler setting and is not part of this multipart
+    // API contract.
+    form.set("manifest", JSON.stringify(Object.fromEntries(fileEntries.map(([path, body]) => [`/${path}`, pagesAssetHash(path, body)]))));
     // This file is derived solely from the immutable reference and lets a bounded HTTPS probe
     // confirm the deployed output without trusting a mutable preview URL or response body.
     form.set("_headers", new Blob([headersFile(input.reference, input.referenceHash, environment)], { type: "text/plain" }), "_headers");
