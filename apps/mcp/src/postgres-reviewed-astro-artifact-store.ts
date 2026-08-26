@@ -95,8 +95,8 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
                       AND p.polpermissive
                       AND array_length(p.polroles, 1) = 1
                       AND EXISTS (SELECT 1 FROM pg_roles role WHERE role.oid = p.polroles[1] AND role.rolname = 'navocms_app')
-                      AND regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]()]', '', 'g') = 'tenant_id=current_tenant_idANDsite_id=current_site_id'
-                      AND regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]()]', '', 'g') = 'tenant_id=current_tenant_idANDsite_id=current_site_id'
+                      AND regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]()]', '', 'g') = 'tenant_id=navocms.current_tenant_idANDsite_id=navocms.current_site_id'
+                      AND regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]()]', '', 'g') = 'tenant_id=navocms.current_tenant_idANDsite_id=navocms.current_site_id'
                     ) FROM pg_policy p WHERE p.polrelid = c.oid
                   ), false) AS exact_policy,
                   has_table_privilege(current_user, 'navocms.reviewed_astro_artifacts', 'SELECT') AS can_select,

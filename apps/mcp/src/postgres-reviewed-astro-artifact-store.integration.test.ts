@@ -149,7 +149,7 @@ async function createRelease(label: string) {
     new PostgresIdempotencyStore(database!) as IdempotencyStore,
     new PostgresReleaseWorkflowRepository(database!),
     new EmbeddedReleaseProvider(),
-    { environmentKey: "default", previewBaseUrl: "https://staging-cms.navocms.test" },
+    { environmentKey: "staging", previewBaseUrl: "https://staging-cms.navocms.test" },
     database!
   );
   const suffix = randomUUID().replace(/-/g, "");

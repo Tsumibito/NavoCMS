@@ -32,6 +32,7 @@ INSERT INTO content_revisions (id, tenant_id, site_id, document_id, variant_id, 
   ('72700000-0000-4000-8000-000000000002', '72000000-0000-4000-8000-000000000002', '72200000-0000-4000-8000-000000000002', '72500000-0000-4000-8000-000000000002', '72600000-0000-4000-8000-000000000002', 1, '# Two', repeat('b', 64), '{}', '{}');
 INSERT INTO release_candidates (id, tenant_id, site_id, environment_id, revision_id, workflow_key, release_hash, artifact_hash, correlation_id, manifest_json, artifact_json, status) VALUES
   ('71800000-0000-4000-8000-000000000001', '71000000-0000-4000-8000-000000000001', '71100000-0000-4000-8000-000000000001', '71300000-0000-4000-8000-000000000001', '71700000-0000-4000-8000-000000000001', 'editorial', repeat('a', 64), repeat('b', 64), '71500000-0000-4000-8000-000000000001', '{}', '{}', 'previewed'),
+  ('71800000-0000-4000-8000-000000000009', '71000000-0000-4000-8000-000000000001', '71100000-0000-4000-8000-000000000001', '71300000-0000-4000-8000-000000000001', '71700000-0000-4000-8000-000000000001', 'editorial', repeat('1', 64), repeat('2', 64), '71500000-0000-4000-8000-000000000009', '{}', '{}', 'previewed'),
   ('71800000-0000-4000-8000-000000000002', '71000000-0000-4000-8000-000000000001', '71200000-0000-4000-8000-000000000002', '71300000-0000-4000-8000-000000000002', '71700000-0000-4000-8000-000000000002', 'editorial', repeat('e', 64), repeat('f', 64), '71500000-0000-4000-8000-000000000002', '{}', '{}', 'previewed'),
   ('72800000-0000-4000-8000-000000000002', '72000000-0000-4000-8000-000000000002', '72200000-0000-4000-8000-000000000002', '72300000-0000-4000-8000-000000000002', '72700000-0000-4000-8000-000000000002', 'editorial', repeat('c', 64), repeat('d', 64), '72500000-0000-4000-8000-000000000002', '{}', '{}', 'previewed');
 INSERT INTO reviewed_astro_artifacts (
@@ -66,7 +67,7 @@ DECLARE visible_reviewed_artifacts integer;
 DECLARE same_tenant_cross_site_artifacts integer;
 BEGIN
   SELECT count(*) INTO visible_releases FROM navocms.release_candidates;
-  IF visible_releases <> 1 THEN RAISE EXCEPTION 'RLS exposed % release candidates instead of 1', visible_releases; END IF;
+  IF visible_releases <> 2 THEN RAISE EXCEPTION 'RLS exposed % release candidates instead of 2', visible_releases; END IF;
   SELECT count(*) INTO visible_outbox FROM navocms.domain_outbox;
   IF visible_outbox <> 0 THEN RAISE EXCEPTION 'unexpected outbox records'; END IF;
   INSERT INTO navocms.reviewed_astro_artifacts (
@@ -152,7 +153,7 @@ BEGIN
       '71000000-0000-4000-8000-000000000001',
       '71100000-0000-4000-8000-000000000001',
       '72300000-0000-4000-8000-000000000002', 'default',
-      '71800000-0000-4000-8000-000000000001', repeat('a', 64), repeat('b', 64),
+      '71800000-0000-4000-8000-000000000009', repeat('1', 64), repeat('2', 64),
       concat('sha256:', repeat('c', 64)), repeat('d', 40), '{}'::jsonb, '{}'::jsonb
     );
     RAISE EXCEPTION 'wrong reviewed environment foreign key unexpectedly succeeded';
@@ -184,7 +185,7 @@ BEGIN
       '71000000-0000-4000-8000-000000000001',
       '71100000-0000-4000-8000-000000000001',
       '71300000-0000-4000-8000-000000000001', 'default',
-      '71800000-0000-4000-8000-000000000001', repeat('e', 64), repeat('b', 64),
+      '71800000-0000-4000-8000-000000000009', repeat('e', 64), repeat('2', 64),
       concat('sha256:', repeat('c', 64)), repeat('d', 40), '{}'::jsonb, '{}'::jsonb
     );
     RAISE EXCEPTION 'wrong reviewed release hash foreign key unexpectedly succeeded';
@@ -200,7 +201,7 @@ BEGIN
       '71000000-0000-4000-8000-000000000001',
       '71100000-0000-4000-8000-000000000001',
       '71300000-0000-4000-8000-000000000001', 'default',
-      '71800000-0000-4000-8000-000000000001', repeat('a', 64), repeat('b', 64),
+      '71800000-0000-4000-8000-000000000009', repeat('1', 64), repeat('2', 64),
       concat('sha256:', repeat('c', 64)), repeat('d', 41), '{}'::jsonb, '{}'::jsonb
     );
     RAISE EXCEPTION 'non-exact reviewed commit SHA unexpectedly succeeded';
@@ -216,7 +217,7 @@ BEGIN
       '71000000-0000-4000-8000-000000000001',
       '71100000-0000-4000-8000-000000000001',
       '71300000-0000-4000-8000-000000000001', 'default',
-      '71800000-0000-4000-8000-000000000001', repeat('a', 64), repeat('b', 64),
+      '71800000-0000-4000-8000-000000000009', repeat('1', 64), repeat('2', 64),
       concat('sha256:', repeat('c', 64)), repeat('d', 40), '[]'::jsonb, '{}'::jsonb
     );
     RAISE EXCEPTION 'non-object reviewed artifact unexpectedly succeeded';
@@ -232,7 +233,7 @@ BEGIN
       '71000000-0000-4000-8000-000000000001',
       '71100000-0000-4000-8000-000000000001',
       '71300000-0000-4000-8000-000000000001', 'default',
-      '71800000-0000-4000-8000-000000000001', repeat('a', 64), repeat('b', 64),
+      '71800000-0000-4000-8000-000000000009', repeat('1', 64), repeat('2', 64),
       concat('sha256:', repeat('c', 64)), repeat('d', 40), '{}'::jsonb,
       jsonb_build_object('oversized', repeat('x', 9437185))
     );
