@@ -149,7 +149,7 @@ export class PostgresReviewedAstroBuildInputStore implements ReviewedAstroBuildI
           data: Object.freeze({ environment: "staging", environmentKey: this.#environmentKey, releaseId: input.releaseId,
             releaseHash: input.releaseHash, releaseArtifactHash: input.releaseArtifactHash, astroArtifactHash: renderedHash, bindingDigest }) }));
       }
-      await this.#idempotency.complete(databaseScope, OPERATION, input.idempotencyKey, fingerprint, record);
+      await this.#idempotency.complete(databaseScope, OPERATION, input.idempotencyKey, fingerprint, idempotencyValue(record));
       return record;
     });
   }
@@ -236,13 +236,19 @@ function fromRow(row: StoredRow, context: RepositoryContext): ReviewedAstroBuild
 }
 function persisted(value: unknown, context: RepositoryContext, environmentKey: string): ReviewedAstroBuildInputs {
   try {
-    const candidate = value as ReviewedAstroBuildInputs;
-    if (!candidate || candidate.tenantId !== context.site.tenantId || candidate.siteId !== context.site.siteId || candidate.environment !== "staging" || candidate.environmentKey !== environmentKey) throw new Error("scope");
-    const render = normalizedRender(candidate.render);
-    const digest = reviewedAstroBuildBindingDigest({ releaseManifest: candidate.releaseManifest, releaseHash: candidate.releaseHash, releaseArtifactHash: candidate.releaseArtifactHash, render });
+    const candidate = value as Omit<ReviewedAstroBuildInputs, "render"> & { readonly render: unknown };
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate) || !exactKeys(candidate, ["tenantId", "siteId", "environment", "environmentKey", "releaseId", "releaseHash", "releaseArtifactHash", "releaseManifest", "bindingDigest", "render"]) || candidate.tenantId !== context.site.tenantId || candidate.siteId !== context.site.siteId || candidate.environment !== "staging" || candidate.environmentKey !== environmentKey || !uuid(candidate.releaseId) || !hash(candidate.releaseHash) || !hash(candidate.releaseArtifactHash)) throw new Error("scope");
+    const render = readStoredRender(candidate.render);
+    const manifest = loadedManifest(candidate.releaseManifest, { idempotencyKey: "persisted-reviewed-astro-input", releaseId: candidate.releaseId, releaseHash: candidate.releaseHash, releaseArtifactHash: candidate.releaseArtifactHash, render }, context);
+    const digest = reviewedAstroBuildBindingDigest({ releaseManifest: manifest, releaseHash: candidate.releaseHash, releaseArtifactHash: candidate.releaseArtifactHash, render });
     if (candidate.bindingDigest !== digest) throw new Error("digest");
-    return freeze({ ...candidate, render });
+    return freeze({ ...candidate, releaseManifest: manifest, render });
   } catch { throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro build input idempotency result is invalid"); }
+}
+function idempotencyValue(record: ReviewedAstroBuildInputs): object {
+  return freeze({ tenantId: record.tenantId, siteId: record.siteId, environment: record.environment, environmentKey: record.environmentKey,
+    releaseId: record.releaseId, releaseHash: record.releaseHash, releaseArtifactHash: record.releaseArtifactHash,
+    releaseManifest: structuredClone(record.releaseManifest), bindingDigest: record.bindingDigest, render: storedRender(record.render) });
 }
 function same(record: ReviewedAstroBuildInputs, input: RegisterReviewedAstroBuildInput, manifest: ReleaseManifestV1, bindingDigest: string): boolean {
   return record.releaseId === input.releaseId && record.releaseHash === input.releaseHash && record.releaseArtifactHash === input.releaseArtifactHash && canonical(record.releaseManifest) === canonical(manifest) && record.bindingDigest === bindingDigest && canonical(storedRender(record.render)) === canonical(storedRender(normalizedRender(input.render)));
