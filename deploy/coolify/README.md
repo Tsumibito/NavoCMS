@@ -47,10 +47,21 @@ NAVOCMS_SITE_ID=<deployment-bound site UUID>
 NAVOCMS_MCP_RESOURCE=https://staging-cms.navocms.com/mcp
 NAVOCMS_PREVIEW_BASE_URL=https://staging-cms.navocms.com
 NAVOCMS_PREVIEW_TTL_SECONDS=3600
+NAVOCMS_ENVIRONMENT_KEY=<reviewed deployment environment key>
+NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN=/app/node_modules
 NAVOCMS_OIDC_ISSUER=<authorization server issuer>
 NAVOCMS_OIDC_JWKS_URL=<authorization server JWKS URL>
 PORT=8788
 ```
+
+For the `cloudflare-staging` profile only, enable Coolify's **Include Source
+Commit** setting. Coolify supplies the exact commit as the standard
+`SOURCE_COMMIT` build argument; the image binds it internally to
+`NAVOCMS_REVIEWED_SOURCE_COMMIT`. The image contains the pinned Astro,
+`@astrojs/check`, and TypeScript closure as production dependencies. The
+runtime refuses external staging delivery when this value is absent or is not a
+full immutable commit SHA; it never relies on `.git` or a mutable checkout in
+the running container.
 
 Use `production` and the production resource URL in the production file. The OIDC token must contain
 the resource audience, stable subject, and requested NavoCMS scopes. PostgreSQL maps issuer and

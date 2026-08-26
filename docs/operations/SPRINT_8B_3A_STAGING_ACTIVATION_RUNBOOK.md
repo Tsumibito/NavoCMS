@@ -27,25 +27,26 @@ or Cloudflare/Coolify transport use.
 
 ## 8B.3C trusted reviewed-build prerequisite
 
-Sprint 8B.3C adds the internal `TrustedAstroBuilder`; it is not a public MCP
-tool. The builder receives an exact reviewed release identity and bounded
-idempotency key, loads the complete reviewed content/design/media/delivery/
-governance input through a private boundary, renders with
-`@navocms/design-astro`, and creates two clean pinned Astro builds. It checks
-the configured reviewed checkout is clean and detached, derives
-`sourceCommitSha` only with `git rev-parse --verify HEAD^{commit}`, and
-performs one bounded offline frozen-lockfile preparation for the checkout-local
-toolchain. It re-attests the same checkout-bound lock and executable toolchain
-closure before registration. Each build has an independent materialization and
-isolated cache. It rejects
-non-identical output and then uses the existing
+Sprint 8 operational composition derives its reviewed staging Astro input
+before `preparePreview()` creates the immutable release hash. The input is
+persisted privately and is not an MCP payload. `TrustedAstroBuilder` receives
+only the exact release identity and bounded idempotency key, loads that durable
+input, renders with `@navocms/design-astro`, and creates two clean pinned Astro
+builds. In Coolify it uses an image-attested runner: enable **Include Source
+Commit** so Coolify supplies `SOURCE_COMMIT`; the image binds it internally to
+`NAVOCMS_REVIEWED_SOURCE_COMMIT`. Set
+`NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN=/app/node_modules`. The runner validates the
+full pinned Astro/check/TypeScript executable closure before and after both
+builds. It never relies on `.git` or a mutable checkout in the runtime image.
+Each build has an independent materialization and isolated cache, rejects
+non-identical output, and then uses the existing
 `PostgresReviewedAstroArtifactStore` transaction, idempotency,
 Ledger, and outbox path as an authenticated human with `content:publish`.
 
-The private runtime composition that supplies the reviewed-input store remains
-required before an operational dry run. Do not expose its source/output objects
-or commit selector in MCP; do not wire the builder to Cloudflare, Coolify,
-credentials, or the production profile.
+The private runtime composition supplies and registers the reviewed input
+without exposing source/output objects or a commit selector in MCP. It invokes
+the build gate before provider I/O for both publish and approved-release
+reconcile. Do not wire this profile to production.
 
 ## Operator input for 8B.3B
 
@@ -64,8 +65,8 @@ staging profile has passed readiness.
 
 ## 8B.3B execution checklist
 
-1. Review and compose the trusted builder/registration prerequisite above with
-   a durable reviewed-input source; no MCP payload fallback is allowed.
+1. Deploy the reviewed image/source-commit and private build composition above;
+   no MCP payload fallback is allowed.
 2. Confirm the deployment is `staging`; reject the profile for production.
 3. Validate the binding schema, tenant/site scope, distinct Pages branches,
    HTTPS Coolify endpoint, and secret-reference names.

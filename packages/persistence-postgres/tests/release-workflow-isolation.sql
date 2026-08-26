@@ -10,6 +10,10 @@ INSERT INTO sites (id, tenant_id, slug, name) VALUES
   ('71100000-0000-4000-8000-000000000001', '71000000-0000-4000-8000-000000000001', 'release-one', 'Release Site One'),
   ('71200000-0000-4000-8000-000000000002', '71000000-0000-4000-8000-000000000001', 'release-one-peer', 'Release Site One Peer'),
   ('72200000-0000-4000-8000-000000000002', '72000000-0000-4000-8000-000000000002', 'release-two', 'Release Site Two');
+INSERT INTO identities (id, issuer, subject, kind) VALUES
+  ('71100000-0000-4000-8000-000000000001', 'urn:navocms:test', 'release-one', 'human'),
+  ('71200000-0000-4000-8000-000000000002', 'urn:navocms:test', 'release-peer', 'human'),
+  ('72200000-0000-4000-8000-000000000002', 'urn:navocms:test', 'release-two', 'human');
 INSERT INTO environments (id, tenant_id, site_id, kind) VALUES
   ('71300000-0000-4000-8000-000000000001', '71000000-0000-4000-8000-000000000001', '71100000-0000-4000-8000-000000000001', 'staging'),
   ('71300000-0000-4000-8000-000000000002', '71000000-0000-4000-8000-000000000001', '71200000-0000-4000-8000-000000000002', 'staging'),
@@ -54,6 +58,26 @@ INSERT INTO reviewed_astro_artifacts (
   '72800000-0000-4000-8000-000000000002', repeat('c', 64), repeat('d', 64),
   concat('sha256:', repeat('e', 64)), repeat('f', 40), '{}'::jsonb, '{}'::jsonb
 );
+INSERT INTO reviewed_astro_build_inputs (
+  id, tenant_id, site_id, environment_id, environment_key, release_id,
+  release_hash, artifact_hash, binding_digest, render_json, created_by
+) VALUES (
+  '73000000-0000-4000-8000-000000000001',
+  '71000000-0000-4000-8000-000000000001',
+  '71200000-0000-4000-8000-000000000002',
+  '71300000-0000-4000-8000-000000000002', 'default',
+  '71800000-0000-4000-8000-000000000002', repeat('e', 64), repeat('f', 64),
+  concat('sha256:', repeat('a', 64)), '{}'::jsonb,
+  '71200000-0000-4000-8000-000000000002'
+), (
+  '73000000-0000-4000-8000-000000000002',
+  '72000000-0000-4000-8000-000000000002',
+  '72200000-0000-4000-8000-000000000002',
+  '72300000-0000-4000-8000-000000000002', 'default',
+  '72800000-0000-4000-8000-000000000002', repeat('c', 64), repeat('d', 64),
+  concat('sha256:', repeat('e', 64)), '{}'::jsonb,
+  '72200000-0000-4000-8000-000000000002'
+);
 
 SET ROLE navocms_app;
 SELECT set_config('navocms.tenant_id', '71000000-0000-4000-8000-000000000001', true);
@@ -65,6 +89,7 @@ DECLARE visible_releases integer;
 DECLARE visible_outbox integer;
 DECLARE visible_reviewed_artifacts integer;
 DECLARE same_tenant_cross_site_artifacts integer;
+DECLARE visible_build_inputs integer;
 BEGIN
   SELECT count(*) INTO visible_releases FROM navocms.release_candidates;
   IF visible_releases <> 2 THEN RAISE EXCEPTION 'RLS exposed % release candidates instead of 2', visible_releases; END IF;
@@ -87,6 +112,20 @@ BEGIN
   SELECT count(*) INTO same_tenant_cross_site_artifacts FROM navocms.reviewed_astro_artifacts
    WHERE site_id = '71200000-0000-4000-8000-000000000002';
   IF same_tenant_cross_site_artifacts <> 0 THEN RAISE EXCEPTION 'RLS exposed % same-tenant cross-site reviewed artifacts', same_tenant_cross_site_artifacts; END IF;
+  INSERT INTO navocms.reviewed_astro_build_inputs (
+    id, tenant_id, site_id, environment_id, environment_key, release_id,
+    release_hash, artifact_hash, binding_digest, render_json, created_by
+  ) VALUES (
+    '73000000-0000-4000-8000-000000000003',
+    '71000000-0000-4000-8000-000000000001',
+    '71100000-0000-4000-8000-000000000001',
+    '71300000-0000-4000-8000-000000000001', 'default',
+    '71800000-0000-4000-8000-000000000001', repeat('a', 64), repeat('b', 64),
+    concat('sha256:', repeat('c', 64)), '{}'::jsonb,
+    '71100000-0000-4000-8000-000000000001'
+  );
+  SELECT count(*) INTO visible_build_inputs FROM navocms.reviewed_astro_build_inputs;
+  IF visible_build_inputs <> 1 THEN RAISE EXCEPTION 'RLS exposed % reviewed build inputs instead of 1', visible_build_inputs; END IF;
   BEGIN
     INSERT INTO navocms.domain_outbox (id, tenant_id, site_id, correlation_id, operation_key, event_type, consequence, idempotency_key, payload_json)
     VALUES ('72900000-0000-4000-8000-000000000002', '72000000-0000-4000-8000-000000000002', '72200000-0000-4000-8000-000000000002', '72910000-0000-4000-8000-000000000002', 'foreign', 'test', 'G1', 'foreign', '{}');
@@ -134,6 +173,28 @@ BEGIN
   BEGIN
     DELETE FROM navocms.reviewed_astro_artifacts WHERE id = '71900000-0000-4000-8000-000000000001';
     RAISE EXCEPTION 'reviewed artifact delete privilege unexpectedly succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO navocms.reviewed_astro_build_inputs (
+      id, tenant_id, site_id, environment_id, environment_key, release_id,
+      release_hash, artifact_hash, binding_digest, render_json, created_by
+    ) VALUES (
+      '73000000-0000-4000-8000-000000000004',
+      '72000000-0000-4000-8000-000000000002',
+      '72200000-0000-4000-8000-000000000002',
+      '72300000-0000-4000-8000-000000000002', 'default',
+      '72800000-0000-4000-8000-000000000002', repeat('c', 64), repeat('d', 64),
+      concat('sha256:', repeat('e', 64)), '{}'::jsonb,
+      '72200000-0000-4000-8000-000000000002'
+    );
+    RAISE EXCEPTION 'foreign reviewed build input write unexpectedly succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    UPDATE navocms.reviewed_astro_build_inputs SET binding_digest = concat('sha256:', repeat('e', 64))
+      WHERE id = '73000000-0000-4000-8000-000000000003';
+    RAISE EXCEPTION 'reviewed build input update privilege unexpectedly succeeded';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 END
@@ -253,6 +314,38 @@ BEGIN
   END;
 END
 $artifact_integrity$;
+
+DO $build_input_integrity$
+BEGIN
+  BEGIN
+    INSERT INTO navocms.reviewed_astro_build_inputs (
+      id, tenant_id, site_id, environment_id, environment_key, release_id,
+      release_hash, artifact_hash, binding_digest, render_json, created_by
+    ) VALUES (
+      '73000000-0000-4000-8000-000000000005',
+      '71000000-0000-4000-8000-000000000001',
+      '71100000-0000-4000-8000-000000000001',
+      '71300000-0000-4000-8000-000000000001', 'default',
+      '72800000-0000-4000-8000-000000000002', repeat('c', 64), repeat('d', 64),
+      concat('sha256:', repeat('a', 64)), '{}'::jsonb,
+      '71100000-0000-4000-8000-000000000001'
+    );
+    RAISE EXCEPTION 'wrong reviewed build input release foreign key unexpectedly succeeded';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE navocms.reviewed_astro_build_inputs SET binding_digest = concat('sha256:', repeat('f', 64))
+      WHERE id = '73000000-0000-4000-8000-000000000003';
+    RAISE EXCEPTION 'reviewed build input trigger allowed update';
+  EXCEPTION WHEN raise_exception THEN NULL;
+  END;
+  BEGIN
+    DELETE FROM navocms.reviewed_astro_build_inputs WHERE id = '73000000-0000-4000-8000-000000000003';
+    RAISE EXCEPTION 'reviewed build input trigger allowed delete';
+  EXCEPTION WHEN raise_exception THEN NULL;
+  END;
+END
+$build_input_integrity$;
 
 ROLLBACK;
 

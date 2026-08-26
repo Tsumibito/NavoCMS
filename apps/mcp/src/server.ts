@@ -24,6 +24,7 @@ import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReviewedAstroArtifactStore } from "./postgres-reviewed-astro-artifact-store.js";
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
 import { composeCloudflareStagingReleaseProvider } from "./staging-composition.js";
+import { StagingOperationalRuntime } from "./staging-operational-runtime.js";
 
 const resource = required("NAVOCMS_MCP_RESOURCE");
 const issuer = required("NAVOCMS_OIDC_ISSUER");
@@ -76,20 +77,35 @@ const media = database ? new McpMediaService(new PostgresMediaRepository(databas
 
 let service: McpEditingService;
 let reviewedAstroResolver: ReviewedAstroArtifactResolver | undefined;
+let stagingOperations: StagingOperationalRuntime | undefined;
 if (database) {
   const deliveryRepositoryContext = {
     site: { ...deploymentScope, name: "staging-delivery", primaryLocale: "en", locales: ["en"] },
     principalId: runtimePrincipalId!
   };
+  const artifactStore = stagingRuntime.selection === "cloudflare-staging"
+    ? new PostgresReviewedAstroArtifactStore(database, deliveryRepositoryContext, deploymentEnvironmentKey)
+    : undefined;
   const stagingComposition = stagingRuntime.selection === "cloudflare-staging"
     ? composeCloudflareStagingReleaseProvider({
       binding: stagingRuntime.binding,
       environmentKey: deploymentEnvironmentKey,
-      store: new PostgresReviewedAstroArtifactStore(database, deliveryRepositoryContext, deploymentEnvironmentKey),
+      store: artifactStore!,
       phases: new PostgresDeliveryPhaseStore(database, deliveryRepositoryContext, { events: new PostgresEventStore(database) }),
       secrets: stagingRuntime.secrets
     })
     : undefined;
+  if (stagingRuntime.selection === "cloudflare-staging") {
+    // Required only by the private trusted builder. This directory is never an
+    // MCP argument and may be a detached read-only checkout on the host.
+    stagingOperations = new StagingOperationalRuntime({
+      database,
+      environmentKey: deploymentEnvironmentKey,
+      reviewedSourceCommit: required("NAVOCMS_REVIEWED_SOURCE_COMMIT"),
+      toolchainDirectory: required("NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN"),
+      readinessContext: deliveryRepositoryContext
+    });
+  }
   reviewedAstroResolver = stagingComposition?.resolver;
   const releaseProvider = stagingComposition?.provider ?? new EmbeddedReleaseProvider();
   service = new McpEditingService(
@@ -104,7 +120,7 @@ if (database) {
       previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800),
       approvalTtlSeconds: environmentInteger("NAVOCMS_APPROVAL_TTL_SECONDS", 900, 86_400),
       approvalPolicyVersion: process.env.NAVOCMS_APPROVAL_POLICY_VERSION ?? "navocms.release-approval.v1"
-    }, database, new PostgresRuntimePolicyGuard(database)
+    }, database, new PostgresRuntimePolicyGuard(database), stagingOperations
   );
 } else {
   if (runtimeMode !== "development") throw new Error("NAVOCMS_DATABASE_URL is required outside development mode");
@@ -151,13 +167,15 @@ const server = createMcpHttpServer({
     readiness: async () => {
       const databaseReady = await database.ready();
       const resolverReady = reviewedAstroResolver ? await reviewedAstroResolver.ready() : true;
-      const providerReady = stagingRuntime.selection !== "cloudflare-staging" || resolverReady;
+      const builderReady = stagingOperations ? await stagingOperations.ready() : true;
+      const providerReady = stagingRuntime.selection !== "cloudflare-staging" || (resolverReady && builderReady);
       return {
         ready: databaseReady && (pluginHost?.state === "healthy") && providerReady,
         ...(pluginHost ? { pluginHost: pluginHost.status() } : {}),
         ...(stagingRuntime.selection === "cloudflare-staging" ? {
           provider: { key: "cloudflare-staging" as const, ready: providerReady },
           resolver: { ready: resolverReady, environment: "staging" as const, environmentKey: deploymentEnvironmentKey },
+          builder: { ready: builderReady, environment: "staging" as const, environmentKey: deploymentEnvironmentKey, policyDigest: stagingOperations!.policyDigest() },
           staging: safeStagingRuntimeIdentifiers(stagingRuntime)
         } : { provider: { key: "embedded" as const, ready: true } })
       };

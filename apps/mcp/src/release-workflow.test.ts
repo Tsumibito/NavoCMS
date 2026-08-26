@@ -5,11 +5,12 @@ import type {
 } from "@navocms/kernel";
 import { InMemoryEventStore } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, siteRoleAuthority, type AuthorizationContext } from "@navocms/security";
+import type { AstroRenderInput } from "@navocms/design-astro";
 import { describe, expect, it } from "vitest";
 
 import { InMemoryReleaseWorkflowRepository } from "./release-repository.js";
 import { InMemoryEditingRepository } from "./repository.js";
-import { McpEditingService } from "./service.js";
+import { McpEditingService, type StagingAstroOperations } from "./service.js";
 
 const site = Object.freeze({
   tenantId: "11111111-1111-4111-8111-111111111111",
@@ -103,7 +104,44 @@ describe("durable release workflow", () => {
     await expect(service.reconcileRelease(context, { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: "reconcile-rollback-001" })).resolves.toMatchObject({ release: { status: "rolled_back" }, publication: { releaseId: first.releaseId } });
     expect(provider.rollbackCount).toBe(2);
   });
+
+  it("automatically persists the trusted staging input at preview and gates publish before provider I/O", async () => {
+    const provider = new RecoverableProvider();
+    const operations = new CapturingStagingOperations();
+    const repository = new InMemoryEditingRepository(); repository.registerSite(site);
+    const service = new McpEditingService(repository, new InMemoryEventStore(), undefined, new InMemoryReleaseWorkflowRepository(), provider, {}, undefined, undefined, operations);
+    const context = requestContext();
+    const preview = await draftPreviewApprove(service, context, "staging-input", "Staging input", "staging-input");
+    expect(operations.persisted).toEqual([preview.releaseId]);
+    await service.publishRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-staging-input-001" });
+    expect(operations.built).toEqual([preview.releaseId]);
+    expect(provider.publishCount).toBe(1);
+  });
+
+  it("restarts from an approved staging release, builds once during reconcile, and continues without duplicate provider effect", async () => {
+    const provider = new RecoverableProvider();
+    const operations = new CapturingStagingOperations();
+    const repository = new InMemoryEditingRepository(); repository.registerSite(site);
+    const releases = new InMemoryReleaseWorkflowRepository(); const events = new InMemoryEventStore();
+    const first = new McpEditingService(repository, events, undefined, releases, provider, {}, undefined, undefined, operations);
+    const context = requestContext();
+    const preview = await draftPreviewApprove(first, context, "restart-approved", "Restart approved", "restart-approved");
+    const restarted = new McpEditingService(repository, events, undefined, releases, provider, {}, undefined, undefined, operations);
+    await expect(restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approved-restart-001" })).resolves.toMatchObject({ release: { status: "published" } });
+    expect(operations.built).toEqual([preview.releaseId]);
+    expect(provider.publishCount).toBe(1);
+    await restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approved-restart-002" });
+    expect(provider.publishCount).toBe(1);
+  });
 });
+
+class CapturingStagingOperations implements StagingAstroOperations {
+  public readonly persisted: string[] = [];
+  public readonly built: string[] = [];
+  public prepare(): AstroRenderInput { return { anchors: { content: `sha256:${"a".repeat(64)}`, design: `sha256:${"b".repeat(64)}`, delivery: `sha256:${"c".repeat(64)}`, governance: `sha256:${"d".repeat(64)}` } } as AstroRenderInput; }
+  public async persistPreviewInput(_: Parameters<StagingAstroOperations["persistPreviewInput"]>[0], __: Parameters<StagingAstroOperations["persistPreviewInput"]>[1], release: Parameters<StagingAstroOperations["persistPreviewInput"]>[2]): Promise<void> { this.persisted.push(release.id); }
+  public async ensureArtifact(_: Parameters<StagingAstroOperations["ensureArtifact"]>[0], __: Parameters<StagingAstroOperations["ensureArtifact"]>[1], release: Parameters<StagingAstroOperations["ensureArtifact"]>[2]): Promise<void> { this.built.push(release.id); }
+}
 
 class RecoverableProvider implements ReleaseProvider {
   public readonly key = "test.recoverable.v1";

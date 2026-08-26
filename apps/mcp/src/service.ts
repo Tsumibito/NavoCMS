@@ -24,6 +24,8 @@ import {
   type StoredRelease
 } from "./release-repository.js";
 import { inputFingerprint, type EditingRepository, type RepositoryContext } from "./repository.js";
+import type { AstroRenderInput } from "@navocms/design-astro";
+import type { ContentRevision } from "@navocms/content";
 
 interface IdempotentRecord<T> {
   readonly fingerprint: string;
@@ -52,6 +54,13 @@ export interface RuntimePolicyGuard {
     readonly operation: string;
     readonly idempotencyKey: string;
   }): Promise<void>;
+}
+
+/** Internal runtime boundary; it is never registered in MCP tool discovery. */
+export interface StagingAstroOperations {
+  prepare(site: RepositoryContext["site"], revision: ContentRevision): AstroRenderInput;
+  persistPreviewInput(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease, render: AstroRenderInput): Promise<void>;
+  ensureArtifact(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease): Promise<void>;
 }
 
 export class InMemoryIdempotencyStore implements IdempotencyStore {
@@ -89,6 +98,7 @@ export class McpEditingService {
   readonly #releaseProvider: ReleaseProvider;
   readonly #database: Pick<PostgresDatabase, "withScope"> | undefined;
   readonly #policyGuard: RuntimePolicyGuard | undefined;
+  readonly #stagingAstro: StagingAstroOperations | undefined;
   readonly #releaseConfig: Readonly<{
     environmentKey: string;
     previewBaseUrl: string;
@@ -111,7 +121,8 @@ export class McpEditingService {
       readonly approvalPolicyVersion?: string;
     } = {},
     database?: Pick<PostgresDatabase, "withScope">,
-    policyGuard?: RuntimePolicyGuard
+    policyGuard?: RuntimePolicyGuard,
+    stagingAstro?: StagingAstroOperations
   ) {
     this.#repository = repository;
     this.#events = events;
@@ -120,6 +131,7 @@ export class McpEditingService {
     this.#releaseProvider = releaseProvider;
     this.#database = database;
     this.#policyGuard = policyGuard;
+    this.#stagingAstro = stagingAstro;
     this.#releaseConfig = Object.freeze({
       environmentKey: releaseConfig.environmentKey ?? "development",
       previewBaseUrl: (releaseConfig.previewBaseUrl ?? "https://preview.example.test").replace(/\/$/, ""),
@@ -275,13 +287,15 @@ export class McpEditingService {
       const revision = await this.#repository.getRevision(repositoryContext, revisionId);
       const workflow = await this.#repository.workflowFor(repositoryContext, revision.id);
       const environmentId = await this.#releases.environmentId(repositoryContext, this.#releaseConfig.environmentKey);
+      const stagingRender = this.#stagingAstro?.prepare(repositoryContext.site, revision);
       const { manifest, releaseHash } = createReleaseManifest({
         tenantId: repositoryContext.site.tenantId,
         siteId: repositoryContext.site.siteId,
         environmentId,
         revisionId: revision.id,
         sourceHash: revision.sourceHash,
-        workflow
+        workflow,
+        ...(stagingRender ? { anchors: Object.fromEntries(Object.entries(stagingRender.anchors).map(([key, value]) => [key, value.slice("sha256:".length)])) } : {})
       });
       const title = typeof revision.metadata.title === "string" ? revision.metadata.title
         : typeof revision.metadata.name === "string" ? revision.metadata.name : "Untitled";
@@ -301,6 +315,7 @@ export class McpEditingService {
         previewExpiresAt: expiresAt,
         correlationId: revision.documentId
       });
+      if (stagingRender) await this.#stagingAstro!.persistPreviewInput(context, repositoryContext, release, stagingRender);
       await this.appendEvent(context, "io.navocms.release.preview.created.v1", release.id, idempotencyKey, {
         phase: "verified",
         releaseId: release.id,
@@ -356,7 +371,7 @@ export class McpEditingService {
   }): Promise<object> {
     const repositoryContext = await this.requireSite(context, "content:publish");
     return this.idempotent({ ...scope(repositoryContext), principalId: context.authorization.principal.id }, "release_publish", input.idempotencyKey, input, async () => {
-      const publication = await this.applyAndVerify(repositoryContext, input.releaseId, input.releaseHash);
+      const publication = await this.applyAndVerify(context, repositoryContext, input.releaseId, input.releaseHash);
       await this.appendEvent(context, "io.navocms.release.published.v1", input.releaseId, input.idempotencyKey, {
         phase: "verified", releaseId: input.releaseId, releaseHash: input.releaseHash,
         artifactHash: publication.artifactHash, providerKey: publication.providerKey
@@ -379,8 +394,8 @@ export class McpEditingService {
         await this.#releaseProvider.rollback(state.rollback.current, state.rollback.target);
         await this.#releases.completeRollback(repositoryContext, input.releaseId, state.rollback.current.id, state.rollback.target.id);
         publication = state.rollback.target;
-      } else if (state.release.status === "publishing" && !publication) {
-        publication = await this.applyAndVerify(repositoryContext, input.releaseId, input.releaseHash);
+      } else if ((state.release.status === "approved" || state.release.status === "publishing") && !publication) {
+        publication = await this.applyAndVerify(context, repositoryContext, input.releaseId, input.releaseHash);
       } else if (publication && (state.release.status === "verification_failed" || publication.status === "verification_failed")) {
         const valid = await this.#releaseProvider.verify(publication);
         if (!valid) throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider still does not expose the previewed artifact");
@@ -418,7 +433,12 @@ export class McpEditingService {
     return preview ? Object.freeze({ mediaType: preview.mediaType, body: preview.body }) : undefined;
   }
 
-  private async applyAndVerify(repositoryContext: RepositoryContext, releaseId: string, releaseHash: string): Promise<PublicationRecord> {
+  private async applyAndVerify(context: McpRequestContext, repositoryContext: RepositoryContext, releaseId: string, releaseHash: string): Promise<PublicationRecord> {
+    const candidate = await this.#releases.getRelease(repositoryContext, releaseId);
+    if (candidate.releaseHash !== releaseHash) throw new McpEditingError("STALE_RELEASE_APPROVAL", "Release hash does not match the previewed candidate");
+    // The trusted local build is completed before release state moves to
+    // publishing or the external provider receives any coordinates.
+    if (this.#stagingAstro) await this.#stagingAstro.ensureArtifact(context, repositoryContext, candidate);
     const prepared = await this.#releases.beginPublication(repositoryContext, releaseId, releaseHash);
     const applied = await this.#releaseProvider.publish({
       releaseId,

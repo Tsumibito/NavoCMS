@@ -1,9 +1,6 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { astroContentDigest, astroMediaDigest, renderAstroArtifact, type AstroRenderInput } from "@navocms/design-astro";
 import { contentHash } from "@navocms/content";
@@ -11,7 +8,7 @@ import { createReleaseManifest } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS } from "@navocms/security";
 import { describe, expect, it } from "vitest";
 
-import { GitPinnedAstroBuildRunner, TrustedAstroBuilder, readBoundedAstroOutput, reviewedAstroBuildBindingDigest, runBoundedTrustedAstroProcess, type ReviewedAstroArtifactRegistrar, type ReviewedAstroBuildInputs, type ReviewedAstroBuildInputStore, type TrustedAstroBuildRunner } from "./trusted-astro-builder.js";
+import { ImageAttestedAstroBuildRunner, TrustedAstroBuilder, readBoundedAstroOutput, reviewedAstroBuildBindingDigest, runBoundedTrustedAstroProcess, type ReviewedAstroArtifactRegistrar, type ReviewedAstroBuildInputs, type ReviewedAstroBuildInputStore, type TrustedAstroBuildRunner } from "./trusted-astro-builder.js";
 import type { RegisterReviewedAstroArtifactInput, ReviewedAstroArtifactAuthority } from "./postgres-reviewed-astro-artifact-store.js";
 import type { ReviewedAstroArtifactRecord } from "./reviewed-astro-resolver.js";
 import type { McpRequestContext } from "./model.js";
@@ -21,7 +18,6 @@ const siteId = "22222222-2222-4222-8222-222222222222";
 const releaseId = "33333333-3333-4333-8333-333333333333";
 const releaseArtifactHash = "b".repeat(64);
 const repositoryContext = Object.freeze({ site: { tenantId, siteId, name: "Trusted Astro", primaryLocale: "en", locales: ["en"] }, principalId: "44444444-4444-4444-8444-444444444444" });
-const exec = promisify(execFile);
 
 describe("trusted Astro builder", () => {
   it("uses hash-only request plus checked-out attestation and registers only two matching builds", async () => {
@@ -94,27 +90,44 @@ describe("trusted Astro builder", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("uses a clean detached reviewed checkout, checkout-bound offline toolchain, and two real builds", async () => {
-    const root = await mkdtemp(join(tmpdir(), "navocms-reviewed-checkout-")); const checkout = join(root, "checkout"); const repository = fileURLToPath(new URL("../../..", import.meta.url));
+  it("attests a complete staged image toolchain and fails closed for an unbound source commit", async () => {
+    const root = await stagedImageToolchain();
     try {
-      await exec("git", ["-C", repository, "worktree", "add", "--detach", checkout, "HEAD"]);
-      const input = await reviewedInput(); const registrar = new CapturingRegistrar(); const runner = new GitPinnedAstroBuildRunner({ reviewedCheckoutDirectory: checkout, processTimeoutMs: 30_000, preparationTimeoutMs: 120_000 });
+      const runner = new ImageAttestedAstroBuildRunner({ sourceCommitSha: "a".repeat(40), toolchainDirectory: root });
       const stable = await runner.attest(); expect((await runner.attest()).toolchainFingerprint).toBe(stable.toolchainFingerprint);
-      const result = await builder(countingStore(input), registrar, runner).buildAndRegister(humanContext(), request(input));
-      const { stdout } = await exec("git", ["-C", checkout, "rev-parse", "--verify", "HEAD^{commit}"]);
-      expect(result.sourceCommitSha).toBe(stdout.trim()); expect(result.output["index.html"]).toContain("data-navocms-zaraz-loader"); expect(registrar.calls).toHaveLength(1);
-      const worktrees = (await exec("git", ["-C", checkout, "worktree", "list", "--porcelain"])).stdout;
-      expect(worktrees).not.toContain("navocms-trusted-astro-");
-      const attestation = await runner.attest(); const cli = await realpath(join(checkout, "apps/design-catalogue/node_modules/astro/bin/astro.mjs"));
-      // Break the pnpm hard link before simulating an in-checkout replacement:
-      // a test must not mutate the shared offline package store.
-      await rm(cli); await writeFile(cli, "throw new Error('malicious reviewed toolchain replacement');\n");
-      await expect(runner.build(attestation, renderAstroArtifact(input.render))).rejects.toMatchObject({ code: "REVIEWED_ASTRO_CHECKOUT_DRIFT" });
-      expect(registrar.calls).toHaveLength(1);
-      await writeFile(join(checkout, "unreviewed.txt"), "drift"); await expect(runner.attest()).rejects.toMatchObject({ code: "REVIEWED_ASTRO_CHECKOUT_DIRTY" });
-    } finally { await exec("git", ["-C", repository, "worktree", "remove", "--force", checkout]).catch(() => undefined); await rm(root, { recursive: true, force: true }); }
-  }, 180_000);
+      await expect(new ImageAttestedAstroBuildRunner({ sourceCommitSha: "unbound", toolchainDirectory: root }).attest()).rejects.toMatchObject({ code: "REVIEWED_ASTRO_CHECKOUT_INVALID" });
+      await expect(new ImageAttestedAstroBuildRunner({ sourceCommitSha: "a".repeat(40), toolchainDirectory: join(root, "missing") }).attest()).rejects.toMatchObject({ code: "REVIEWED_ASTRO_TOOLCHAIN_INVALID" });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("fingerprints executable image-toolchain files, not merely package manifests", async () => {
+    const root = await mkdtemp(join(tmpdir(), "navocms-image-toolchain-"));
+    try {
+      await writeStagedImageToolchain(root);
+      const runner = new ImageAttestedAstroBuildRunner({ sourceCommitSha: "a".repeat(40), toolchainDirectory: root });
+      const first = await runner.attest();
+      await writeFile(join(root, "astro", "bin", "astro.mjs"), "throw new Error('mutated');\n");
+      const second = await runner.attest();
+      expect(second.toolchainFingerprint).not.toBe(first.toolchainFingerprint);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });
+
+async function stagedImageToolchain(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "navocms-image-toolchain-"));
+  await writeStagedImageToolchain(root);
+  return root;
+}
+
+async function writeStagedImageToolchain(root: string): Promise<void> {
+  for (const [name, version] of [["astro", "7.2.4"], ["@astrojs/check", "0.9.10"], ["typescript", "5.9.3"]] as const) {
+    const directory = join(root, name); await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name, version }));
+    await writeFile(join(directory, "runtime.mjs"), `export const ${name.replace(/[^a-z]/g, "_")} = true;\n`);
+  }
+  await mkdir(join(root, "astro", "bin"), { recursive: true }); await writeFile(join(root, "astro", "bin", "astro.mjs"), "export {};\n");
+  await symlink("./runtime.mjs", join(root, "astro", "runtime-link.mjs"));
+}
 
 class CapturingRegistrar implements ReviewedAstroArtifactRegistrar {
   readonly calls: RegisterReviewedAstroArtifactInput[] = [];
