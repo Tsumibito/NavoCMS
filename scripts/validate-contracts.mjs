@@ -32,7 +32,8 @@ const schemaPaths = {
   event: "schemas/event-envelope.schema.json",
   mediaAsset: "schemas/media-asset.schema.json",
   astroArtifact: "schemas/astro-artifact-manifest.schema.json",
-  cloudflareArtifactReference: "schemas/cloudflare-artifact-reference.schema.json"
+  cloudflareArtifactReference: "schemas/cloudflare-artifact-reference.schema.json",
+  cloudflareStagingBinding: "schemas/cloudflare-staging-binding.schema.json"
 };
 
 const validators = {};
@@ -147,7 +148,8 @@ const fixtureKinds = [
   { suffix: ".event.json", validator: "event", semantic: semanticEvent },
   { suffix: ".media-asset.json", validator: "mediaAsset", semantic: semanticMediaAsset },
   { suffix: ".astro-artifact-manifest.json", validator: "astroArtifact", semantic: semanticAstroArtifact },
-  { suffix: ".cloudflare-artifact-reference.json", validator: "cloudflareArtifactReference", semantic: () => {} }
+  { suffix: ".cloudflare-artifact-reference.json", validator: "cloudflareArtifactReference", semantic: () => {} },
+  { suffix: ".cloudflare-staging-binding.json", validator: "cloudflareStagingBinding", semantic: () => {} }
 ];
 
 let validated = 0;
@@ -171,7 +173,8 @@ const negativeChecks = [
   ["event", { specversion: "1.0" }],
   ["mediaAsset", { apiVersion: "navocms.io/v0alpha1", kind: "MediaAsset" }],
   ["astroArtifact", { schema: "io.navocms.astro-artifact.v1" }],
-  ["cloudflareArtifactReference", { schema: "io.navocms.cloudflare-artifact-reference.v1" }]
+  ["cloudflareArtifactReference", { schema: "io.navocms.cloudflare-artifact-reference.v1" }],
+  ["cloudflareStagingBinding", { schema: "io.navocms.cloudflare-staging-binding.v1" }]
 ];
 
 for (const [name, invalidDocument] of negativeChecks) {
@@ -192,6 +195,12 @@ const cloudflareReferenceAdversarialFixtures = fixtureFiles.filter((file) => fil
 assert(cloudflareReferenceAdversarialFixtures.length > 0, "Expected an adversarial Cloudflare artifact reference fixture");
 for (const file of cloudflareReferenceAdversarialFixtures) {
   assert(!validators.cloudflareArtifactReference(await readJson(file)), `${file}: invalid Cloudflare artifact reference fixture was accepted`);
+}
+
+const cloudflareStagingAdversarialFixtures = fixtureFiles.filter((file) => file.endsWith(".cloudflare-staging-binding.invalid.json"));
+assert(cloudflareStagingAdversarialFixtures.length > 0, "Expected an adversarial Cloudflare staging binding fixture");
+for (const file of cloudflareStagingAdversarialFixtures) {
+  assert(!validators.cloudflareStagingBinding(await readJson(file)), `${file}: invalid Cloudflare staging binding fixture was accepted`);
 }
 
 const astroCorpus = await readJson("examples/astro/path-and-identifier-corpus.json");

@@ -91,6 +91,9 @@ importers:
       '@navocms/content':
         specifier: workspace:*
         version: link:../../packages/content
+      '@navocms/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@navocms/delivery-cloudflare':
         specifier: workspace:*
         version: link:../../packages/delivery-cloudflare

@@ -381,13 +381,13 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
   }
 
   public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
-    assertReleaseInput(input);
+    validateReleaseProviderInput(input);
     const deployable = await this.#options.resolver.resolve({
       releaseId: input.releaseId,
       releaseHash: input.releaseHash,
       releaseArtifact: input.artifact
     });
-    assertDeployable(deployable, input);
+    verifyDeployableArtifact(deployable, input);
     const referenceHash = immutableReferenceHash(deployable.reference);
     const found = await this.#call("cloudflare-pages", "discover", input, referenceHash, () => (
       this.#options.cloudflare.findDeployment({ projectKey: this.#options.projectKey, referenceHash, environment: "preview" })
@@ -639,13 +639,19 @@ export function immutableReferenceHash(reference: ImmutableArtifactReference): s
   return sha256(canonical(reference));
 }
 
-function assertReleaseInput(input: ReleaseProviderPublishInput): void {
+export function validateReleaseProviderInput(input: ReleaseProviderPublishInput): void {
   if (!safeIdentifier(input.releaseId) || !/^[a-f0-9]{64}$/.test(input.releaseHash) || !input.artifact || !/^[a-f0-9]{64}$/.test(input.artifact.hash)) {
     throw new CloudflareDeliveryError("RELEASE_INPUT_INVALID", "Cloudflare provider requires an exact immutable release artifact");
   }
 }
 
-function assertDeployable(deployable: DeployableArtifact, input: ReleaseProviderPublishInput): void {
+/** Shared complete release and resolved-output preflight for provider and dry-run paths. */
+export function preflightDeployableArtifact(input: ReleaseProviderPublishInput, deployable: DeployableArtifact): void {
+  validateReleaseProviderInput(input);
+  verifyDeployableArtifact(deployable, input);
+}
+
+export function verifyDeployableArtifact(deployable: DeployableArtifact, input: Pick<ReleaseProviderPublishInput, "releaseHash" | "artifact">): void {
   assertReference(deployable.reference);
   if (deployable.reference.releaseHash !== input.releaseHash || deployable.reference.releaseArtifactHash !== input.artifact.hash) {
     throw new CloudflareDeliveryError("ARTIFACT_REFERENCE_MISMATCH", "Resolved artifact does not match the approved release");

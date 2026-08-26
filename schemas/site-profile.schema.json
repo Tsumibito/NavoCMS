@@ -23,7 +23,7 @@
       "additionalProperties": false,
       "required": ["environment", "locales", "anchors", "plugins", "bindings", "urlPolicy"],
       "properties": {
-        "environment": { "enum": ["development", "preview", "production"] },
+        "environment": { "enum": ["development", "preview", "staging", "production"] },
         "locales": { "$ref": "#/$defs/locales" },
         "anchors": { "$ref": "#/$defs/anchors" },
         "plugins": {

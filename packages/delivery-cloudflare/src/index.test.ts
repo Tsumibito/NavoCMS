@@ -39,6 +39,13 @@ const artifact: ReleaseArtifact = Object.freeze({ mediaType: "text/html; charset
 const input: ReleaseProviderPublishInput = Object.freeze({ releaseId: "release-1", releaseHash, artifact });
 
 describe("Cloudflare Pages release provider", () => {
+  it("rejects invalid release input before crossing the resolver boundary", async () => {
+    let resolverCalls = 0;
+    const provider = new CloudflarePagesReleaseProvider({ projectKey: "pages-project", previewBranch: "preview", productionBranch: "main", coolifyApplicationKey: "coolify-app", resolver: { resolve: async () => { resolverCalls += 1; return deployable(reference); } }, cloudflare: new FakeCloudflare(), coolify: new FakeCoolify(), phases: new InMemoryDeliveryPhaseStore() });
+    await expect(provider.publish({ ...input, releaseId: "../unsafe" })).rejects.toMatchObject({ code: "RELEASE_INPUT_INVALID" });
+    expect(resolverCalls).toBe(0);
+  });
+
   it("uses one immutable Cloudflare preview and one exact Coolify commit promotion across replay", async () => {
     const cloudflare = new FakeCloudflare();
     const coolify = new FakeCoolify();
