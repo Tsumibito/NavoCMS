@@ -12,7 +12,7 @@ import {
   type VerifiedAccessToken
 } from "@navocms/security";
 
-import { createMcpServer } from "./mcp.js";
+import { createMcpServer, type DeliveryPhaseRecovery } from "./mcp.js";
 import { MCP_LIMITS } from "./model.js";
 import { McpEditingService } from "./service.js";
 import { McpMediaService } from "./media-service.js";
@@ -20,6 +20,7 @@ import { McpMediaService } from "./media-service.js";
 export interface McpHttpOptions {
   readonly service: McpEditingService;
   readonly media?: McpMediaService;
+  readonly deliveryRecovery?: DeliveryPhaseRecovery;
   readonly verifier: AccessTokenVerifier;
   readonly resource: string;
   readonly authorizationServers: readonly string[];
@@ -114,7 +115,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
     } catch {
       return sendJson(response, 403, { error: "SITE_MEMBERSHIP_REQUIRED" });
     }
-    const server = createMcpServer(options.service, { authorization: context }, options.media);
+    const server = createMcpServer(options.service, { authorization: context }, options.media, options.deliveryRecovery);
     const transport = new StreamableHTTPServerTransport();
     response.on("close", () => {
       void transport.close();

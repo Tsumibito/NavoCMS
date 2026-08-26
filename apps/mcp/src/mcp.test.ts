@@ -303,6 +303,49 @@ describe("MCP protocol and agent evaluations", () => {
     await expect(service.listSites(requestContext("publisher", "33333333-3333-4333-8333-333333333333"))).rejects.toMatchObject({ code: "SITE_NOT_REGISTERED" });
   });
 
+  it("exposes delivery phase recovery only to an authenticated publisher human", async () => {
+    const { service } = fixture("publisher");
+    const calls: unknown[] = [];
+    const recovery = {
+      async notApplied(context: unknown, input: unknown) { calls.push({ operation: "not-applied", context, input }); },
+      async resolve(context: unknown, input: unknown) { calls.push({ operation: "resolve", context, input }); }
+    };
+    const humanContext = requestContext("publisher");
+    const server = createMcpServer(service, humanContext, undefined, recovery);
+    const client = new Client({ name: "navocms-delivery-recovery", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const names = (await client.listTools()).tools.map(({ name }) => name);
+      expect(names).toEqual(expect.arrayContaining(["delivery_phase_not_applied", "delivery_phase_resolve"]));
+      const result = await client.callTool({ name: "delivery_phase_not_applied", arguments: {
+        releaseId: "11111111-1111-4111-8111-111111111111",
+        referenceHash: "a".repeat(64),
+        phase: "publish.coolify",
+        evidenceHash: "b".repeat(64),
+        observedAt: "2026-08-26T21:19:04.000Z"
+      } });
+      expect(result.isError).not.toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ operation: "not-applied", input: { phase: "publish.coolify", evidenceHash: "b".repeat(64) } });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+
+    const agentContext = { authorization: { ...humanContext.authorization, principal: { ...humanContext.authorization.principal, kind: "agent" as const } } };
+    const agentServer = createMcpServer(service, agentContext, undefined, recovery);
+    const agentClient = new Client({ name: "navocms-delivery-recovery-agent", version: "1.0.0" });
+    const [agentClientTransport, agentServerTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([agentServer.connect(agentServerTransport), agentClient.connect(agentClientTransport)]);
+    try {
+      expect((await agentClient.listTools()).tools.map(({ name }) => name)).not.toEqual(expect.arrayContaining(["delivery_phase_not_applied", "delivery_phase_resolve"]));
+    } finally {
+      await agentClient.close();
+      await agentServer.close();
+    }
+  });
+
   it("exposes only the statically validated Cloudflare recovery code", async () => {
     const known = await releasePublishError(new CloudflareDeliveryError("CLOUDFLARE_HTTP_403", "token=must-not-leak", 403));
     expect(known.isError).toBe(true);
