@@ -117,7 +117,7 @@ const PUBLIC_ERROR_CODES: ReadonlySet<string> = new Set([
   "ROLLBACK_TARGET_VERIFICATION_FAILED"
 ]);
 
-const PUBLIC_HTTP_ERROR_CODE = /^(?:CLOUDFLARE|COOLIFY)_HTTP_[1-5][0-9]{2}$/;
+const PUBLIC_HTTP_ERROR_CODE = /^(?:(?:CLOUDFLARE|COOLIFY)_HTTP|CLOUDFLARE_(?:ASSET_CHECK|ASSET_UPLOAD|DEPLOY)_HTTP)_[1-5][0-9]{2}$/;
 
 /** Returns a safe, statically validated recovery code; never a provider message. */
 export function publicCloudflareDeliveryErrorCode(error: unknown): string | undefined {

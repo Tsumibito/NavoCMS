@@ -109,13 +109,13 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     if (fileEntries.length !== input.reference.fileCount || hashes.length < 1 || hashes.length > 512) throw new CloudflareDeliveryError("CLOUDFLARE_ASSET_BOUNDS", "Cloudflare asset manifest exceeds delivery bounds");
 
     const uploadToken = await this.#uploadToken();
-    const missing = await this.#uploadJson("/pages/assets/check-missing", uploadToken, { hashes });
+    const missing = await providerPhase("ASSET_CHECK", () => this.#uploadJson("/pages/assets/check-missing", uploadToken, { hashes }));
     const missingHashes = new Set(resultArray(missing).filter((value): value is string => typeof value === "string"));
     const assets = fileEntries.flatMap(([path, body]) => {
       const key = pagesAssetHash(path, body);
       return missingHashes.has(key) ? [{ key, value: Buffer.from(body).toString("base64"), base64: true, metadata: { contentType: contentType(path) } }] : [];
     });
-    if (assets.length > 0) await this.#uploadJson("/pages/assets/upload", uploadToken, assets);
+    if (assets.length > 0) await providerPhase("ASSET_UPLOAD", () => this.#uploadJson("/pages/assets/upload", uploadToken, assets));
 
     const form = new FormData();
     form.set("branch", branch);
@@ -129,9 +129,9 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     // This file is derived solely from the immutable reference and lets a bounded HTTPS probe
     // confirm the deployed output without trusting a mutable preview URL or response body.
     form.set("_headers", new Blob([headersFile(input.reference, input.referenceHash, environment)], { type: "text/plain" }), "_headers");
-    const response = await this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}/deployments`, {
+    const response = await providerPhase("DEPLOY", () => this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}/deployments`, {
       method: "POST", body: form
-    });
+    }));
     const row = resultObject(requiredResponse(response));
     const value = deployment(row, this.#projectKey, input.referenceHash);
     if (value.environment !== environment) throw new CloudflareDeliveryError("CLOUDFLARE_ENVIRONMENT_MISMATCH", "Cloudflare deployment did not return the requested environment");
@@ -379,6 +379,17 @@ async function parseResponse(response: Response, signal: AbortSignal): Promise<R
   try { value = await jsonWithAbort(response, signal); } catch { throw new CloudflareDeliveryError("CLOUDFLARE_RESPONSE_INVALID", "Cloudflare API response is invalid"); }
   if (!value || typeof value !== "object" || Array.isArray(value) || ("success" in value && value.success !== true)) throw new CloudflareDeliveryError("CLOUDFLARE_RESPONSE_INVALID", "Cloudflare API response is invalid");
   return value as Record<string, unknown>;
+}
+
+async function providerPhase<T>(phase: "ASSET_CHECK" | "ASSET_UPLOAD" | "DEPLOY", action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof CloudflareDeliveryError && /^CLOUDFLARE_HTTP_[1-5][0-9]{2}$/.test(error.code)) {
+      throw new CloudflareDeliveryError(`CLOUDFLARE_${phase}_HTTP_${error.httpStatus}`, "Cloudflare provider phase failed", error.httpStatus);
+    }
+    throw error;
+  }
 }
 
 async function jsonWithAbort(response: Response, signal: AbortSignal): Promise<unknown> {

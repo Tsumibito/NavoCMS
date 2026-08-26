@@ -138,6 +138,22 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     });
   });
 
+  it("classifies a failed direct-upload phase without exposing its response", async () => {
+    const responses = [
+      json({ result: { production_branch: "main" } }),
+      json({ result: { jwt: "upload-token-0123456789" } }),
+      new Response(JSON.stringify({ success: false, errors: [{ message: "must-not-leak" }] }), { status: 400 })
+    ];
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
+      fetcher: async () => responses.shift()!
+    });
+    await expect(transport.createPreview({
+      projectKey: "pages-project", previewBranch: "preview", reference, referenceHash,
+      files: { "en/index.html": "<html>en</html>" }
+    })).rejects.toMatchObject({ code: "CLOUDFLARE_ASSET_CHECK_HTTP_400", message: "Cloudflare provider phase failed" });
+  });
+
   it("rejects a swapped live file even when all immutable headers are correct", async () => {
     const responses = [
       json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: ["https://production.pages.dev/"] } } }),
