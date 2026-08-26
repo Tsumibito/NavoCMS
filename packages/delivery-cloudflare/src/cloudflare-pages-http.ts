@@ -13,7 +13,8 @@ import {
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const MAX_PAGES = 10;
-const PAGE_SIZE = 100;
+// Pages deployment listing rejects values above 25 (error 8000024).
+const PAGE_SIZE = 25;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 export interface FetchCloudflarePagesTransportOptions {

@@ -72,6 +72,16 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     await expect(transport.findDeployment({ projectKey: "other-project", referenceHash, environment: "preview" })).rejects.toMatchObject({ code: "CLOUDFLARE_PROJECT_SCOPE_DENIED" });
   });
 
+  it("keeps deployment discovery within the Pages pagination bound", async () => {
+    let requested: URL | undefined;
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
+      fetcher: async (url) => { requested = new URL(String(url)); return json({ result: [] }); }
+    });
+    await expect(transport.findDeployment({ projectKey: "pages-project", referenceHash, environment: "preview" })).resolves.toBeUndefined();
+    expect(requested?.searchParams.get("per_page")).toBe("25");
+  });
+
   it("denies the configured production branch from the preview-only operation before any request", async () => {
     const transport = new FetchCloudflarePagesTransport({
       accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
