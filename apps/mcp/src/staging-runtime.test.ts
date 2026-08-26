@@ -30,6 +30,18 @@ describe("staging provider selection", () => {
     await expect(selected.secrets.use(binding.cloudflare.tokenSecretRef, async () => "used")).resolves.toBe("used");
     expect(selected).not.toHaveProperty("token");
   });
+  it("accepts Coolify native application identifiers and rejects unsafe or oversized values before provider composition", () => {
+    const secrets = createDotenvxSecretBroker({ DOTENVX_SECRET_DELIVERY_CLOUDFLARE_TOKEN: "test-token-012345", DOTENVX_SECRET_DELIVERY_COOLIFY_TOKEN: "test-token-012345" });
+    for (const applicationUuid of ["y7xtftoizsqmitvgfvzfwkbu", "33333333-3333-4333-8333-333333333333"]) {
+      const candidate = { ...binding, coolify: { ...binding.coolify, applicationUuid } };
+      const selected = selectReleaseProvider({ requested: "cloudflare-staging", environment: "staging", binding: candidate, expected: { ...expected, bindingDigest: stagingBindingDigest(candidate) }, secrets });
+      expect(selected).toMatchObject({ selection: "cloudflare-staging", binding: { coolify: { applicationUuid } } });
+    }
+    for (const applicationUuid of ["y7xtftoiz/../escape", "-leading-punctuation", "a".repeat(161)]) {
+      const candidate = { ...binding, coolify: { ...binding.coolify, applicationUuid } };
+      expect(() => selectReleaseProvider({ requested: "cloudflare-staging", environment: "staging", binding: candidate, expected: { ...expected, bindingDigest: stagingBindingDigest(candidate) }, secrets })).toThrow();
+    }
+  });
   it("keeps embedded as the only default and production path", () => {
     expect(selectReleaseProvider({ requested: undefined, environment: "production", binding: {}, expected, secrets: createDotenvxSecretBroker({}) })).toEqual({ selection: "embedded" });
   });

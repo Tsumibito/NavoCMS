@@ -2,6 +2,15 @@
 
 **Status:** Review required / Pending CI and staging proof
 
+## Compatibility correction: Coolify application identifier
+
+The v2 field name `coolify.applicationUuid` is retained for binding
+compatibility, but its value is now a bounded Coolify provider-native
+identifier rather than UUID-only. This accepts existing RFC UUID values and
+the 26-character Cloud application identifier used by the staging project;
+path characters, whitespace, leading punctuation, and values over 160 bytes
+are rejected by the same contract and runtime transport boundary.
+
 ## Delivered code boundary
 
 - Migration `0011_reviewed_astro_build_inputs.sql` adds append-only,

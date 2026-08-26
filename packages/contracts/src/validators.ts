@@ -33,6 +33,9 @@ export function parseCloudflareStagingBinding(value: unknown): CloudflareStaging
   return contracts.cloudflareStagingBinding.parse(value);
 }
 const MAX_VALIDATION_ISSUES = 20;
+// Must stay congruent with the provider transport: Coolify's Cloud application
+// identifiers are opaque safe tokens, not necessarily RFC UUIDs.
+const COOLIFY_APPLICATION_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 
 function readSchema(filename: string): object {
   const packagedUrl = new URL(`./schemas/${filename}`, import.meta.url);
@@ -235,6 +238,9 @@ function mediaAssetSemantics(asset: MediaAsset): string[] {
 
 function cloudflareStagingBindingSemantics(binding: CloudflareStagingBinding): string[] {
   const issues: string[] = [];
+  if (!COOLIFY_APPLICATION_IDENTIFIER.test(binding.coolify.applicationUuid)) {
+    issues.push("Coolify application identifier must be a bounded provider-native identifier");
+  }
   if (binding.cloudflare.productionBranch === binding.cloudflare.previewBranch) issues.push("production and preview branches must differ");
   try {
     const endpoint = new URL(binding.coolify.baseUrl);
