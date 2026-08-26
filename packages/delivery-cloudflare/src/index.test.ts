@@ -71,6 +71,42 @@ describe("Cloudflare Pages release provider", () => {
     ]));
   });
 
+  it("never automatically retries a mutating Coolify request after an ambiguous 502", async () => {
+    const cloudflare = new FakeCloudflare();
+    const coolify = new FakeCoolify();
+    coolify.failPromoteAfterEffectOnce = true;
+    const phases = new InMemoryDeliveryPhaseStore();
+    const provider = new CloudflarePagesReleaseProvider({ projectKey: "pages-project", previewBranch: "preview", productionBranch: "main", coolifyApplicationKey: "coolify-app", resolver: { resolve: async () => deployable(reference) }, cloudflare, coolify, phases });
+
+    await expect(provider.publish(input)).rejects.toMatchObject({ httpStatus: 502 });
+    expect(coolify.promoteCalls).toHaveLength(1);
+    await expect(provider.publish(input)).rejects.toMatchObject({ code: "DELIVERY_PHASE_HUMAN_RESOLUTION_REQUIRED" });
+    expect(coolify.promoteCalls).toHaveLength(1);
+  });
+
+  it("never automatically retries a mutating Pages request after an ambiguous 502", async () => {
+    const cloudflare = new FakeCloudflare(); const coolify = new FakeCoolify();
+    cloudflare.failPreviewAfterEffectOnce = true;
+    const provider = createProvider(cloudflare, coolify);
+    await expect(provider.publish(input)).rejects.toMatchObject({ httpStatus: 502 });
+    expect(cloudflare.createCalls).toHaveLength(1);
+    await expect(provider.publish(input)).resolves.toBeDefined();
+    expect(cloudflare.createCalls).toHaveLength(1);
+  });
+
+  it("allows exactly one evidence-bound second attempt after crash before Coolify publish", async () => {
+    const cloudflare = new FakeCloudflare(); const coolify = new FakeCoolify(); const phases = new InMemoryDeliveryPhaseStore();
+    const phase = { releaseId: input.releaseId, referenceHash, phase: "publish.coolify" };
+    await phases.reserve(phase); // process stopped after reserve, before request
+    await phases.notApplied({ ...phase, evidenceHash: "e".repeat(64), observedAt: "2026-08-26T00:00:00.000Z" });
+    const provider = new CloudflarePagesReleaseProvider({ projectKey: "pages-project", previewBranch: "preview", productionBranch: "main", coolifyApplicationKey: "coolify-app", resolver: { resolve: async () => deployable(reference) }, cloudflare, coolify, phases });
+
+    await expect(provider.publish(input)).resolves.toBeDefined();
+    expect(coolify.promoteCalls).toHaveLength(1);
+    expect(coolify.promoteCalls[0]!.operationKey).toContain("promote:2:");
+    await expect(phases.notApplied({ ...phase, evidenceHash: "f".repeat(64), observedAt: "2026-08-26T00:00:01.000Z" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_NOT_APPLIED_INVALID" });
+  });
+
   it("fails closed before any provider effect when a resolver returns a different immutable artifact", async () => {
     const cloudflare = new FakeCloudflare();
     const coolify = new FakeCoolify();
@@ -161,6 +197,36 @@ describe("Cloudflare Pages release provider", () => {
     expect(cloudflare.rollbackCalls).toHaveLength(1);
   });
 
+  it("allows one evidence-bound second attempt after crash before Cloudflare rollback", async () => {
+    const cloudflare = new FakeCloudflare(); const coolify = new FakeCoolify(); const phases = new InMemoryDeliveryPhaseStore();
+    const provider = createProvider(cloudflare, coolify);
+    const first = await provider.publish(input);
+    const secondInput = { ...input, releaseId: "release-before-cloudflare", releaseHash: "1".repeat(64), artifact: { ...artifact, hash: "2".repeat(64) } };
+    const secondReference = { ...reference, releaseHash: secondInput.releaseHash, releaseArtifactHash: secondInput.artifact.hash, sourceCommitSha: "3".repeat(40) };
+    const rollback = new CloudflarePagesReleaseProvider({ projectKey: "pages-project", previewBranch: "preview", productionBranch: "main", coolifyApplicationKey: "coolify-app", resolver: { resolve: async (value) => value.releaseHash === secondInput.releaseHash ? deployable(secondReference) : deployable(reference) }, cloudflare, coolify, phases });
+    const second = await rollback.publish(secondInput);
+    const phase = { releaseId: secondInput.releaseId, referenceHash, phase: "rollback.cloudflare" };
+    await phases.reserve(phase); await phases.notApplied({ ...phase, evidenceHash: "e".repeat(64), observedAt: "2026-08-26T00:00:00.000Z" });
+    await rollback.rollback(second, first);
+    expect(cloudflare.rollbackCalls).toHaveLength(1);
+    expect(cloudflare.rollbackCalls[0]!.operationKey).toContain("rollback:2:");
+  });
+
+  it("allows one evidence-bound second attempt after crash before Coolify rollback", async () => {
+    const cloudflare = new FakeCloudflare(); const coolify = new FakeCoolify(); const phases = new InMemoryDeliveryPhaseStore();
+    const firstProvider = new CloudflarePagesReleaseProvider({ projectKey: "pages-project", previewBranch: "preview", productionBranch: "main", coolifyApplicationKey: "coolify-app", resolver: { resolve: async () => deployable(reference) }, cloudflare, coolify, phases });
+    const first = await firstProvider.publish(input);
+    const secondInput = { ...input, releaseId: "release-before-coolify", releaseHash: "1".repeat(64), artifact: { ...artifact, hash: "2".repeat(64) } };
+    const secondReference = { ...reference, releaseHash: secondInput.releaseHash, releaseArtifactHash: secondInput.artifact.hash, sourceCommitSha: "3".repeat(40) };
+    const rollback = new CloudflarePagesReleaseProvider({ projectKey: "pages-project", previewBranch: "preview", productionBranch: "main", coolifyApplicationKey: "coolify-app", resolver: { resolve: async (value) => value.releaseHash === secondInput.releaseHash ? deployable(secondReference) : deployable(reference) }, cloudflare, coolify, phases });
+    const second = await rollback.publish(secondInput);
+    const phase = { releaseId: secondInput.releaseId, referenceHash, phase: "rollback.coolify" };
+    await phases.reserve(phase); await phases.notApplied({ ...phase, evidenceHash: "e".repeat(64), observedAt: "2026-08-26T00:00:00.000Z" });
+    await rollback.rollback(second, first);
+    expect(coolify.rollbackCalls).toHaveLength(1);
+    expect(coolify.rollbackCalls[0]!.operationKey).toContain("rollback:2:");
+  });
+
   it("requires a human evidence-bound Coolify resolution after an uncertain rollback instead of replaying it", async () => {
     const cloudflare = new FakeCloudflare();
     const coolify = new FakeCoolify();
@@ -174,18 +240,17 @@ describe("Cloudflare Pages release provider", () => {
     coolify.failRollbackAfterEffectOnce = true;
     await expect(provider.rollback(second, first)).rejects.toThrow("interrupted Coolify rollback after effect");
     await expect(provider.rollback(second, first)).rejects.toMatchObject({ code: "DELIVERY_PHASE_HUMAN_RESOLUTION_REQUIRED" });
-    await expect(phases.resolve({ releaseId: secondInput.releaseId, referenceHash, phase: "rollback.coolify", externalId: coolify.lastRollbackId!, actor: { kind: "human", id: "release-operator" }, evidenceHash: "d".repeat(64), observedAt: "2026-08-25T00:00:00.000Z" })).resolves.toBeUndefined();
+    await expect(phases.resolve({ releaseId: secondInput.releaseId, referenceHash, phase: "rollback.coolify", externalId: coolify.lastRollbackId!, evidenceHash: "d".repeat(64), observedAt: "2026-08-25T00:00:00.000Z" })).resolves.toBeUndefined();
     await expect(provider.rollback(second, first)).resolves.toBeUndefined();
     expect(cloudflare.rollbackCalls).toHaveLength(1);
     expect(coolify.rollbackCalls).toHaveLength(1);
   });
 
-  it("rejects a non-human or malformed operational resolution before it can complete a phase", async () => {
+  it("rejects malformed operational resolution before it can complete a phase", async () => {
     const phases = new InMemoryDeliveryPhaseStore();
     const phase = { releaseId: input.releaseId, referenceHash, phase: "publish.coolify" };
     await phases.reserve(phase);
-    await expect(phases.resolve({ ...phase, externalId: "coolify-1", actor: { kind: "agent", id: "automation" } as never, evidenceHash: "d".repeat(64), observedAt: "2026-08-25T00:00:00.000Z" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_RESOLUTION_INVALID" });
-    await expect(phases.resolve({ ...phase, externalId: "coolify-1", actor: { kind: "human", id: "release-operator" }, evidenceHash: "invalid", observedAt: "not-a-date" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_RESOLUTION_INVALID" });
+    await expect(phases.resolve({ ...phase, externalId: "coolify-1", evidenceHash: "invalid", observedAt: "not-a-date" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_RESOLUTION_INVALID" });
     await expect(phases.reserve(phase)).resolves.toBe("reserved");
   });
 
@@ -291,6 +356,7 @@ class FakeCloudflare implements CloudflarePagesTransport {
   liveStatus = 200;
   swappedLiveBytes = false;
   failRollbackAfterEffectOnce = false;
+  failPreviewAfterEffectOnce = false;
   canonicalProductionId: string | undefined;
 
   public async findDeployment(input: Parameters<CloudflarePagesTransport["findDeployment"]>[0]): Promise<CloudflareDeployment | undefined> {
@@ -305,6 +371,10 @@ class FakeCloudflare implements CloudflarePagesTransport {
     this.createCalls.push(input);
     const deployment = { id: `preview-${this.createCalls.length}`, projectKey: input.projectKey, referenceHash: input.referenceHash, environment: "preview" as const, status: "success" as const };
     this.deployments.set(`${input.referenceHash}:preview`, deployment);
+    if (this.failPreviewAfterEffectOnce) {
+      this.failPreviewAfterEffectOnce = false;
+      throw new CloudflareDeliveryError("CLOUDFLARE_HTTP_502", "proxy lost the deployment response", 502);
+    }
     return deployment;
   }
 
@@ -355,6 +425,7 @@ class FakeCoolify implements CoolifyCommitTransport {
   readonly retryCalls: Parameters<CoolifyCommitTransport["retryPromotion"]>[0][] = [];
   failRollbackOnce = false;
   failRollbackAfterEffectOnce = false;
+  failPromoteAfterEffectOnce = false;
   lastRollbackId: string | undefined;
 
   public async findPromotion(input: Parameters<CoolifyCommitTransport["findPromotion"]>[0]): Promise<CoolifyPromotion | undefined> { return this.promotions.get(`${input.sourceCommitSha}:${input.referenceHash}`); }
@@ -362,6 +433,10 @@ class FakeCoolify implements CoolifyCommitTransport {
     this.promoteCalls.push(input);
     const promotion = { id: `promotion-${this.promoteCalls.length}`, applicationKey: input.applicationKey, sourceCommitSha: input.sourceCommitSha, referenceHash: input.referenceHash, status: "finished" as const };
     this.promotions.set(`${input.sourceCommitSha}:${input.referenceHash}`, promotion);
+    if (this.failPromoteAfterEffectOnce) {
+      this.failPromoteAfterEffectOnce = false;
+      throw new CloudflareDeliveryError("COOLIFY_HTTP_502", "proxy lost the mutation response", 502);
+    }
     return promotion;
   }
   public async retryPromotion(input: Parameters<CoolifyCommitTransport["retryPromotion"]>[0]): Promise<CoolifyPromotion> { this.retryCalls.push(input); return this.promoteCommit(input); }

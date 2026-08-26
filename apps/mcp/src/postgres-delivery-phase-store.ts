@@ -1,20 +1,43 @@
 import { randomUUID } from "node:crypto";
 
-import { sha256 } from "@navocms/kernel";
+import { DomainEventFactory, sha256, type EventStore } from "@navocms/kernel";
 import { CloudflareDeliveryError, type DeliveryPhaseResolution, type DeliveryPhaseStore } from "@navocms/delivery-cloudflare";
 import type { PostgresDatabase, SqlClient } from "@navocms/persistence-postgres";
 
 import { McpEditingError } from "./errors.js";
+import type { McpRequestContext } from "./model.js";
 import type { RepositoryContext } from "./repository.js";
+import { requirePermission } from "@navocms/security";
+
+/** Created only by the authenticated operational boundary, never from tool input. */
+export interface AuthenticatedDeliveryPhaseAuthority {
+  readonly principal: Readonly<{ id: string; kind: "human" | "agent" | "service" }>;
+  readonly permissions: readonly string[];
+}
+
+/**
+ * The sole adapter from an authenticated MCP request to phase-resolution
+ * authority.  Operational forms supply evidence and provider identifiers,
+ * never an actor identity; this derives it from verified authorization.
+ */
+export function deliveryPhaseAuthority(context: McpRequestContext): AuthenticatedDeliveryPhaseAuthority {
+  requirePermission(context.authorization, "content:publish", { tenantId: context.authorization.tenantId, siteId: context.authorization.siteId });
+  if (context.authorization.principal.kind !== "human") throw new McpEditingError("DELIVERY_PHASE_HUMAN_REQUIRED", "Only an authenticated human may resolve a delivery phase");
+  return Object.freeze({ principal: Object.freeze({ id: context.authorization.principal.id, kind: "human" }), permissions: Object.freeze(["content:publish"]) });
+}
 
 /** Bridges provider effects to the existing durable workflow checkpoint tables. */
 export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
   readonly #database: PostgresDatabase;
   readonly #context: RepositoryContext;
+  readonly #authority: AuthenticatedDeliveryPhaseAuthority | undefined;
+  readonly #events: EventStore | undefined;
 
-  public constructor(database: PostgresDatabase, context: RepositoryContext) {
+  public constructor(database: PostgresDatabase, context: RepositoryContext, options: Readonly<{ authority?: AuthenticatedDeliveryPhaseAuthority; events?: EventStore }> = {}) {
     this.#database = database;
     this.#context = context;
+    this.#authority = options.authority;
+    this.#events = options.events;
   }
 
   public async reserve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<"new" | "reserved" | "completed"> {
@@ -22,8 +45,17 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
       await lock(client, this.#context, input);
       const completed = await phase(client, this.#context, input, "completed");
       if (completed) return "completed";
-      if (await phase(client, this.#context, input, "reserved")) return "reserved";
-      await checkpoint(client, this.#context, input.releaseId, key(input, "reserved"), input.referenceHash, { referenceHash: input.referenceHash, phase: input.phase });
+      const current = await phase(client, this.#context, input, "reserved");
+      if (current) {
+        const firstNotApplied = await phase(client, this.#context, input, "not-applied");
+        const second = await phase(client, this.#context, input, "reserved-2");
+        if (firstNotApplied && !second) {
+          await checkpoint(client, this.#context, input.releaseId, key(input, "reserved-2"), input.referenceHash, { referenceHash: input.referenceHash, phase: input.phase, attempt: 2 });
+          return "new";
+        }
+        return "reserved";
+      }
+      await checkpoint(client, this.#context, input.releaseId, key(input, "reserved"), input.referenceHash, { referenceHash: input.referenceHash, phase: input.phase, attempt: 1 });
       return "new";
     });
   }
@@ -50,8 +82,8 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
     });
   }
 
-  public async resolve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string; actor: Readonly<{ kind: "human"; id: string }>; evidenceHash: string; observedAt: string }>): Promise<void> {
-    const resolution = resolutionInput(input);
+  public async resolve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string; evidenceHash: string; observedAt: string }>): Promise<void> {
+    const resolution = resolutionInput({ ...input, actor: this.#humanActor() });
     await this.#database.withScope(scope(this.#context), async (client) => {
       await lock(client, this.#context, input);
       if (await phase(client, this.#context, input, "completed")) return;
@@ -60,7 +92,37 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
         referenceHash: input.referenceHash, phase: input.phase, externalId: resolution.externalId,
         actor: resolution.actor, evidenceHash: resolution.evidenceHash, observedAt: resolution.observedAt
       });
+      if (this.#events) {
+        const factory = new DomainEventFactory({ source: "urn:navocms:delivery", tenantId: this.#context.site.tenantId, siteId: this.#context.site.siteId, correlationId: input.releaseId, actor: { type: "human", id: resolution.actor.id } });
+        await this.#events.append(factory.create({ type: "io.navocms.delivery.phase.resolved.v1", subject: `release:${input.releaseId}`, consequence: "G2", idempotencyKey: `delivery_phase_resolution:${sha256(`${input.referenceHash}:${input.phase}:${resolution.evidenceHash}`)}`, data: { phase: input.phase, referenceHash: input.referenceHash, externalId: input.externalId, evidenceHash: input.evidenceHash, observedAt: input.observedAt } }));
+      }
     });
+  }
+
+  public async notApplied(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; evidenceHash: string; observedAt: string }>): Promise<void> {
+    const actor = this.#humanActor();
+    if (!/^[a-f0-9]{64}$/.test(input.evidenceHash) || !Number.isFinite(Date.parse(input.observedAt))) throw new CloudflareDeliveryError("DELIVERY_PHASE_RESOLUTION_INVALID", "Not-applied evidence is invalid");
+    await this.#database.withScope(scope(this.#context), async (client) => {
+      await lock(client, this.#context, input);
+      if (await phase(client, this.#context, input, "completed")) return;
+      if (!await phase(client, this.#context, input, "reserved")) throw new McpEditingError("DELIVERY_PHASE_MISSING", "Cannot retry a provider phase that was not reserved");
+      if (await phase(client, this.#context, input, "reserved-2")) throw new McpEditingError("DELIVERY_PHASE_NOT_APPLIED_INVALID", "The bounded recovery attempt was already consumed");
+      await checkpoint(client, this.#context, input.releaseId, key(input, "not-applied"), input.referenceHash, { referenceHash: input.referenceHash, phase: input.phase, attempt: 1, actor, evidenceHash: input.evidenceHash, observedAt: input.observedAt });
+      if (this.#events) {
+        const factory = new DomainEventFactory({ source: "urn:navocms:delivery", tenantId: this.#context.site.tenantId, siteId: this.#context.site.siteId, correlationId: input.releaseId, actor: { type: "human", id: actor.id } });
+        await this.#events.append(factory.create({ type: "io.navocms.delivery.phase.not_applied.v1", subject: `release:${input.releaseId}`, consequence: "G2", idempotencyKey: `delivery_phase_not_applied:${sha256(`${input.referenceHash}:${input.phase}:${input.evidenceHash}`)}`, data: { phase: input.phase, referenceHash: input.referenceHash, evidenceHash: input.evidenceHash, observedAt: input.observedAt } }));
+      }
+    });
+  }
+
+  public async attempt(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2> {
+    return this.#database.withScope(scope(this.#context), async (client) => (await phase(client, this.#context, input, "reserved-2")) ? 2 : 1);
+  }
+
+  #humanActor(): Readonly<{ kind: "human"; id: string }> {
+    const authority = this.#authority;
+    if (!authority || authority.principal.kind !== "human" || authority.principal.id !== this.#context.principalId || !authority.permissions.includes("content:publish")) throw new McpEditingError("DELIVERY_PHASE_HUMAN_REQUIRED", "Delivery-phase resolution requires an authenticated human principal with content:publish");
+    return Object.freeze({ kind: "human", id: authority.principal.id });
   }
 
   public async resolution(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<DeliveryPhaseResolution | undefined> {
@@ -78,10 +140,10 @@ export class PostgresDeliveryPhaseStore implements DeliveryPhaseStore {
 }
 
 function scope(context: RepositoryContext) { return { tenantId: context.site.tenantId, siteId: context.site.siteId, principalId: context.principalId }; }
-function key(input: Readonly<{ referenceHash: string; phase: string }>, state: "reserved" | "completed" | "resolution"): string { return `delivery.${sha256(`${input.referenceHash}:${input.phase}`)}.${state}`; }
+function key(input: Readonly<{ referenceHash: string; phase: string }>, state: "reserved" | "reserved-2" | "completed" | "resolution" | "not-applied"): string { return `delivery.${sha256(`${input.referenceHash}:${input.phase}`)}.${state}`; }
 function resolutionKey(input: Readonly<{ referenceHash: string; phase: string }>, resolution: DeliveryPhaseResolution): string { return `delivery.${sha256(`${input.referenceHash}:${input.phase}`)}.resolution.${sha256(`${resolution.externalId}:${resolution.actor.id}:${resolution.evidenceHash}:${resolution.observedAt}`)}`; }
 
-async function phase(client: SqlClient, context: RepositoryContext, input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>, state: "reserved" | "completed"): Promise<{ output_json: unknown } | undefined> {
+async function phase(client: SqlClient, context: RepositoryContext, input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>, state: "reserved" | "reserved-2" | "completed" | "not-applied"): Promise<{ output_json: unknown } | undefined> {
   return (await client.query<{ output_json: unknown }>(
     `SELECT checkpoint.output_json FROM navocms.workflow_checkpoints checkpoint
        JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id AND run.tenant_id = checkpoint.tenant_id AND run.site_id = checkpoint.site_id

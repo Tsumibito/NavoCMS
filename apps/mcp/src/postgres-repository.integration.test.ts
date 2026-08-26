@@ -173,13 +173,23 @@ integration("Neon production persistence", () => {
     const unknownInput = { releaseId: second.releaseId, referenceHash: "c".repeat(64), phase: "rollback.coolify" };
     const reservedBeforeRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
     await expect(reservedBeforeRestart.reserve(unknownInput)).resolves.toBe("new");
-    const reservedAfterRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
+    const reservedAfterRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId }, { authority: { principal: { id: principalId, kind: "human" }, permissions: ["content:publish"] }, events: new PostgresEventStore(database!) });
     await expect(reservedAfterRestart.reserve(unknownInput)).resolves.toBe("reserved");
-    await reservedAfterRestart.resolve({ ...unknownInput, externalId: "coolify-human-resolved-1", actor: { kind: "human", id: "release-operator" }, evidenceHash: "d".repeat(64), observedAt: "2026-08-25T00:00:00.000Z" });
-    await expect(reservedAfterRestart.resolution(unknownInput)).resolves.toMatchObject({ externalId: "coolify-human-resolved-1", actor: { kind: "human", id: "release-operator" } });
+    await reservedAfterRestart.resolve({ ...unknownInput, externalId: "coolify-human-resolved-1", evidenceHash: "d".repeat(64), observedAt: "2026-08-25T00:00:00.000Z" });
+    await expect(reservedAfterRestart.resolution(unknownInput)).resolves.toMatchObject({ externalId: "coolify-human-resolved-1", actor: { kind: "human", id: principalId } });
     await reservedAfterRestart.complete({ ...unknownInput, externalId: "coolify-human-resolved-1" });
     const completedAfterRestart = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId });
     await expect(completedAfterRestart.reserve(unknownInput)).resolves.toBe("completed");
+
+    const beforeEffect = { releaseId: second.releaseId, referenceHash: "e".repeat(64), phase: "publish.coolify" };
+    const recovery = new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId }, { authority: { principal: { id: principalId, kind: "human" }, permissions: ["content:publish"] }, events: new PostgresEventStore(database!) });
+    await expect(recovery.reserve(beforeEffect)).resolves.toBe("new");
+    await recovery.notApplied({ ...beforeEffect, evidenceHash: "f".repeat(64), observedAt: "2026-08-26T00:00:00.000Z" });
+    await expect(recovery.reserve(beforeEffect)).resolves.toBe("new");
+    await expect(recovery.attempt(beforeEffect)).resolves.toBe(2);
+    await expect(recovery.notApplied({ ...beforeEffect, evidenceHash: "a".repeat(64), observedAt: "2026-08-26T00:00:01.000Z" })).rejects.toMatchObject({ code: "DELIVERY_PHASE_NOT_APPLIED_INVALID" });
+    const resolutionEvents = await new PostgresEventStore(database!).query({ correlationId: unknownInput.releaseId });
+    expect(resolutionEvents.some(({ event }) => event.type === "io.navocms.delivery.phase.resolved.v1" && event.data.externalId === "coolify-human-resolved-1")).toBe(true);
   });
 
   it("maps a standard issuer subject to persisted site membership", async () => {

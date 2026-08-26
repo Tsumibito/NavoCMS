@@ -221,10 +221,22 @@ export interface DeliveryPhaseStore {
     referenceHash: string;
     phase: string;
     externalId: string;
-    actor: Readonly<{ kind: "human"; id: string }>;
     evidenceHash: string;
     observedAt: string;
   }>): Promise<void>;
+  /**
+   * Records independently collected proof that the numbered reservation did
+   * not reach the provider.  A store may permit exactly one second attempt;
+   * it must never erase the original reservation.
+   */
+  notApplied(input: Readonly<{
+    releaseId: string;
+    referenceHash: string;
+    phase: string;
+    evidenceHash: string;
+    observedAt: string;
+  }>): Promise<void>;
+  attempt(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2>;
   resolution(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<DeliveryPhaseResolution | undefined>;
 }
 
@@ -236,23 +248,27 @@ export interface DeliveryPhaseResolution {
 }
 
 export class InMemoryDeliveryPhaseStore implements DeliveryPhaseStore {
-  readonly #entries = new Map<string, { readonly externalId?: string; readonly resolutions: readonly DeliveryPhaseResolution[] }>();
+  readonly #entries = new Map<string, { readonly attempt: 1 | 2; readonly externalId?: string; readonly resolutions: readonly DeliveryPhaseResolution[]; readonly notApplied?: Readonly<{ evidenceHash: string; observedAt: string }> }>();
   public async reserve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<"new" | "reserved" | "completed"> {
     const key = phaseKey(input);
     const current = this.#entries.get(key);
     if (current?.externalId) return "completed";
+    if (current?.notApplied && current.attempt === 1) {
+      this.#entries.set(key, Object.freeze({ attempt: 2, resolutions: current.resolutions }));
+      return "new";
+    }
     if (current) return "reserved";
-    this.#entries.set(key, Object.freeze({ resolutions: Object.freeze([]) }));
+    this.#entries.set(key, Object.freeze({ attempt: 1, resolutions: Object.freeze([]) }));
     return "new";
   }
   public async complete(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string }>): Promise<void> {
     const key = phaseKey(input); const current = this.#entries.get(key);
     if (current?.externalId && current.externalId !== input.externalId) throw new CloudflareDeliveryError("DELIVERY_PHASE_CONFLICT", "Provider phase already has another external identifier");
-    this.#entries.set(key, Object.freeze({ externalId: input.externalId, resolutions: current?.resolutions ?? Object.freeze([]) }));
+    this.#entries.set(key, Object.freeze({ attempt: current?.attempt ?? 1, externalId: input.externalId, resolutions: current?.resolutions ?? Object.freeze([]), ...(current?.notApplied ? { notApplied: current.notApplied } : {}) }));
   }
   public async externalId(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<string | undefined> { return this.#entries.get(phaseKey(input))?.externalId; }
-  public async resolve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string; actor: Readonly<{ kind: "human"; id: string }>; evidenceHash: string; observedAt: string }>): Promise<void> {
-    const resolution = assertHumanResolution(input);
+  public async resolve(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; externalId: string; evidenceHash: string; observedAt: string }>): Promise<void> {
+    const resolution = assertHumanResolution({ ...input, actor: { kind: "human", id: "in-memory-operator" } });
     const key = phaseKey(input); const current = this.#entries.get(key);
     if (!current) throw new CloudflareDeliveryError("DELIVERY_PHASE_MISSING", "Cannot resolve a phase that was not reserved");
     if (current.externalId) return;
@@ -261,6 +277,14 @@ export class InMemoryDeliveryPhaseStore implements DeliveryPhaseStore {
   public async resolution(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<DeliveryPhaseResolution | undefined> {
     return this.#entries.get(phaseKey(input))?.resolutions.at(-1);
   }
+  public async notApplied(input: Readonly<{ releaseId: string; referenceHash: string; phase: string; evidenceHash: string; observedAt: string }>): Promise<void> {
+    if (!/^[a-f0-9]{64}$/.test(input.evidenceHash) || !Number.isFinite(Date.parse(input.observedAt))) throw new CloudflareDeliveryError("DELIVERY_PHASE_RESOLUTION_INVALID", "Not-applied evidence is invalid");
+    const key = phaseKey(input); const current = this.#entries.get(key);
+    if (!current || current.externalId || current.attempt !== 1) throw new CloudflareDeliveryError("DELIVERY_PHASE_NOT_APPLIED_INVALID", "Only the first unresolved reservation may be retried");
+    if (current.notApplied && (current.notApplied.evidenceHash !== input.evidenceHash || current.notApplied.observedAt !== input.observedAt)) throw new CloudflareDeliveryError("DELIVERY_PHASE_CONFLICT", "Not-applied evidence conflicts with the existing record");
+    this.#entries.set(key, Object.freeze({ ...current, notApplied: Object.freeze({ evidenceHash: input.evidenceHash, observedAt: input.observedAt }) }));
+  }
+  public async attempt(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2> { return this.#entries.get(phaseKey(input))?.attempt ?? 1; }
 }
 
 export class InMemoryDeliveryTelemetry implements DeliveryTelemetry {
@@ -401,11 +425,12 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
       if (promotionState === "reserved") {
         promotion = await this.#recoverCoolifyPhase({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase }, input, deployable.reference.sourceCommitSha);
       } else {
+        const attempt = await this.#options.phases.attempt({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase });
         promotion = await this.#call("coolify", "promote", input, referenceHash, () => this.#options.coolify.promoteCommit({
           applicationKey: this.#options.coolifyApplicationKey,
           sourceCommitSha: deployable.reference.sourceCommitSha,
           referenceHash,
-          operationKey: operationKey("promote", input.releaseHash, referenceHash)
+          operationKey: operationKey("promote", input.releaseHash, referenceHash, attempt)
         }));
         await this.#options.phases.complete({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase, externalId: promotion.id });
       }
@@ -464,6 +489,7 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
     const cloudflarePhase = "rollback.cloudflare";
     const cloudflareState = await this.#options.phases.reserve({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: cloudflarePhase });
     if (cloudflareState === "new") {
+      const attempt = await this.#options.phases.attempt({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: cloudflarePhase });
       await this.#call("cloudflare-pages", "rollback", input, currentReference.referenceHash, () => (
         this.#options.cloudflare.rollback({
         projectKey: currentReference.projectKey,
@@ -471,7 +497,7 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
         targetDeploymentId: targetReference.productionDeploymentId,
         currentEnvironment: "production",
         targetEnvironment: "production",
-        operationKey: operationKey("rollback", currentReference.referenceHash, targetReference.referenceHash)
+        operationKey: operationKey("rollback", currentReference.referenceHash, targetReference.referenceHash, attempt)
         })
       ));
       await this.#options.phases.complete({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: cloudflarePhase, externalId: targetReference.productionDeploymentId });
@@ -494,6 +520,7 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
       if (coolifyState === "reserved") {
         rollbackPromotion = await this.#recoverCoolifyPhase({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase }, input, targetReference.reference.sourceCommitSha);
       } else {
+        const attempt = await this.#options.phases.attempt({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase });
         rollbackPromotion = await this.#call("coolify", "rollback", input, currentReference.referenceHash, () => (
           this.#options.coolify.rollback({
           applicationKey: currentReference.coolifyApplicationKey,
@@ -501,7 +528,7 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
           targetPromotionId: targetReference.coolifyPromotionId,
           targetCommitSha: targetReference.reference.sourceCommitSha,
           referenceHash: targetReference.referenceHash,
-          operationKey: operationKey("rollback", currentReference.referenceHash, targetReference.referenceHash)
+          operationKey: operationKey("rollback", currentReference.referenceHash, targetReference.referenceHash, attempt)
           })
         ));
         await this.#options.phases.complete({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase, externalId: rollbackPromotion.id });
@@ -557,7 +584,10 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
         lastError = error;
         const status = error instanceof CloudflareDeliveryError ? error.httpStatus : undefined;
         const errorCode = error instanceof CloudflareDeliveryError ? error.code : "DELIVERY_REQUEST_FAILED";
-        const retryable = status === 502 || status === 503 || status === 504;
+        // A mutation can succeed before an upstream proxy returns 5xx.  Do
+        // not replay it inside this call: the durable phase stays reserved
+        // and reconciliation must establish the provider outcome first.
+        const retryable = (operation === "discover" || operation === "verify") && (status === 502 || status === 503 || status === 504);
         await this.#telemetry.record({ provider, operation, outcome: retryable && attempt < this.#attempts ? "retry" : "failure", attempt, releaseHash: input.releaseHash, artifactHash: input.artifact.hash, referenceHash, ...(status ? { httpStatus: status } : {}), errorCode });
         if (!retryable || attempt === this.#attempts) throw error;
       }
@@ -667,8 +697,8 @@ function sortedFiles(files: Readonly<Record<string, string>>): Record<string, st
   return output;
 }
 
-function operationKey(operation: string, left: string, right: string): string {
-  return `${operation}:${sha256(`${left}:${right}`)}`;
+function operationKey(operation: string, left: string, right: string, attempt = 1): string {
+  return `${operation}:${attempt}:${sha256(`${left}:${right}:${attempt}`)}`;
 }
 function phaseKey(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): string { return `${input.releaseId}:${input.referenceHash}:${input.phase}`; }
 

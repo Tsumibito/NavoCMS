@@ -1,6 +1,6 @@
 # Sprint 8B.2 — Cloudflare preview/deploy provider report
 
-**Implementation status:** CI passed / Pending senior acceptance
+**Implementation status:** Review changes required / Pending CI
 
 ## Scope
 
@@ -31,7 +31,12 @@ or release/idempotency implementation.
   reserved Cloudflare rollback resolves only after canonical deployment and
   immutable live-byte proof. A reserved Coolify effect requires a human-only,
   evidence-hash-bound UUID candidate, which is inspected before completion.
-  Neither path replays an uncertain external effect.
+  Neither path replays an uncertain external effect. Automatic HTTP retries
+  are read-only only; a mutation failure leaves a durable reservation.
+- A crash after reservation but before an external request is recoverable only
+  through authenticated human, evidence-bound `not_applied` proof. It creates
+  one numbered second attempt and emits an Event Ledger record; arbitrary input
+  can neither name the human actor nor grant this authority.
 - Retry telemetry records stable operation/status metadata only and can append
   to the existing Event Ledger. Tests cover a transient 502; no credential or
   upstream response text enters errors.
@@ -41,11 +46,12 @@ or release/idempotency implementation.
 
 ## Local evidence before CI
 
-- focused provider/release-workflow tests: **38 passed** across five files;
+- focused provider/release-workflow tests: **21 passed** locally after the
+  final review-fix package;
 - PostgreSQL integration adds concurrent phase reservation and a persisted
   `reserved → restart → human resolution → completed` recovery trajectory; it
   requires the GitHub-provisioned PostgreSQL target;
-- full `pnpm check`: **154 passed**, **32 PostgreSQL tests skipped locally**
+- full local test suite: **159 passed**, **32 PostgreSQL tests skipped locally**
   because no local PostgreSQL integration target was configured, and **5 visual
   tests passed**;
 - contract validation: **9 schemas** and **12 fixtures**, including the valid
@@ -63,8 +69,11 @@ or release/idempotency implementation.
 - The correction commits the existing prepare/checkpoint and idempotency state
   before any provider call, and retains the workflow run's `rollback.pending`
   state as the recovery index.
-- The corrected PR head passed the full PostgreSQL, isolation, visual, and
-  production-container gate: [Quality checks run 32904099413](https://github.com/Tsumibito/NavoCMS/actions/runs/32904099413).
+- The previously accepted PR head passed the full PostgreSQL, isolation,
+  visual, and production-container gate: [Quality checks run
+  32904318446](https://github.com/Tsumibito/NavoCMS/actions/runs/32904318446).
+  This evidence predates the current review-fix package and is not evidence of
+  its acceptance.
 
 ## Remaining activation work
 
@@ -76,6 +85,6 @@ or release/idempotency implementation.
    application, retain live hash/rollback/retry evidence, then evaluate the
    public-release Sprint 8C gate.
 
-The implementation status remains **CI passed / Pending senior acceptance**
-until the PR diff is approved. PostgreSQL ran in GitHub CI without skipped
-database tests; no external provider was activated.
+The implementation status remains **Review changes required / Pending CI**
+until the revised diff passes local gates and one final GitHub run. No external
+provider was activated.
