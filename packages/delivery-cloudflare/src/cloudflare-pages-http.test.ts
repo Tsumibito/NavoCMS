@@ -192,6 +192,26 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).rejects.toMatchObject({ code: "CLOUDFLARE_PRODUCTION_BRANCH_MISMATCH" });
   });
 
+  it("accepts the exact canonical Pages deployment URL when aliases are null", async () => {
+    const responses = [
+      json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: null, url: "https://a1b2c3d4.pages-project.pages.dev/" } } }),
+      new Response("<html>en</html>", { status: 200, headers: { "x-navocms-artifact-reference": referenceHash, "x-navocms-release-hash": reference.releaseHash, "x-navocms-output-hash": reference.outputHash, "cache-control": "public, max-age=300, must-revalidate" } })
+    ];
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", productionHostname: "pages-project.pages.dev", apiToken: async () => "api-token-0123456789",
+      fetcher: async () => responses.shift()!
+    });
+    await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).resolves.toMatchObject({ status: 200, referenceHash });
+  });
+
+  it("does not broaden a custom production hostname to deployment subdomains", async () => {
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", productionHostname: "staging.example.test", apiToken: async () => "api-token-0123456789",
+      fetcher: async () => json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: null, url: "https://a1b2c3d4.staging.example.test/" } } })
+    });
+    await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).rejects.toMatchObject({ code: "CLOUDFLARE_CANONICAL_ALIAS_INVALID" });
+  });
+
   it("aborts a stalled Cloudflare request within the configured timeout", async () => {
     const transport = new FetchCloudflarePagesTransport({
       accountId: "account-1", projectKey: "pages-project", productionBranch: "main", timeoutMs: 10, apiToken: async () => "api-token-0123456789",

@@ -278,11 +278,16 @@ function canonicalDeployment(project: Record<string, unknown>, productionBranch:
 
 function canonicalAlias(row: Record<string, unknown>, suffix: string, expectedHostname?: string): string {
   const aliases = row.aliases;
-  if (!Array.isArray(aliases) || aliases.length < 1 || aliases.length > 64 || !aliases.every((value) => typeof value === "string")) throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment aliases are invalid");
-  for (const alias of aliases) {
+  if (aliases !== null && (!Array.isArray(aliases) || aliases.length > 64 || !aliases.every((value) => typeof value === "string"))) throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment aliases are invalid");
+  const candidates = [...(Array.isArray(aliases) ? aliases : []), row.url];
+  for (const alias of candidates) {
+    if (typeof alias !== "string") continue;
     try {
       const url = new URL(alias);
-      if (url.protocol === "https:" && !url.username && !url.password && !url.port && (expectedHostname ? url.hostname === expectedHostname : url.hostname.endsWith(suffix))) return url.toString();
+      const pagesDeploymentHostname = expectedHostname?.endsWith(suffix)
+        ? url.hostname.endsWith(`.${expectedHostname}`) && !url.hostname.slice(0, -(expectedHostname.length + 1)).includes(".")
+        : false;
+      if (url.protocol === "https:" && !url.username && !url.password && !url.port && url.pathname === "/" && !url.search && !url.hash && (expectedHostname ? url.hostname === expectedHostname || pagesDeploymentHostname : url.hostname.endsWith(suffix))) return url.toString();
     } catch { /* bounded hostile alias is ignored */ }
   }
   throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment has no allowed Pages alias");
