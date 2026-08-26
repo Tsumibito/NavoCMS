@@ -25,7 +25,7 @@ const schemaFiles = {
   mediaAsset: "media-asset.schema.json",
   plugin: "plugin-manifest.schema.json",
   profile: "site-profile.schema.json",
-  cloudflareStagingBinding: "cloudflare-staging-binding.schema.json"
+  cloudflareStagingBinding: "cloudflare-staging-binding-v2.schema.json"
 } as const;
 
 /** Exact, versioned parser shared by every staging activation boundary. */

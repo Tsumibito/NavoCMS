@@ -5,18 +5,18 @@
 ## Scope
 
 This package introduces the dry-run-only `cloudflare-staging` profile and the
-versioned `io.navocms.cloudflare-staging-binding.v1` contract. The default and
+versioned `io.navocms.cloudflare-staging-binding.v2` contract. The default and
 production profiles remain the pinned embedded release provider. This package
-does not create a Cloudflare project, call a provider API, resolve a secret,
-or publish an artifact.
+does not create a Cloudflare project, call a provider API, forward a secret to
+a transport, or publish an artifact.
 
 ## Operator input for 8B.3B
 
 The private deployment overlay must supply a validated binding containing only:
 
 - tenant ID, site ID, and `staging` environment;
-- Cloudflare account/project IDs, actual production and preview branches, and
-  the allowed staging hostname;
+- Cloudflare account/project IDs, actual production and preview branches, a
+  Pages preview hostname suffix, and the exact allowed staging hostname;
 - Coolify HTTPS base endpoint and application UUID;
 - dotenvx secret-reference names for the Cloudflare and Coolify API tokens.
 

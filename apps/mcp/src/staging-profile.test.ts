@@ -7,9 +7,9 @@ import type { McpRequestContext } from "./model.js";
 import { EMBEDDED_PRODUCTION_PROFILE } from "./production-profile.js";
 
 const binding = Object.freeze({
-  schema: "io.navocms.cloudflare-staging-binding.v1" as const,
+  schema: "io.navocms.cloudflare-staging-binding.v2" as const,
   tenantId: "11111111-1111-4111-8111-111111111111", siteId: "22222222-2222-4222-8222-222222222222", environment: "staging" as const,
-  cloudflare: { accountId: "staging-account", projectId: "staging-pages", productionBranch: "staging", previewBranch: "preview", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" },
+  cloudflare: { accountId: "staging-account", projectId: "staging-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" },
   coolify: { baseUrl: "https://coolify.staging.example.test", applicationUuid: "33333333-3333-4333-8333-333333333333", tokenSecretRef: "secret:delivery/coolify-token" }
 });
 const releaseHash = "a".repeat(64); const artifact: ReleaseArtifact = Object.freeze({ mediaType: "text/html; charset=utf-8", body: "proof", hash: "b".repeat(64) });

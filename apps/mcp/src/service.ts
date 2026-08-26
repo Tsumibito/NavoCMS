@@ -129,6 +129,9 @@ export class McpEditingService {
     });
   }
 
+  /** Safe composition proof; no provider implementation detail or secret is exposed. */
+  public releaseProviderKey(): string { return this.#releaseProvider.key; }
+
   public async listSites(context: McpRequestContext): Promise<readonly object[]> {
     const { site } = await this.requireSite(context, "content:read");
     return Object.freeze([safe({

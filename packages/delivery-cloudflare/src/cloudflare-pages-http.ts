@@ -23,6 +23,8 @@ export interface FetchCloudflarePagesTransportOptions {
   readonly apiBaseUrl?: string;
   /** A Pages preview must remain on a configured HTTPS hostname suffix. */
   readonly previewHostnameSuffix?: string;
+  /** Exact production/staging alias; never inferred from the preview namespace. */
+  readonly productionHostname?: string;
   /** The only branch that may create a Pages production deployment. */
   readonly productionBranch: string;
   /** Bound every API request and the complete sequential live-probe operation. */
@@ -40,6 +42,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
   readonly #fetch: typeof fetch;
   readonly #base: URL;
   readonly #previewSuffix: string;
+  readonly #productionHostname: string | undefined;
   readonly #productionBranch: string;
   readonly #timeoutMs: number;
 
@@ -47,6 +50,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     if (!identifier(options.accountId, 32) || !identifier(options.projectKey, 160) || !identifier(options.productionBranch, 160)) throw new CloudflareDeliveryError("CLOUDFLARE_CONFIG_INVALID", "Cloudflare account or project identifier is invalid");
     this.#base = apiBase(options.apiBaseUrl ?? API_BASE);
     this.#previewSuffix = hostnameSuffix(options.previewHostnameSuffix ?? ".pages.dev");
+    this.#productionHostname = options.productionHostname ? exactHostname(options.productionHostname) : undefined;
     this.#accountId = options.accountId;
     this.#projectKey = options.projectKey;
     this.#apiToken = options.apiToken;
@@ -87,7 +91,9 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     this.#assertProject(input.projectKey);
     if (!identifier(input.deploymentId, 160) || !hash(input.referenceHash)) throw new CloudflareDeliveryError("CLOUDFLARE_RETRY_INVALID", "Cloudflare retry binding is invalid");
     const response = await this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}/deployments/${encodeURIComponent(input.deploymentId)}/retry`, { method: "POST" });
-    const value = deployment(resultObject(requiredResponse(response)), this.#projectKey, input.referenceHash);
+    const row = resultObject(requiredResponse(response));
+    if (input.environment === "preview") previewUrl(row, this.#projectKey, this.#previewSuffix);
+    const value = deployment(row, this.#projectKey, input.referenceHash);
     if (value.environment !== input.environment) throw new CloudflareDeliveryError("CLOUDFLARE_ENVIRONMENT_MISMATCH", "Cloudflare retry returned the wrong deployment environment");
     return value;
   }
@@ -122,8 +128,10 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     const response = await this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}/deployments`, {
       method: "POST", body: form
     });
-    const value = deployment(resultObject(requiredResponse(response)), this.#projectKey, input.referenceHash);
+    const row = resultObject(requiredResponse(response));
+    const value = deployment(row, this.#projectKey, input.referenceHash);
     if (value.environment !== environment) throw new CloudflareDeliveryError("CLOUDFLARE_ENVIRONMENT_MISMATCH", "Cloudflare deployment did not return the requested environment");
+    if (environment === "preview") previewUrl(row, this.#projectKey, this.#previewSuffix);
     return value;
   }
 
@@ -142,7 +150,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     const deadline = Date.now() + this.#timeoutMs;
     const project = resultObject(requiredResponse(await this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}`, {}, false, deadline)));
     const canonical = canonicalDeployment(project, this.#productionBranch, input.deploymentId);
-    const url = canonicalAlias(canonical, this.#previewSuffix);
+    const url = canonicalAlias(canonical, this.#previewSuffix, this.#productionHostname);
     const files: ImmutableArtifactFile[] = [];
     let headers: Headers | undefined;
     for (const expected of input.reference.files) {
@@ -241,13 +249,16 @@ function hostnameSuffix(value: string): string {
   if (!/^\.[a-z0-9.-]{3,253}$/.test(value) || value.includes("..")) throw new CloudflareDeliveryError("CLOUDFLARE_CONFIG_INVALID", "Cloudflare preview hostname suffix is invalid");
   return value;
 }
+function exactHostname(value: string): string { if (!/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(value) || value.includes("..")) throw new CloudflareDeliveryError("CLOUDFLARE_CONFIG_INVALID", "Cloudflare production hostname is invalid"); return value; }
 
-function previewUrl(row: Record<string, unknown>, suffix: string): string {
+function previewUrl(row: Record<string, unknown>, projectKey: string, suffix: string): string {
   const url = row.url;
   if (typeof url !== "string") throw new CloudflareDeliveryError("CLOUDFLARE_PREVIEW_INVALID", "Cloudflare deployment has no HTTPS preview URL");
   let parsed: URL;
   try { parsed = new URL(url); } catch { throw new CloudflareDeliveryError("CLOUDFLARE_PREVIEW_INVALID", "Cloudflare deployment preview URL is invalid"); }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port || !parsed.hostname.endsWith(suffix)) throw new CloudflareDeliveryError("CLOUDFLARE_PREVIEW_INVALID", "Cloudflare deployment preview URL is outside the configured Pages scope");
+  const projectSuffix = `.${projectKey}${suffix}`;
+  const label = parsed.hostname.endsWith(projectSuffix) ? parsed.hostname.slice(0, -projectSuffix.length) : "";
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port || parsed.pathname !== "/" || parsed.search || parsed.hash || !label || label.includes(".") || !/^[a-z0-9-]{1,63}$/.test(label)) throw new CloudflareDeliveryError("CLOUDFLARE_PREVIEW_INVALID", "Cloudflare deployment preview URL is outside the configured Pages scope");
   return parsed.toString();
 }
 
@@ -260,13 +271,13 @@ function canonicalDeployment(project: Record<string, unknown>, productionBranch:
   return row;
 }
 
-function canonicalAlias(row: Record<string, unknown>, suffix: string): string {
+function canonicalAlias(row: Record<string, unknown>, suffix: string, expectedHostname?: string): string {
   const aliases = row.aliases;
   if (!Array.isArray(aliases) || aliases.length < 1 || aliases.length > 64 || !aliases.every((value) => typeof value === "string")) throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment aliases are invalid");
   for (const alias of aliases) {
     try {
       const url = new URL(alias);
-      if (url.protocol === "https:" && !url.username && !url.password && !url.port && url.hostname.endsWith(suffix)) return url.toString();
+      if (url.protocol === "https:" && !url.username && !url.password && !url.port && (expectedHostname ? url.hostname === expectedHostname : url.hostname.endsWith(suffix))) return url.toString();
     } catch { /* bounded hostile alias is ignored */ }
   }
   throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment has no allowed Pages alias");

@@ -37,6 +37,8 @@ export interface McpHttpOptions {
 export interface ReadinessResult {
   readonly ready: boolean;
   readonly pluginHost?: Readonly<Record<string, unknown>>;
+  readonly provider?: "embedded";
+  readonly staging?: Readonly<{ provider: string; profileDigest: string; bindingDigest: string; tenantId: string; siteId: string; hostname: string }>;
 }
 
 export function createMcpHttpServer(options: McpHttpOptions) {
@@ -60,7 +62,9 @@ export function createMcpHttpServer(options: McpHttpOptions) {
         const readiness = typeof result === "boolean" ? { ready: result } : result;
         return sendJson(response, readiness.ready ? 200 : 503, {
           status: readiness.ready ? "ready" : "not-ready",
-          ...(readiness.pluginHost ? { pluginHost: readiness.pluginHost } : {})
+          ...(readiness.pluginHost ? { pluginHost: readiness.pluginHost } : {}),
+          ...(readiness.provider ? { provider: readiness.provider } : {}),
+          ...(readiness.staging ? { staging: readiness.staging } : {})
         });
       } catch {
         return sendJson(response, 503, { status: "not-ready" });

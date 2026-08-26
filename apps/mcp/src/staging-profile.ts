@@ -8,7 +8,7 @@ import { parseCloudflareStagingBinding, type CloudflareStagingBinding, type Site
 import { McpEditingError } from "./errors.js";
 import type { McpRequestContext } from "./model.js";
 
-export const CLOUDFLARE_STAGING_BINDING_SCHEMA = "io.navocms.cloudflare-staging-binding.v1" as const;
+export const CLOUDFLARE_STAGING_BINDING_SCHEMA = "io.navocms.cloudflare-staging-binding.v2" as const;
 export const CLOUDFLARE_STAGING_PLUGIN_ID = "navocms.release.cloudflare-staging" as const;
 
 /** Non-secret deployment coordinates. Credential values remain operator-owned. */
