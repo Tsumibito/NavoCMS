@@ -396,7 +396,10 @@ export class McpEditingService {
         publication = state.rollback.target;
       } else if ((state.release.status === "approved" || state.release.status === "publishing") && !publication) {
         publication = await this.applyAndVerify(context, repositoryContext, input.releaseId, input.releaseHash);
-      } else if (publication && (state.release.status === "verification_failed" || publication.status === "verification_failed")) {
+      } else if (publication && (
+        (state.release.status === "publishing" && publication.status === "applied") ||
+        state.release.status === "verification_failed" || publication.status === "verification_failed"
+      )) {
         const valid = await this.#releaseProvider.verify(publication);
         if (!valid) throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider still does not expose the previewed artifact");
         await this.#releases.markVerified(repositoryContext, input.releaseId, publication.id);

@@ -154,6 +154,24 @@ describe("durable release workflow", () => {
       vi.useRealTimers();
     }
   });
+
+  it("reconciles an applied publication after provider verification throws without republishing", async () => {
+    const provider = new RecoverableProvider();
+    provider.failVerifyOnce = true;
+    const repository = new InMemoryEditingRepository(); repository.registerSite(site);
+    const releases = new InMemoryReleaseWorkflowRepository(); const events = new InMemoryEventStore();
+    const service = new McpEditingService(repository, events, undefined, releases, provider);
+    const context = requestContext();
+    const preview = await draftPreviewApprove(service, context, "verification-crash", "Verification crash", "verification-crash");
+    await expect(service.publishRelease(context, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-verification-crash-001"
+    })).rejects.toThrow("interrupted verification");
+    expect(provider.publishCount).toBe(1);
+    await expect(service.reconcileRelease(context, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-verification-crash-001"
+    })).resolves.toMatchObject({ release: { status: "published" }, publication: { status: "applied" } });
+    expect(provider.publishCount).toBe(1);
+  });
 });
 
 class CapturingStagingOperations implements StagingAstroOperations {
@@ -171,6 +189,7 @@ class RecoverableProvider implements ReleaseProvider {
   public verifyLive = true;
   public failRollbackOnce = false;
   public failPublishOnce = false;
+  public failVerifyOnce = false;
 
   public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
     this.publishCount += 1;
@@ -183,6 +202,7 @@ class RecoverableProvider implements ReleaseProvider {
   }
 
   public async verify(): Promise<boolean> {
+    if (this.failVerifyOnce) { this.failVerifyOnce = false; throw new Error("interrupted verification"); }
     return this.verifyLive;
   }
 
