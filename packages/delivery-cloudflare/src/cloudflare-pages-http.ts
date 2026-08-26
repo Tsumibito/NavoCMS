@@ -1,4 +1,6 @@
 import { sha256 } from "@navocms/kernel";
+import { hash as blake3 } from "blake3-wasm";
+import { extname } from "node:path";
 
 import {
   CloudflareDeliveryError,
@@ -103,14 +105,14 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     assertImmutableFiles(input.reference, input.files);
     await this.#preflightBranch(branch, environment);
     const fileEntries = Object.entries(input.files).sort(([left], [right]) => left.localeCompare(right));
-    const hashes = fileEntries.map(([, body]) => sha256(body));
+    const hashes = fileEntries.map(([path, body]) => pagesAssetHash(path, body));
     if (fileEntries.length !== input.reference.fileCount || hashes.length < 1 || hashes.length > 512) throw new CloudflareDeliveryError("CLOUDFLARE_ASSET_BOUNDS", "Cloudflare asset manifest exceeds delivery bounds");
 
     const uploadToken = await this.#uploadToken();
     const missing = await this.#uploadJson("/pages/assets/check-missing", uploadToken, { hashes });
     const missingHashes = new Set(resultArray(missing).filter((value): value is string => typeof value === "string"));
     const assets = fileEntries.flatMap(([path, body]) => {
-      const key = sha256(body);
+      const key = pagesAssetHash(path, body);
       return missingHashes.has(key) ? [{ key, value: Buffer.from(body).toString("base64"), base64: true, metadata: { contentType: contentType(path) } }] : [];
     });
     if (assets.length > 0) await this.#uploadJson("/pages/assets/upload", uploadToken, assets);
@@ -120,7 +122,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     form.set("commit_dirty", "false");
     form.set("commit_hash", input.reference.sourceCommitSha);
     form.set("commit_message", marker(input.referenceHash, environment));
-    form.set("manifest", JSON.stringify(Object.fromEntries(fileEntries.map(([path, body]) => [path, sha256(body)]))));
+    form.set("manifest", JSON.stringify(Object.fromEntries(fileEntries.map(([path, body]) => [path, pagesAssetHash(path, body)]))));
     form.set("pages_build_output_dir", "dist");
     // This file is derived solely from the immutable reference and lets a bounded HTTPS probe
     // confirm the deployed output without trusting a mutable preview URL or response body.
@@ -360,6 +362,12 @@ async function readWithAbort(reader: ReadableStreamDefaultReader<Uint8Array>, si
   ]);
 }
 function contentType(path: string): string { return path.endsWith(".html") ? "text/html; charset=utf-8" : path.endsWith(".css") ? "text/css; charset=utf-8" : path.endsWith(".js") ? "application/javascript; charset=utf-8" : path.endsWith(".json") ? "application/json" : "application/octet-stream"; }
+/** Cloudflare Pages uses Wrangler's truncated BLAKE3 identity, not the artifact SHA-256. */
+function pagesAssetHash(path: string, body: string): string {
+  const extension = extname(path).slice(1);
+  const identity = `${Buffer.from(body).toString("base64")}${extension}`;
+  return blake3(identity).toString("hex").slice(0, 32);
+}
 function safeOutputPath(value: string): boolean { return /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*\/$)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && Buffer.byteLength(value, "utf8") <= 512; }
 function canonical(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; if (value !== null && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`; return JSON.stringify(value) ?? "null"; }
 

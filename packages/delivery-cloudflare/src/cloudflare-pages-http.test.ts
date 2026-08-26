@@ -23,7 +23,7 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     const responses = [
       json({ result: { production_branch: "main" } }),
       json({ result: { jwt: "upload-token-0123456789" } }),
-      json({ result: [sha256("<html>en</html>")] }),
+      json({ result: ["d4eb547c199ef336cae19e3248b71bdc"] }),
       json({ result: {} }),
       json({ result: { id: "deployment-1", environment: "preview", url: "https://hash.pages-project.pages.dev", latest_stage: { status: "success" } } })
     ];
@@ -53,10 +53,13 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     expect(header(calls[2]!, "authorization")).toBe("Bearer upload-token-0123456789");
     expect(header(calls[3]!, "authorization")).toBe("Bearer upload-token-0123456789");
     expect(header(calls[4]!, "authorization")).toBe("Bearer api-token-0123456789");
+    expect(JSON.parse(String(calls[2]!.init.body))).toEqual({ hashes: ["d4eb547c199ef336cae19e3248b71bdc"] });
+    expect(JSON.parse(String(calls[3]!.init.body))).toEqual([expect.objectContaining({ key: "d4eb547c199ef336cae19e3248b71bdc" })]);
     const form = calls[4]!.init.body as FormData;
     expect(form.get("branch")).toBe("preview");
     expect(form.get("commit_hash")).toBe(reference.sourceCommitSha);
     expect(form.get("commit_message")).toBe(`navocms:preview:${referenceHash}`);
+    expect(JSON.parse(String(form.get("manifest")))).toEqual({ "en/index.html": "d4eb547c199ef336cae19e3248b71bdc" });
     await expect((form.get("_headers") as Blob).text()).resolves.toContain(`X-NavoCMS-Artifact-Reference: ${referenceHash}`);
   });
 
