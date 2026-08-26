@@ -6,6 +6,7 @@ export * from "./model.js";
 export * from "./postgres-release-repository.js";
 export * from "./postgres-delivery-phase-store.js";
 export * from "./staging-profile.js";
+export * from "./staging-runtime.js";
 export * from "./release-repository.js";
 export * from "./repository.js";
 export * from "./service.js";

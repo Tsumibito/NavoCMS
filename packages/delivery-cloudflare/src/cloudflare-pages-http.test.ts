@@ -25,7 +25,7 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
       json({ result: { jwt: "upload-token-0123456789" } }),
       json({ result: [sha256("<html>en</html>")] }),
       json({ result: {} }),
-      json({ result: { id: "deployment-1", environment: "preview", latest_stage: { status: "success" } } })
+      json({ result: { id: "deployment-1", environment: "preview", url: "https://hash.pages-project.pages.dev", latest_stage: { status: "success" } } })
     ];
     const transport = new FetchCloudflarePagesTransport({
       accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
@@ -98,6 +98,14 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
       fetcher: async () => responses.shift()!
     });
     await expect(transport.createPreview({ projectKey: "pages-project", previewBranch: "preview", reference, referenceHash, files: { "en/index.html": "<html>en</html>" } })).rejects.toMatchObject({ code: "CLOUDFLARE_ENVIRONMENT_MISMATCH" });
+  });
+
+  it("accepts only a project-scoped Pages preview URL", async () => {
+    for (const url of ["https://a.b.pages-project.pages.dev", "https://hash.other-project.pages.dev", "https://hash.pages.dev", "http://hash.pages-project.pages.dev", "https://token@hash.pages-project.pages.dev", "https://hash.pages-project.pages.dev:444", "https://hash.pages-project.pages.dev/path", "https://hash.pages-project.pages.dev?x=1", "https://hash.pages-project.pages.dev#x"]) {
+      const responses = [json({ result: { production_branch: "main" } }), json({ result: { jwt: "upload-token-0123456789" } }), json({ result: [] }), json({ result: { id: "preview-url", environment: "preview", url, latest_stage: { status: "success" } } })];
+      const transport = new FetchCloudflarePagesTransport({ accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789", fetcher: async () => responses.shift()! });
+      await expect(transport.createPreview({ projectKey: "pages-project", previewBranch: "preview", reference, referenceHash, files: { "en/index.html": "<html>en</html>" } })).rejects.toMatchObject({ code: "CLOUDFLARE_PREVIEW_INVALID" });
+    }
   });
 
   it("rejects a swapped output before requesting either credential", async () => {

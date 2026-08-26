@@ -93,9 +93,9 @@ export interface SiteProfile {
 }
 
 export interface CloudflareStagingBinding {
-  readonly schema: "io.navocms.cloudflare-staging-binding.v1";
+  readonly schema: "io.navocms.cloudflare-staging-binding.v2";
   readonly tenantId: string; readonly siteId: string; readonly environment: "staging";
-  readonly cloudflare: { readonly accountId: string; readonly projectId: string; readonly productionBranch: string; readonly previewBranch: string; readonly allowedHostname: string; readonly tokenSecretRef: string };
+  readonly cloudflare: { readonly accountId: string; readonly projectId: string; readonly productionBranch: string; readonly previewBranch: string; readonly previewHostnameSuffix: string; readonly allowedHostname: string; readonly tokenSecretRef: string };
   readonly coolify: { readonly baseUrl: string; readonly applicationUuid: string; readonly tokenSecretRef: string };
 }
 

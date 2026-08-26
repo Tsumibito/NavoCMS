@@ -33,7 +33,8 @@ const schemaPaths = {
   mediaAsset: "schemas/media-asset.schema.json",
   astroArtifact: "schemas/astro-artifact-manifest.schema.json",
   cloudflareArtifactReference: "schemas/cloudflare-artifact-reference.schema.json",
-  cloudflareStagingBinding: "schemas/cloudflare-staging-binding.schema.json"
+  cloudflareStagingBinding: "schemas/cloudflare-staging-binding-v2.schema.json",
+  cloudflareStagingBindingV1: "schemas/cloudflare-staging-binding.schema.json"
 };
 
 const validators = {};
@@ -140,6 +141,7 @@ function semanticDesignSystem(document, file) {
 function semanticDesignOverride() {}
 
 const fixtureKinds = [
+  { suffix: ".cloudflare-staging-binding-v1.json", validator: "cloudflareStagingBindingV1", semantic: () => {} },
   { suffix: ".plugin.json", validator: "plugin", semantic: semanticPlugin },
   { suffix: ".profile.json", validator: "profile", semantic: semanticProfile },
   { suffix: ".content-type.json", validator: "contentType", semantic: semanticContentType },
@@ -174,7 +176,8 @@ const negativeChecks = [
   ["mediaAsset", { apiVersion: "navocms.io/v0alpha1", kind: "MediaAsset" }],
   ["astroArtifact", { schema: "io.navocms.astro-artifact.v1" }],
   ["cloudflareArtifactReference", { schema: "io.navocms.cloudflare-artifact-reference.v1" }],
-  ["cloudflareStagingBinding", { schema: "io.navocms.cloudflare-staging-binding.v1" }]
+  ["cloudflareStagingBinding", { schema: "io.navocms.cloudflare-staging-binding.v2" }],
+  ["cloudflareStagingBindingV1", { schema: "io.navocms.cloudflare-staging-binding.v1" }]
 ];
 
 for (const [name, invalidDocument] of negativeChecks) {
