@@ -55,7 +55,9 @@ The private deployment overlay must supply a validated binding containing only:
 - tenant ID, site ID, and `staging` environment;
 - Cloudflare account/project IDs, actual production and preview branches, a
   Pages preview hostname suffix, and the exact allowed staging hostname;
-- Coolify HTTPS base endpoint and application UUID;
+- Coolify HTTPS base endpoint and application identifier (`applicationUuid` is
+  the retained binding field name; it accepts Coolify's provider-native ID or
+  an RFC UUID);
 - dotenvx secret-reference names for the Cloudflare and Coolify API tokens.
 
 Do not put token values, Authorization headers, dotenvx decryption keys, or

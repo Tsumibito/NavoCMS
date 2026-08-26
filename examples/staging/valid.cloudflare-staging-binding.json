@@ -4,5 +4,5 @@
   "siteId": "22222222-2222-4222-8222-222222222222",
   "environment": "staging",
   "cloudflare": { "accountId": "staging-account", "projectId": "staging-pages", "productionBranch": "staging", "previewBranch": "preview", "previewHostnameSuffix": ".pages.dev", "allowedHostname": "staging.example.test", "tokenSecretRef": "secret:delivery/cloudflare-token" },
-  "coolify": { "baseUrl": "https://coolify.staging.example.test", "applicationUuid": "33333333-3333-4333-8333-333333333333", "tokenSecretRef": "secret:delivery/coolify-token" }
+  "coolify": { "baseUrl": "https://coolify.staging.example.test", "applicationUuid": "y7xtftoizsqmitvgfvzfwkbu", "tokenSecretRef": "secret:delivery/coolify-token" }
 }
