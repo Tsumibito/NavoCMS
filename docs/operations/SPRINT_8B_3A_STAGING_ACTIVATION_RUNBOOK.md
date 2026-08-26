@@ -25,15 +25,27 @@ the persisted dry-run proof. Missing readiness, missing record, scope/hash
 drift, tampered source, or tampered output fails closed before secret forwarding
 or Cloudflare/Coolify transport use.
 
-## Prerequisite not delivered by 8B.3B
+## 8B.3C trusted reviewed-build prerequisite
 
-There is not yet a trusted reviewed-build registration producer. This package
-does not expose a public MCP tool for Astro source/output payloads, so the
-operational dry run cannot be executed from this code boundary alone. The next
-package must build from the checked-out reviewed commit, derive and bind
-`sourceCommitSha` from that checkout, and register the verified source/output
-record under trusted authority. It must never accept `sourceCommitSha` from
-untrusted MCP input.
+Sprint 8B.3C adds the internal `TrustedAstroBuilder`; it is not a public MCP
+tool. The builder receives an exact reviewed release identity and bounded
+idempotency key, loads the complete reviewed content/design/media/delivery/
+governance input through a private boundary, renders with
+`@navocms/design-astro`, and creates two clean pinned Astro builds. It checks
+the configured reviewed checkout is clean and detached, derives
+`sourceCommitSha` only with `git rev-parse --verify HEAD^{commit}`, and
+performs one bounded offline frozen-lockfile preparation for the checkout-local
+toolchain. It re-attests the same checkout-bound lock and executable toolchain
+closure before registration. Each build has an independent materialization and
+isolated cache. It rejects
+non-identical output and then uses the existing
+`PostgresReviewedAstroArtifactStore` transaction, idempotency,
+Ledger, and outbox path as an authenticated human with `content:publish`.
+
+The private runtime composition that supplies the reviewed-input store remains
+required before an operational dry run. Do not expose its source/output objects
+or commit selector in MCP; do not wire the builder to Cloudflare, Coolify,
+credentials, or the production profile.
 
 ## Operator input for 8B.3B
 
@@ -52,7 +64,8 @@ staging profile has passed readiness.
 
 ## 8B.3B execution checklist
 
-1. Deliver and review the trusted builder/registration prerequisite above.
+1. Review and compose the trusted builder/registration prerequisite above with
+   a durable reviewed-input source; no MCP payload fallback is allowed.
 2. Confirm the deployment is `staging`; reject the profile for production.
 3. Validate the binding schema, tenant/site scope, distinct Pages branches,
    HTTPS Coolify endpoint, and secret-reference names.
