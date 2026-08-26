@@ -121,7 +121,7 @@ export function renderAstroArtifact(input: AstroRenderInput): AstroArtifact {
   if (input.anchors.content !== content || input.anchors.design !== input.design.digest || input.anchors.delivery !== input.deliveryLayout.digest || input.expectedMediaDigest !== media) throw new AstroDesignAdapterError("Renderer input digest drift");
   const files: Record<string, string> = {
     "package.json": canonical({ private: true, type: "module", packageManager: "pnpm@10.24.0", scripts: { build: "astro build", check: "astro check" }, dependencies: { astro: "7.2.4" }, devDependencies: { "@astrojs/check": "0.9.10", typescript: "5.9.3" } }),
-    "astro.config.mjs": "import { defineConfig } from 'astro/config';\nexport default defineConfig({ output: 'static', build: { format: 'directory' } });\n",
+    "astro.config.mjs": "import { defineConfig } from 'astro/config';\nexport default defineConfig({ output: 'static', build: { format: 'directory' }, vite: { cacheDir: '.navocms-cache' } });\n",
     "src/styles/navocms.css": input.design.css,
     "src/layouts/SiteLayout.astro": input.deliveryLayout.source
   };

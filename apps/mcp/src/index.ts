@@ -10,6 +10,7 @@ export * from "./staging-runtime.js";
 export * from "./staging-composition.js";
 export * from "./reviewed-astro-resolver.js";
 export * from "./postgres-reviewed-astro-artifact-store.js";
+export * from "./trusted-astro-builder.js";
 export * from "./release-repository.js";
 export * from "./repository.js";
 export * from "./service.js";

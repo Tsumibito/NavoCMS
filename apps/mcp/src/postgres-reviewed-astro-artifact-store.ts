@@ -201,7 +201,7 @@ function scope(context: RepositoryContext) {
 }
 
 function assertAuthority(authority: ReviewedAstroArtifactAuthority, context: RepositoryContext): void {
-  if (authority.tenantId !== context.site.tenantId || authority.siteId !== context.site.siteId || authority.principal.id !== context.principalId) {
+  if (authority.principal.kind !== "human" || authority.tenantId !== context.site.tenantId || authority.siteId !== context.site.siteId || authority.principal.id !== context.principalId) {
     throw new McpEditingError("REVIEWED_ASTRO_AUTHORITY_DENIED", "Reviewed Astro registration authority does not match its database scope");
   }
 }
