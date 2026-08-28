@@ -25,7 +25,7 @@ The builder renders with `@navocms/design-astro`, then runs a pinned Astro
 `check` and `build` twice in independent clean artifact directories. The runner
 first requires its configured reviewed checkout itself to be a clean detached
 checkout, derives a canonical full object ID with `git rev-parse --verify
-HEAD^{commit}`, then performs one bounded `corepack pnpm@10.24.0 install
+HEAD^{commit}`, then performs one bounded `corepack pnpm@10.26.0 install
 --offline --frozen-lockfile` preparation inside that checkout. The only
 toolchain is the checkout-local `apps/design-catalogue/node_modules`: its
 executed Astro/check/TypeScript dependency closure is content-fingerprinted,

@@ -223,7 +223,7 @@ function verifyPinnedArtifactPolicy(artifact: AstroArtifact): void {
   verifyAstroArtifact(artifact, artifact.hash); let packageJson: unknown;
   try { packageJson = JSON.parse(artifact.files["package.json"] ?? ""); } catch { throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Astro artifact package policy is invalid"); }
   const value = packageJson as Record<string, unknown>;
-  if (!exactKeys(value, ["dependencies", "devDependencies", "packageManager", "private", "scripts", "type"]) || value.packageManager !== "pnpm@10.24.0" || !exactDependencyVersions(value)) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Astro artifact package policy is not pinned");
+  if (!exactKeys(value, ["dependencies", "devDependencies", "packageManager", "private", "scripts", "type"]) || value.packageManager !== "pnpm@10.26.0" || !exactDependencyVersions(value)) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Astro artifact package policy is not pinned");
 }
 
 async function verifyImageToolchain(directory: string): Promise<Readonly<{ directory: string; astroCli: string; fingerprint: `sha256:${string}` }>> {
