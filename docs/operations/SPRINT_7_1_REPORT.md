@@ -30,8 +30,8 @@ The implemented invariants include:
   exact migration readiness, runtime `NOBYPASSRLS`, forced RLS, and deployment-scope checks;
 - permission-scoped MCP discovery and executable authorization tests.
 
-The detailed completion criteria remain recorded in
-[`SPRINT_7_1_CODE_GATE_TASK.md`](SPRINT_7_1_CODE_GATE_TASK.md).
+The accepted commit, this report, and its retained CI/deployment evidence are
+the completion record; the superseded working checklist has been removed.
 
 ## Staging deployment evidence
 

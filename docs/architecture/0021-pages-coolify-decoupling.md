@@ -21,10 +21,9 @@ Pages discovery/live-byte verification remain unchanged.
 
 `io.navocms.cloudflare-staging-binding.v3` contains only the non-secret
 Cloudflare Pages coordinates and token reference. It is the only binding that
-can activate `cloudflare-staging`. The checked-in v1 and v2 schemas remain
-unchanged for compatibility. They are parsed only to identify a legacy binding
-and fail activation with `STAGING_BINDING_MIGRATION_REQUIRED` before a secret
-or transport is used.
+can activate `cloudflare-staging`. Staging has been migrated to v3, so the
+unused v1/v2 activation schemas and readers have been removed. Any other schema
+fails contract validation before a secret or transport is used.
 
 Existing v1 publication references remain decodable through an isolated
 compatibility path. They may be read, verified against Pages, reconciled, and
@@ -43,13 +42,11 @@ operation. The deployment platform API or dashboard is the operator boundary.
 
 ## Transition
 
-1. Inventory bindings and retained publications without changing either legacy
-   schema or stored reference.
-2. Replace each activated v1/v2 binding with a separately reviewed v3 Pages
-   binding, pin its new digest, and retain the old document for audit only.
-3. Deploy the runtime through the separate Coolify operator procedure. Do not
+1. Keep the activated v3 Pages binding and its reviewed digest in the encrypted
+   staging overlay.
+2. Deploy the runtime through the separate Coolify operator procedure. Do not
    use content publish/reconcile/rollback as an activation mechanism.
-4. Keep the legacy-reference compatibility decoder until all retained v1
+3. Keep the legacy publication-reference decoder until all retained v1
    publications have passed their retention window. It only calls Pages.
 
 ## Readiness
@@ -69,4 +66,4 @@ publication ready or verified.
 
 Focused provider and workflow tests prove zero Coolify calls for Pages publish,
 reconcile, and rollback, while v1 references remain Pages-reconcilable. Contract
-tests validate v1, v2, and v3 independently.
+tests validate the active v3 binding and reject unknown schemas.

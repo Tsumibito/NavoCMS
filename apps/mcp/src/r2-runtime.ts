@@ -1,13 +1,12 @@
 import { createHash } from "node:crypto";
 
 import { parseR2RuntimeBinding, type R2RuntimeBinding } from "@navocms/contracts";
+import { dotenvxSecretEnvironmentKey, type DotenvxSecretBroker } from "./secret-broker.js";
 
 export const R2_RUNTIME_NAMESPACE = "navocms/v1/" as const;
 export const R2_RUNTIME_PREFIX = R2_RUNTIME_NAMESPACE;
 const R2_PREFIX = R2_RUNTIME_NAMESPACE;
 const MAX_BINDING_BYTES = 8 * 1024;
-const SECRET_REFERENCE = /^secret:[A-Za-z0-9][A-Za-z0-9._/-]{2,159}$/;
-const MIN_SECRET_VALUE_LENGTH = 16;
 
 export type R2RuntimeSelection = "r2";
 
@@ -28,12 +27,6 @@ export interface R2RuntimeReadiness {
   readonly bindingDigest: string;
 }
 
-/** Delivers a secret only inside a caller-owned operation; it never serializes one. */
-export interface R2DotenvxSecretBroker {
-  readonly assertAvailable: (reference: string) => void;
-  readonly use: <T>(reference: string, operation: (value: string) => Promise<T>) => Promise<T>;
-}
-
 export class R2RuntimeError extends Error {
   public readonly code: string;
 
@@ -44,30 +37,11 @@ export class R2RuntimeError extends Error {
   }
 }
 
-/** dotenvx's public env-name projection; plaintext values are intentionally not accepted here. */
-export function dotenvxSecretEnvironmentKey(reference: string): string {
-  if (!SECRET_REFERENCE.test(reference)) throw new R2RuntimeError("R2_SECRET_REFERENCE_INVALID", "R2 secret reference is invalid");
-  return `DOTENVX_SECRET_${reference.slice("secret:".length).replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
-}
-
-export function createDotenvxR2SecretBroker(environment: Readonly<Record<string, string | undefined>> = process.env): R2DotenvxSecretBroker {
-  return Object.freeze({
-    assertAvailable(reference: string): void {
-      assertSecret(environment[dotenvxSecretEnvironmentKey(reference)]);
-    },
-    async use<T>(reference: string, operation: (value: string) => Promise<T>): Promise<T> {
-      const value = environment[dotenvxSecretEnvironmentKey(reference)];
-      assertSecret(value);
-      return operation(value);
-    }
-  });
-}
-
 export interface R2RuntimeSelectionResult {
   readonly selection: R2RuntimeSelection;
   readonly binding: R2RuntimeBinding;
   readonly readiness: R2RuntimeReadiness;
-  readonly secrets: R2DotenvxSecretBroker;
+  readonly secrets: DotenvxSecretBroker;
 }
 
 /** Selects R2 only after all review, scope, and reference gates pass. No transport is constructed. */
@@ -77,7 +51,7 @@ export function selectR2Runtime(input: Readonly<{
   readonly environment: string;
   readonly binding: unknown;
   readonly expected: R2RuntimeReadinessExpectation;
-  readonly secrets: R2DotenvxSecretBroker;
+  readonly secrets: DotenvxSecretBroker;
 }>): R2RuntimeSelectionResult | undefined {
   if (input.requested !== "r2") return undefined;
   assertR2RuntimeActivationGuard({ runtimeMode: input.runtimeMode, environment: input.environment });
@@ -143,12 +117,6 @@ function assertDistinctSecretReferences(binding: R2RuntimeBinding): void {
   const accessKey = dotenvxSecretEnvironmentKey(binding.accessKeySecretRef);
   const secretKey = dotenvxSecretEnvironmentKey(binding.secretKeySecretRef);
   if (accessKey === secretKey) throw new R2RuntimeError("R2_SECRET_REFERENCE_COLLISION", "R2 secret references must be distinct");
-}
-
-function assertSecret(value: string | undefined): asserts value is string {
-  if (!value || value.trim().length === 0 || value.length < MIN_SECRET_VALUE_LENGTH || value.length > 4096) {
-    throw new R2RuntimeError("R2_SECRET_REFERENCE_MISSING", "Required R2 secret reference is unavailable");
-  }
 }
 
 function canonical(value: unknown): string {

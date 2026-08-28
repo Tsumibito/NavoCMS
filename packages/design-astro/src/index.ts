@@ -9,7 +9,7 @@ export interface AstroComponentRegistration {
   readonly id: string;
   readonly module: string;
   /** Pinned component source copied into the self-contained Astro artifact. */
-  readonly source?: string;
+  readonly source: string;
   readonly exportName?: string;
 }
 
@@ -21,8 +21,6 @@ export interface AstroDesignAdapter {
     readonly id: string;
     readonly slots: readonly { readonly id: string; readonly componentModule: string }[];
   }[];
-  /** Legacy registrations are normalized only for pre-v1 adapter consumers. */
-  readonly legacyComponentIds: readonly string[];
 }
 
 export const ASTRO_RENDER_LIMITS = Object.freeze({ routes: 100, locales: 16, registrations: 64, mediaPerRoute: 32, files: 256, directives: 16, directiveAttributes: 16, sourceBytes: 64 * 1024, layoutBytes: 64 * 1024, titleBytes: 256, altBytes: 512, bundleBytes: 2 * 1024 * 1024 });
@@ -44,9 +42,8 @@ export function createAstroDesignAdapter(
   );
   if (duplicate) throw new AstroDesignAdapterError(`Duplicate Astro component registration: ${duplicate.id}`);
 
-  if (registrations.length > ASTRO_RENDER_LIMITS.registrations || registrations.some((registration) => !/^[a-z0-9-]{1,64}$/.test(registration.id) || byteLength(registration.module) < 1 || byteLength(registration.module) > 512 || (registration.exportName !== undefined && !/^[A-Za-z_$][A-Za-z0-9_$]{0,127}$/.test(registration.exportName)) || (registration.source !== undefined && (byteLength(registration.source) < 1 || byteLength(registration.source) > ASTRO_RENDER_LIMITS.sourceBytes)))) throw new AstroDesignAdapterError("Astro registration bounds invalid");
-  const legacyComponentIds = registrations.filter((registration) => registration.source === undefined).map((registration) => registration.id);
-  const components = new Map(registrations.map((registration) => [registration.id, Object.freeze({ ...registration, source: registration.source ?? `<section data-navocms-legacy-registration=${JSON.stringify(registration.module)}><slot /></section>` })]));
+  if (registrations.length > ASTRO_RENDER_LIMITS.registrations || registrations.some((registration) => !/^[a-z0-9-]{1,64}$/.test(registration.id) || byteLength(registration.module) < 1 || byteLength(registration.module) > 512 || (registration.exportName !== undefined && !/^[A-Za-z_$][A-Za-z0-9_$]{0,127}$/.test(registration.exportName)) || typeof registration.source !== "string" || byteLength(registration.source) < 1 || byteLength(registration.source) > ASTRO_RENDER_LIMITS.sourceBytes)) throw new AstroDesignAdapterError("Astro registration bounds invalid");
+  const components = new Map(registrations.map((registration) => [registration.id, Object.freeze({ ...registration })]));
   for (const id of design.components.keys()) {
     if (!components.has(id)) throw new AstroDesignAdapterError(`Missing Astro component registration: ${id}`);
   }
@@ -64,7 +61,7 @@ export function createAstroDesignAdapter(
         id: slot.id,
         componentModule: components.get(slot.component)?.module ?? ""
       }))
-    })), legacyComponentIds: Object.freeze(legacyComponentIds.sort())
+    }))
   };
 }
 
@@ -114,7 +111,6 @@ export interface AstroArtifact {
 /** Emits a complete, static Astro project; compilation/deployment stay external capabilities. */
 export function renderAstroArtifact(input: AstroRenderInput): AstroArtifact {
   assertInput(input);
-  if (input.design.legacyComponentIds.length > 0) throw new AstroDesignAdapterError("Astro artifact v1 requires explicit registration source");
   const content = astroContentDigest(input.routes);
   const media = astroMediaDigest(input.routes);
   const registrations = astroRegistrationDigest(input.design.components.values());
@@ -125,7 +121,7 @@ export function renderAstroArtifact(input: AstroRenderInput): AstroArtifact {
     "src/styles/navocms.css": input.design.css,
     "src/layouts/SiteLayout.astro": input.deliveryLayout.source
   };
-  for (const registration of [...input.design.components.values()].sort((left, right) => left.id.localeCompare(right.id))) files[`src/components/${registration.id}.astro`] = registration.source ?? "";
+  for (const registration of [...input.design.components.values()].sort((left, right) => left.id.localeCompare(right.id))) files[`src/components/${registration.id}.astro`] = registration.source;
   for (const route of [...input.routes].sort((left, right) => left.path.localeCompare(right.path))) {
     files[`src/pages${pagePath(route.path)}.astro`] = page(route, input.design.components.get(route.componentId)!, renderSemanticMarkdownHtml(route.source, route.directives));
   }

@@ -1,12 +1,12 @@
 # Sprint 8R.5A — R2 runtime binding runbook
 
-**Status:** review required / no external effects performed
+**Status:** Active on staging
 
 ## Scope
 
-This sprint adds the versioned `io.navocms.r2-runtime-binding.v1` contract and its guarded,
-transport-free runtime composition. It does not create an R2 client, read a production secret,
-call R2, change Cloudflare or Coolify, or alter the Pages binding.
+The versioned `io.navocms.r2-runtime-binding.v1` contract activates one shared
+R2 transport with isolated `navocms/v1/media/` and
+`navocms/v1/artifacts/` stores. It does not alter the Pages binding or production.
 
 The binding is scoped to one tenant/site and the fixed `navocms/v1/` prefix. Existing objects in
 other prefixes remain outside this runtime capability.
@@ -32,12 +32,9 @@ access keys, secret keys, dotenvx decryption keys, or encrypted files.
 3. Confirm exact deployment tenant/site and independently reviewed digest.
 4. Confirm the two references are distinct after dotenvx name normalization and are available
    without logging or returning their values.
-5. When a later transport integration adds its bounded readiness probe, check `/readyz`; it may
-   show only safe identifiers, bucket, `navocms/v1/`, and digest. This Phase A contract alone does
-   not declare R2 ready. Stop if endpoint, reference, or credential material appears.
-
-Only after this preflight may a later sprint inject a reviewed transport. This sprint itself has no
-R2 or network effect.
+5. Check `/readyz`; it may show only safe identifiers, bucket,
+   `navocms/v1/`, and digest. Readiness verifies the three reviewed namespace
+   markers using bounded reads. Stop if credential material appears.
 
 ## Stop and rollback
 

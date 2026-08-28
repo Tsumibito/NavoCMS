@@ -45,7 +45,7 @@ export class StagingAstroPreviewPreparer {
       anchors: Object.freeze({ content: astroContentDigest([route]), design: designDigest, delivery: deliveryDigest, governance: governanceDigest }),
       deliveryLayout: Object.freeze({ schema: "io.navocms.delivery-layout.v1", source: layoutSource, digest: deliveryDigest }),
       expectedMediaDigest: astroMediaDigest([route]),
-      design: Object.freeze({ digest: designDigest, css, components: new Map(registrations.map((item) => [item.id, item])), recipes: [], legacyComponentIds: [] }),
+      design: Object.freeze({ digest: designDigest, css, components: new Map(registrations.map((item) => [item.id, item])), recipes: [] }),
       routes: Object.freeze([route])
     });
     try { renderAstroArtifact(render); } catch { throw new McpEditingError("STAGING_ASTRO_RENDER_INVALID", "Reviewed staging Astro policy could not render this revision"); }

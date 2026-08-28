@@ -6,7 +6,7 @@ import {
 } from "@navocms/s3-core";
 
 import { S3ReviewedAstroObjectStorage } from "./reviewed-astro-object-storage.js";
-import type { R2TransportComposition } from "./r2-composition.js";
+import type { R2RuntimeSelectionResult } from "./r2-runtime.js";
 
 const MARKER_KEY = "_namespace.json";
 const ROOT_MARKER_KEY = "navocms/v1/_namespace.json";
@@ -29,27 +29,27 @@ export interface ActivatedR2StorageRuntime {
  * the shared core adds the reviewed media/artifacts physical namespaces.
  */
 export function createR2StorageRuntime(input: Readonly<{
-  composition: R2TransportComposition;
+  selection: R2RuntimeSelectionResult;
   tenantId: string;
   siteId: string;
   transport?: S3Transport;
   fetcher?: typeof fetch;
 }>): ActivatedR2StorageRuntime {
-  if (input.tenantId !== input.composition.readiness.tenantId || input.siteId !== input.composition.readiness.siteId) {
+  if (input.tenantId !== input.selection.readiness.tenantId || input.siteId !== input.selection.readiness.siteId) {
     throw new Error("R2_STORAGE_SCOPE_MISMATCH");
   }
   const transport = input.transport ?? createFetchS3Transport({
-    endpoint: () => input.composition.endpoint,
-    bucket: () => input.composition.bucket,
-    credentials: () => input.composition.withAccessKey((accessKeyId) =>
-      input.composition.withSecretKey(async (secretAccessKey) => ({ accessKeyId, secretAccessKey }))
+    endpoint: () => input.selection.binding.endpoint,
+    bucket: () => input.selection.binding.bucket,
+    credentials: () => input.selection.secrets.use(input.selection.binding.accessKeySecretRef, (accessKeyId) =>
+      input.selection.secrets.use(input.selection.binding.secretKeySecretRef, async (secretAccessKey) => ({ accessKeyId, secretAccessKey }))
     ),
     ...(input.fetcher ? { fetch: input.fetcher } : {})
   });
   let readiness: Promise<boolean> | undefined;
   return Object.freeze({
-    media: new S3CompatibleMediaStorage({ tenantId: input.tenantId, siteId: input.siteId, bucket: input.composition.bucket, transport }),
-    artifacts: new S3ReviewedAstroObjectStorage({ bucket: input.composition.bucket, transport }),
+    media: new S3CompatibleMediaStorage({ tenantId: input.tenantId, siteId: input.siteId, bucket: input.selection.binding.bucket, transport }),
+    artifacts: new S3ReviewedAstroObjectStorage({ bucket: input.selection.binding.bucket, transport }),
     ready: () => readiness ??= verifyMarkers(transport)
   });
 }

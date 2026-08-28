@@ -1,14 +1,13 @@
 # Sprint 8B.3A — staging activation boundary
 
-**Status:** Review required / Pending CI / no external effects performed
+**Status:** Active staging runbook
 
 ## Scope
 
 This package pins the reviewed, external-effect-capable `cloudflare-staging`
-profile and the versioned `io.navocms.cloudflare-staging-binding.v2` contract.
-The default and production profiles remain the pinned embedded release
-provider. This package does not create a Cloudflare project, call a provider
-API, forward a secret to a transport, or publish an artifact.
+profile and the versioned `io.navocms.cloudflare-staging-binding.v3` contract.
+The default and production profiles remain embedded. Pages publication and
+Coolify runtime deployment are separate operator capabilities.
 
 ## Implemented 8B.3B local boundary
 
@@ -23,7 +22,7 @@ exact persisted record.
 No provider transport is called by resolver readiness, record registration, or
 the persisted dry-run proof. Missing readiness, missing record, scope/hash
 drift, tampered source, or tampered output fails closed before secret forwarding
-or Cloudflare/Coolify transport use.
+or Cloudflare transport use.
 
 ## 8B.3C trusted reviewed-build prerequisite
 
@@ -55,10 +54,7 @@ The private deployment overlay must supply a validated binding containing only:
 - tenant ID, site ID, and `staging` environment;
 - Cloudflare account/project IDs, actual production and preview branches, a
   Pages preview hostname suffix, and the exact allowed staging hostname;
-- Coolify HTTPS base endpoint and application identifier (`applicationUuid` is
-  the retained binding field name; it accepts Coolify's provider-native ID or
-  an RFC UUID);
-- dotenvx secret-reference names for the Cloudflare and Coolify API tokens.
+- one dotenvx secret-reference name for the Cloudflare API token.
 
 Do not put token values, Authorization headers, dotenvx decryption keys, or
 encrypted environment files in this repository, an MCP request, test fixture,
@@ -71,7 +67,7 @@ staging profile has passed readiness.
    no MCP payload fallback is allowed.
 2. Confirm the deployment is `staging`; reject the profile for production.
 3. Validate the binding schema, tenant/site scope, distinct Pages branches,
-   HTTPS Coolify endpoint, and secret-reference names.
+   allowed hostname, and the secret-reference name.
 4. Run the dry proof as an authenticated WorkOS human with `content:publish`:
    resolver → immutable artifact → provider coordinates. Retain its digest.
 5. Inject short-lived secrets through the private dotenvx overlay; never print
@@ -81,25 +77,22 @@ staging profile has passed readiness.
 7. Restart after a durable phase reservation and use reconciliation rather than
    reissuing a mutation. Retain checkpoint, Ledger/outbox, and provider IDs.
 8. Roll back to the exact previous immutable reference, verify canonical Pages
-   bytes/cache contract and the finished Coolify deployment, then reconcile
-   after a second restart.
+   bytes/cache contract, then reconcile after a second restart.
 
 ## Stop conditions and rollback
 
 Stop before any external effect if the environment is not `staging`, binding
 scope mismatches, a reference is absent, a token reference is malformed, or
 the caller is not a WorkOS human with `content:publish`. For an interrupted
-effect, preserve the phase reservation: Cloudflare resolves from canonical
-bytes; Coolify requires authenticated evidence-bound resolution. Do not delete
-checkpoints, retry mutations automatically, or promote the staging profile to
-production.
+effect, preserve the phase reservation and let Cloudflare resolve from
+canonical bytes. Do not delete checkpoints, retry mutations automatically, or
+promote the staging profile to production.
 
 ## Evidence required for Sprint 8B.3B acceptance and P5/P6 closure
 
 - binding digest and readiness output without secrets;
 - release/artifact/reference hashes and authenticated approval identity;
 - Cloudflare preview/production deployment IDs, live-byte and cache evidence;
-- Coolify deployment UUID and finished state;
 - PostgreSQL phase/checkpoint, Event Ledger, and outbox trajectory;
 - restart/reconcile and rollback/restart transcripts tied to the same artifact.
 

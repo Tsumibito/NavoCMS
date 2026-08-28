@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
-import { ContractValidationError, contracts, parseCompatibleCloudflareStagingBinding } from "./index.js";
+import { ContractValidationError, contracts } from "./index.js";
 
 async function fixture(relativePath: string): Promise<unknown> {
   const url = new URL(`../../../examples/${relativePath}`, import.meta.url);
@@ -23,8 +23,6 @@ describe("public contract validators", () => {
     expect(contracts.event.parse(await fixture("events/revision-created.event.json"))).toBeTruthy();
     expect(contracts.mediaAsset.parse(await fixture("media/verified-image.media-asset.json"))).toBeTruthy();
     expect(contracts.cloudflareStagingBinding.parse(await fixture("staging/valid.cloudflare-staging-binding-v3.json"))).toMatchObject({ schema: "io.navocms.cloudflare-staging-binding.v3" });
-    expect(parseCompatibleCloudflareStagingBinding(await fixture("staging/valid.cloudflare-staging-binding-v1.json"))).toMatchObject({ schema: "io.navocms.cloudflare-staging-binding.v1" });
-    expect(parseCompatibleCloudflareStagingBinding(await fixture("staging/valid.cloudflare-staging-binding-v2.json"))).toMatchObject({ schema: "io.navocms.cloudflare-staging-binding.v2" });
     expect(contracts.r2RuntimeBinding.parse(await fixture("staging/valid.r2-runtime-binding.json"))).toBeTruthy();
   });
 

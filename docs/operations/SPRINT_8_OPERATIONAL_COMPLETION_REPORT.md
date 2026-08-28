@@ -1,71 +1,58 @@
-# Sprint 8 — operational completion package
+# Sprint 8 — operational completion ledger
 
-**Status:** Review required / Pending CI and staging proof
+**Status:** Staging runtime active; authenticated publication trajectory open
 
-## Compatibility correction: Coolify application identifier
+## Accepted code boundary
 
-The v2 field name `coolify.applicationUuid` is retained for binding
-compatibility, but its value is now a bounded Coolify provider-native
-identifier rather than UUID-only. This accepts existing RFC UUID values and
-the 26-character Cloud application identifier used by the staging project;
-path characters, whitespace, leading punctuation, and values over 160 bytes
-are rejected by the same contract and runtime transport boundary.
+- Media originals, variants, lifecycle, safe ingest boundaries, review tools,
+  and site-scoped PostgreSQL persistence are implemented.
+- Reviewed Astro source and output bundles are deterministic, independently
+  verified, and stored through immutable object bindings. Legacy JSON records
+  remain a read-only compatibility path pending a retention decision.
+- Cloudflare Pages owns preview, publish, verification, reconcile, and rollback.
+  Content publication never deploys or restarts the Coolify runtime.
+- Coolify deploy is a separate operator action pinned to an exact application
+  commit.
+- Staging R2 uses one shared S3 transport and fixed physical namespaces under
+  `navocms/v1/`; media and artifact logical keys cannot escape their reviewed
+  child namespace.
+- Production remains embedded and has no external provider activation.
 
-## Delivered code boundary
+## Staging evidence
 
-- Migration `0011_reviewed_astro_build_inputs.sql` adds append-only,
-  tenant/site-scoped durable snapshots bound by exact composite foreign keys to
-  a staging release and its preview artifact. It has FORCE RLS and runtime
-  `SELECT`/`INSERT` only.
-- `preparePreview()` now derives the reviewed staging Astro input before the
-  immutable release hash is made. The release manifest anchors and persisted
-  render snapshot therefore describe the same content/design/delivery/
-  governance/media evidence.
-- Snapshot registration reloads the durable release manifest; an operator
-  cannot promote a caller-provided manifest/hash/anchor. The authenticated
-  draft principal, canonical idempotency, the existing Event Ledger/outbox,
-  document-root correlation ID, and transaction path are retained; the later
-  build/artifact registration remains human-`content:publish` gated.
-- Publish and approved-release reconciliation first ensure the durable
-  reviewed artifact, then use the already reviewed Cloudflare/Coolify provider.
-  No public MCP tool exposes the snapshot, build output, or commit selector.
-- The staged runtime uses an image-attested toolchain and Coolify source SHA;
-  it never expects `.git` or catalogue modules in the application image.
-  Missing `NAVOCMS_REVIEWED_SOURCE_COMMIT` fails staging readiness closed.
+- Ordered PostgreSQL migration `0012` was applied with its registered checksum
+  and the release/RLS gates passed.
+- The reviewed staging runtime was deployed through Coolify from `main`.
+- `/healthz` and `/readyz` returned healthy/ready; readiness exposed only safe
+  Pages, artifact-builder, resolver, and R2 identifiers.
+- R2 readiness verified the reviewed root, media, and artifact namespace
+  markers. No provider-wide delete or existing-object migration was performed.
 
-## Local evidence
+## Cleanup decisions
 
-- The full non-PostgreSQL gate passed: contracts, boundaries, secret policy,
-  docs/links, typecheck/build/catalogue, 191 unit tests, and 5 visual tests.
-  Thirty-eight PostgreSQL-dependent tests were skipped because the local Docker
-  daemon is unavailable.
-- After the senior fixes, focused operational/runner/workflow suites passed:
-  17 tests, with typecheck and `git diff --check` also green.
-- The image runner's staged production-toolchain fixture proves whole-closure
-  fingerprinting, source-commit fail-closed readiness, and executable-file
-  mutation detection. A real `pnpm --prod deploy --legacy` production layout
-  also passed image attestation and a materialized Astro check/build locally.
-  The two-clean-build protocol remains covered at the trusted-builder boundary;
-  the real container and PostgreSQL paths remain CI/staging evidence.
+- Removed dormant PluginHost, checkout runner, remote-ingest runtime, direct
+  upload, Coolify publication client, and unused telemetry surfaces.
+- Removed migrated Cloudflare binding v1/v2 activation readers and duplicated
+  semantic contract validation.
+- Replaced duplicate Pages/R2 secret brokers with one dotenvx boundary and
+  collapsed the extra R2 composition layer.
+- Reviewed Astro registrations now require source. The durable empty
+  `legacyComponentIds` field remains only to preserve existing hashes.
+- Historical sprint progress reports were removed; Git history and pull-request
+  runs remain the immutable evidence. Active runbooks and this ledger remain.
 
-## Required single CI and operations trajectory
+## Still required before Sprint 8 closes
 
-1. Senior-review this package, commit/push one PR, and wait for one ordinary
-   GitHub CI run; do not manually rerun it. PostgreSQL must execute migration
-   `0011`, input-store integration, and RLS suites without skips.
-2. Merge only after that run is green. Let the usual post-merge CI run finish.
-3. In the encrypted staging overlay set the reviewed binding/secret references,
-   `NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN=/app/node_modules`, and configure Coolify
-   **Include Source Commit** so Coolify supplies the standard `SOURCE_COMMIT`
-   build input, which the image binds to `NAVOCMS_REVIEWED_SOURCE_COMMIT`.
-4. Confirm `/readyz` shows `cloudflare-staging`, the expected binding digest,
-   resolver, and non-secret Astro policy digest. Run dry resolver proof before
-   a transport is allowed to use a token.
-5. Retain one authenticated human trajectory: draft → preview (input snapshot)
-   → exact approval → publish (two builds, artifact registration, provider) →
-   live bytes/cache verification. Then retain restart/reconcile and rollback
-   evidence from the same immutable release chain.
+Retain one authenticated human staging trajectory tied to the same immutable
+release chain:
 
-Sprint 8 is not closed by this code package alone; only the green CI and the
-real staging trajectory above can close it. Production remains embedded and
-unactivated.
+1. draft → preview;
+2. exact human approval;
+3. publish and live byte/cache verification;
+4. restart → reconcile without a duplicate external effect;
+5. rollback to the previous immutable reference and reconcile once more.
+
+The evidence must include the release/artifact/reference hashes, WorkOS actor,
+Pages deployment identifiers, PostgreSQL phase checkpoints, Event Ledger, and
+outbox records. This is an operational acceptance step, not another code
+package. Production activation is explicitly outside Sprint 8.

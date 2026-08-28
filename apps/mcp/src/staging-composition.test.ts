@@ -2,8 +2,9 @@ import { CloudflarePagesReleaseProvider, InMemoryDeliveryPhaseStore } from "@nav
 import { describe, expect, it } from "vitest";
 
 import { ReviewedAstroArtifactResolver, type ReviewedAstroArtifactRecord, type ReviewedAstroArtifactStore } from "./reviewed-astro-resolver.js";
+import type { DotenvxSecretBroker } from "./secret-broker.js";
 import { composeCloudflareStagingReleaseProvider } from "./staging-composition.js";
-import { createDotenvxSecretBroker, selectReleaseProvider, type DotenvxSecretBroker } from "./staging-runtime.js";
+import { createDotenvxSecretBroker, selectReleaseProvider } from "./staging-runtime.js";
 import { stagingBindingDigest } from "./staging-profile.js";
 
 const binding = Object.freeze({

@@ -6,7 +6,6 @@ import type { FormatsPlugin } from "ajv-formats";
 
 import type {
   ContentTypeDefinition,
-  CompatibleCloudflareStagingBinding,
   CloudflareStagingBinding,
   DesignOverrideDefinition,
   DesignSystemDefinition,
@@ -28,8 +27,6 @@ const schemaFiles = {
   plugin: "plugin-manifest.schema.json",
   profile: "site-profile.schema.json",
   cloudflareStagingBinding: "cloudflare-staging-binding-v3.schema.json",
-  cloudflareStagingBindingV1: "cloudflare-staging-binding.schema.json",
-  cloudflareStagingBindingV2: "cloudflare-staging-binding-v2.schema.json",
   r2RuntimeBinding: "r2-runtime-binding-v1.schema.json"
 } as const;
 
@@ -37,14 +34,6 @@ const schemaFiles = {
 export function parseCloudflareStagingBinding(value: unknown): CloudflareStagingBinding {
   return contracts.cloudflareStagingBinding.parse(value);
 }
-/** Validates legacy v1/v2 bindings for migration diagnostics; they never activate Pages delivery. */
-export function parseCompatibleCloudflareStagingBinding(value: unknown): CompatibleCloudflareStagingBinding {
-  const schema = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>).schema : undefined;
-  if (schema === "io.navocms.cloudflare-staging-binding.v1") return contracts.cloudflareStagingBindingV1.parse(value);
-  if (schema === "io.navocms.cloudflare-staging-binding.v2") return contracts.cloudflareStagingBindingV2.parse(value);
-  return parseCloudflareStagingBinding(value);
-}
-
 /** Exact parser for the independent R2 runtime binding; it does not construct a transport. */
 export function parseR2RuntimeBinding(value: unknown): R2RuntimeBinding {
   return contracts.r2RuntimeBinding.parse(value);
@@ -319,7 +308,5 @@ export const contracts = {
     profileSemantics
   ),
   cloudflareStagingBinding: new ContractValidator<CloudflareStagingBinding>("Cloudflare staging binding", ajv.compile<CloudflareStagingBinding>(readSchema(schemaFiles.cloudflareStagingBinding)), cloudflareStagingBindingSemantics),
-  cloudflareStagingBindingV1: new ContractValidator<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v1" }>>("legacy Cloudflare staging binding v1", ajv.compile<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v1" }>>(readSchema(schemaFiles.cloudflareStagingBindingV1))),
-  cloudflareStagingBindingV2: new ContractValidator<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>("legacy Cloudflare staging binding v2", ajv.compile<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>(readSchema(schemaFiles.cloudflareStagingBindingV2))),
   r2RuntimeBinding: new ContractValidator<R2RuntimeBinding>("R2 runtime binding", ajv.compile<R2RuntimeBinding>(readSchema(schemaFiles.r2RuntimeBinding)), r2RuntimeBindingSemantics)
 } as const;

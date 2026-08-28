@@ -11,9 +11,9 @@ const source = JSON.parse(
 );
 const design = compileDesignSystem(source);
 const adapter = createAstroDesignAdapter(design, [
-  { id: "signal-button", module: "../components/SignalButton.astro" },
-  { id: "story-card", module: "../components/StoryCard.astro" },
-  { id: "section-shell", module: "../components/SectionShell.astro" }
+  { id: "signal-button", module: "../components/SignalButton.astro", source: "<button><slot /></button>" },
+  { id: "story-card", module: "../components/StoryCard.astro", source: "<article><slot /></article>" },
+  { id: "section-shell", module: "../components/SectionShell.astro", source: "<section><slot /></section>" }
 ]);
 const output = {
   definition: design.definition,
