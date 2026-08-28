@@ -12,6 +12,7 @@
   "files": ["dist"],
   "dependencies": {
     "@navocms/design-astro": "workspace:*",
-    "@navocms/kernel": "workspace:*"
+    "@navocms/kernel": "workspace:*",
+    "blake3-wasm": "2.1.5"
   }
 }

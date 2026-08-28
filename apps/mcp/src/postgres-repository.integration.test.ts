@@ -15,7 +15,7 @@ import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
 import { McpEditingService, type IdempotencyStore } from "./service.js";
-import { bootPinnedProductionPluginHost } from "./production-profile.js";
+import { assertPinnedProductionProfile } from "./production-profile.js";
 
 const databaseUrl = process.env.NAVOCMS_INTEGRATION_DATABASE_URL;
 const adminDatabaseUrl = process.env.NAVOCMS_INTEGRATION_ADMIN_DATABASE_URL;
@@ -197,6 +197,52 @@ integration("Neon production persistence", () => {
     expect(resolutionEvents.some(({ event }) => event.type === "io.navocms.delivery.phase-resolved.v1" && event.data.externalId === "coolify-human-resolved-1")).toBe(true);
   });
 
+  it("reconciles a publishing checkpoint after its exact approval expires", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const provider = new InterruptingPublishProvider();
+    const firstService = service(new PostgresEventStore(database!), undefined, provider);
+    const release = await approvedRelease(firstService, suffix, "approval-expiry");
+    await expect(firstService.publishRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `publish-${suffix}-approval-expiry`
+    })).rejects.toThrow("injected publish interruption");
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `UPDATE navocms.release_approvals
+            SET approved_at = now() - interval '1 hour', expires_at = now() - interval '1 second'
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3`,
+        [tenantId, siteId, release.releaseId]
+      );
+    });
+    const restartedService = service(new PostgresEventStore(database!), undefined, provider);
+    await expect(restartedService.reconcileRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `reconcile-${suffix}-approval-expiry`
+    })).resolves.toMatchObject({ release: { status: "published" } });
+    expect(provider.publishCalls).toBe(2);
+  });
+
+  it("denies publishing recovery after the validated approval is revoked", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const provider = new InterruptingPublishProvider();
+    const firstService = service(new PostgresEventStore(database!), undefined, provider);
+    const release = await approvedRelease(firstService, suffix, "approval-revoked");
+    await expect(firstService.publishRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `publish-${suffix}-approval-revoked`
+    })).rejects.toThrow("injected publish interruption");
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `UPDATE navocms.release_approvals
+            SET revoked_at = now(), revoked_by = $4, revocation_reason = 'integration recovery denial proof'
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3`,
+        [tenantId, siteId, release.releaseId, principalId]
+      );
+    });
+    const restartedService = service(new PostgresEventStore(database!), undefined, provider);
+    await expect(restartedService.reconcileRelease(context(), {
+      releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `reconcile-${suffix}-approval-revoked`
+    })).rejects.toMatchObject({ code: "RELEASE_APPROVAL_CHECKPOINT_INVALID" });
+    expect(provider.publishCalls).toBe(1);
+  });
+
   it("maps a standard issuer subject to persisted site membership", async () => {
     const resolver = new PostgresIdentityResolver(database!, { tenantId, siteId });
     await expect(resolver.resolve({
@@ -252,64 +298,59 @@ integration("Neon production persistence", () => {
     ]);
   });
 
-  it("executes the production path with the pinned host and charges durable policy usage once", async () => {
+  it("executes the production path with the pinned provider and charges durable policy usage once", async () => {
     const suffix = randomUUID().replace(/-/g, "");
     const policy = new PostgresRuntimePolicyGuard(database!);
-    const host = await bootPinnedProductionPluginHost();
-    expect(host.status()).toMatchObject({ state: "healthy", activePlugins: ["navocms.release.embedded"] });
-    try {
-      await adminDatabase!.withScope({ tenantId, siteId, principalId }, async (client) => {
-        await client.query(
-          `DELETE FROM navocms.usage_events
-            WHERE tenant_id = $1 AND site_id = $2 AND operation_key LIKE 'draft_create:%'`,
-          [tenantId, siteId]
-        );
-        await client.query(
-          `DELETE FROM navocms.quota_limits
-            WHERE tenant_id = $1 AND site_id = $2 AND plugin_id IS NULL
-              AND operation_key = 'draft_create' AND period = 'lifetime'`,
-          [tenantId, siteId]
-        );
-        await client.query(
-          `INSERT INTO navocms.quota_limits (id, tenant_id, site_id, operation_key, period, limit_amount)
-           VALUES ($1, $2, $3, 'draft_create', 'lifetime', 1)`,
-          [randomUUID(), tenantId, siteId]
-        );
-      });
-      const productionService = service(new PostgresEventStore(database!), policy);
-      const input = {
-        typeName: "article", slug: `production-path-${suffix}`, locale: "en", title: "Production path",
-        markdown: "# Production path\n", idempotencyKey: `production-path-${suffix}`
-      } as const;
-      const draft = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
-      const retried = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
-      expect(retried.draft.revisionId).toBe(draft.draft.revisionId);
-      const preview = await productionService.preparePreview(context(), draft.draft.revisionId, `preview-${suffix}`);
-      await productionService.approveRelease(context(), {
-        releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `approve-${suffix}`
-      });
-      await productionService.publishRelease(context(), {
-        releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `publish-${suffix}`
-      });
-      const persisted = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
-        await client.query<{ usage: string; release: string; approvals: string; checkpoints: string; ledger: string; outbox: string }>(
-          `SELECT
-            (SELECT count(*) FROM navocms.usage_events WHERE operation_key = $1) AS usage,
-            (SELECT count(*) FROM navocms.release_candidates WHERE id = $2) AS release,
-            (SELECT count(*) FROM navocms.release_approvals WHERE release_id = $2) AS approvals,
-            (SELECT count(*) FROM navocms.workflow_checkpoints checkpoint JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id WHERE run.release_id = $2) AS checkpoints,
-            (SELECT count(*) FROM navocms.event_ledger WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS ledger,
-            (SELECT count(*) FROM navocms.domain_outbox WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS outbox`,
-          [`draft_create:${input.idempotencyKey}`, preview.releaseId]
-        )).rows[0]!
+    assertPinnedProductionProfile();
+    await adminDatabase!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `DELETE FROM navocms.usage_events
+          WHERE tenant_id = $1 AND site_id = $2 AND operation_key LIKE 'draft_create:%'`,
+        [tenantId, siteId]
       );
-      expect(persisted).toMatchObject({ usage: "1", release: "1", approvals: "1" });
-      expect(Number(persisted.checkpoints)).toBeGreaterThan(0);
-      expect(Number(persisted.ledger)).toBeGreaterThan(0);
-      expect(Number(persisted.outbox)).toBeGreaterThan(0);
-    } finally {
-      await host.shutdown();
-    }
+      await client.query(
+        `DELETE FROM navocms.quota_limits
+          WHERE tenant_id = $1 AND site_id = $2 AND plugin_id IS NULL
+            AND operation_key = 'draft_create' AND period = 'lifetime'`,
+        [tenantId, siteId]
+      );
+      await client.query(
+        `INSERT INTO navocms.quota_limits (id, tenant_id, site_id, operation_key, period, limit_amount)
+         VALUES ($1, $2, $3, 'draft_create', 'lifetime', 1)`,
+        [randomUUID(), tenantId, siteId]
+      );
+    });
+    const productionService = service(new PostgresEventStore(database!), policy);
+    const input = {
+      typeName: "article", slug: `production-path-${suffix}`, locale: "en", title: "Production path",
+      markdown: "# Production path\n", idempotencyKey: `production-path-${suffix}`
+    } as const;
+    const draft = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
+    const retried = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
+    expect(retried.draft.revisionId).toBe(draft.draft.revisionId);
+    const preview = await productionService.preparePreview(context(), draft.draft.revisionId, `preview-${suffix}`);
+    await productionService.approveRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `approve-${suffix}`
+    });
+    await productionService.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `publish-${suffix}`
+    });
+    const persisted = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ usage: string; release: string; approvals: string; checkpoints: string; ledger: string; outbox: string }>(
+        `SELECT
+          (SELECT count(*) FROM navocms.usage_events WHERE operation_key = $1) AS usage,
+          (SELECT count(*) FROM navocms.release_candidates WHERE id = $2) AS release,
+          (SELECT count(*) FROM navocms.release_approvals WHERE release_id = $2) AS approvals,
+          (SELECT count(*) FROM navocms.workflow_checkpoints checkpoint JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id WHERE run.release_id = $2) AS checkpoints,
+          (SELECT count(*) FROM navocms.event_ledger WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS ledger,
+          (SELECT count(*) FROM navocms.domain_outbox WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS outbox`,
+        [`draft_create:${input.idempotencyKey}`, preview.releaseId]
+      )).rows[0]!
+    );
+    expect(persisted).toMatchObject({ usage: "1", release: "1", approvals: "1" });
+    expect(Number(persisted.checkpoints)).toBeGreaterThan(0);
+    expect(Number(persisted.ledger)).toBeGreaterThan(0);
+    expect(Number(persisted.outbox)).toBeGreaterThan(0);
   });
 });
 
@@ -346,6 +387,18 @@ class InterruptingRollbackProvider implements ReleaseProvider {
   public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> { return { providerKey: this.key, providerReference: `postgres:${input.releaseHash}:${input.artifact.hash}`, artifactHash: input.artifact.hash }; }
   public async verify(): Promise<boolean> { return true; }
   public async rollback(): Promise<void> { this.rollbackCalls += 1; if (this.interruptOnce) { this.interruptOnce = false; throw new Error("injected rollback interruption"); } }
+}
+
+class InterruptingPublishProvider implements ReleaseProvider {
+  public readonly key = "test.postgres-publish-recovery.v1";
+  public publishCalls = 0;
+  public async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
+    this.publishCalls += 1;
+    if (this.publishCalls === 1) throw new Error("injected publish interruption");
+    return { providerKey: this.key, providerReference: `postgres:${input.releaseHash}:${input.artifact.hash}`, artifactHash: input.artifact.hash };
+  }
+  public async verify(): Promise<boolean> { return true; }
+  public async rollback(): Promise<void> { /* no-op for publication recovery proof */ }
 }
 
 function context(): { authorization: AuthorizationContext } {

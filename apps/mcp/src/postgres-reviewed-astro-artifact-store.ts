@@ -7,6 +7,7 @@ import { McpEditingError } from "./errors.js";
 import type { McpRequestContext } from "./model.js";
 import type { RepositoryContext } from "./repository.js";
 import type { ReviewedAstroArtifactRecord, ReviewedAstroArtifactStore } from "./reviewed-astro-resolver.js";
+import { assertReviewedAstroObjectKey, reviewedAstroObjectDigest, reviewedAstroObjectKey, type ReviewedAstroObjectStorage } from "./reviewed-astro-object-storage.js";
 
 const REGISTRATION_OPERATION = "reviewed_astro_artifact.register.v1";
 const MAX_IDEMPOTENCY_KEY_BYTES = 128;
@@ -39,6 +40,15 @@ interface StoredArtifactRow extends Record<string, unknown> {
   readonly output_json: unknown;
 }
 
+interface StoredObjectBindingRow extends Record<string, unknown> {
+  readonly tenant_id: string; readonly site_id: string; readonly environment_key: string;
+  readonly release_id: string; readonly release_hash: string; readonly artifact_hash: string;
+  readonly astro_artifact_hash: string; readonly source_commit_sha: string;
+  readonly source_object_key: string; readonly source_object_sha256: string; readonly source_object_bytes: number;
+  readonly output_object_key: string; readonly output_object_sha256: string; readonly output_object_bytes: number;
+  readonly state: "ready"; readonly evidence_hash: string;
+}
+
 /** Derives Ledger authority from a verified request, never from tool input. */
 export function reviewedAstroArtifactAuthority(context: McpRequestContext): ReviewedAstroArtifactAuthority {
   requirePermission(context.authorization, "content:publish", {
@@ -59,8 +69,9 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
   readonly #environmentKey: string;
   readonly #events: EventStore;
   readonly #idempotency: PostgresIdempotencyStore;
+  readonly #storage: ReviewedAstroObjectStorage | undefined;
 
-  public constructor(database: PostgresDatabase, context: RepositoryContext, environmentKey: string, options: Readonly<{ events?: EventStore }> = {}) {
+  public constructor(database: PostgresDatabase, context: RepositoryContext, environmentKey: string, options: Readonly<{ events?: EventStore; storage?: ReviewedAstroObjectStorage }> = {}) {
     if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(environmentKey)) {
       throw new McpEditingError("REVIEWED_ASTRO_ENVIRONMENT_INVALID", "Reviewed Astro environment key is invalid");
     }
@@ -69,6 +80,7 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
     this.#environmentKey = environmentKey;
     this.#events = options.events ?? new PostgresEventStore(database);
     this.#idempotency = new PostgresIdempotencyStore(database);
+    this.#storage = options.storage;
   }
 
   /** Schema/RLS/scope readiness deliberately does not require a release record. */
@@ -86,7 +98,7 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
           can_update: boolean;
           can_delete: boolean;
         }>(
-          `SELECT to_regclass('navocms.reviewed_astro_artifacts') IS NOT NULL AS table_exists,
+          `SELECT to_regclass('navocms.reviewed_astro_artifact_object_bindings') IS NOT NULL AS table_exists,
                   c.relrowsecurity AS rls, c.relforcerowsecurity AS forced,
                   COALESCE((
                     SELECT count(*) = 1 AND bool_and(
@@ -99,14 +111,14 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
                       AND regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]()]', '', 'g') = 'tenant_id=navocms.current_tenant_idANDsite_id=navocms.current_site_id'
                     ) FROM pg_policy p WHERE p.polrelid = c.oid
                   ), false) AS exact_policy,
-                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifacts', 'SELECT') AS can_select,
-                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifacts', 'INSERT') AS can_insert,
-                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifacts', 'UPDATE') AS can_update,
-                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifacts', 'DELETE') AS can_delete
+                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifact_object_bindings', 'SELECT') AS can_select,
+                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifact_object_bindings', 'INSERT') AS can_insert,
+                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifact_object_bindings', 'UPDATE') AS can_update,
+                  has_table_privilege(current_user, 'navocms.reviewed_astro_artifact_object_bindings', 'DELETE') AS can_delete
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'navocms' AND c.relname = 'reviewed_astro_artifacts'`
+            WHERE n.nspname = 'navocms' AND c.relname = 'reviewed_astro_artifact_object_bindings'`
         )).rows[0];
-        if (!table?.table_exists || !table.rls || !table.forced || !table.exact_policy ||
+        if (!this.#storage || !table?.table_exists || !table.rls || !table.forced || !table.exact_policy ||
           !table.can_select || !table.can_insert || table.can_update || table.can_delete) return false;
         const environment = await client.query<{ exists: boolean }>(
           `SELECT EXISTS (
@@ -125,15 +137,26 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
   public async register(input: RegisterReviewedAstroArtifactInput, authority: ReviewedAstroArtifactAuthority): Promise<ReviewedAstroArtifactRecord> {
     assertRegistration(input, this.#context.site);
     assertAuthority(authority, this.#context);
+    if (!this.#storage) throw new McpEditingError("REVIEWED_ASTRO_OBJECT_STORAGE_UNAVAILABLE", "Reviewed Astro object storage is not configured");
+    const objects = storedObjects(input, this.#context.site);
+    // PUT intentionally precedes the SQL transaction.  Keys are immutable and
+    // content-addressed; a crash before commit leaves a bounded, scoped orphan
+    // for reconciliation rather than an unprovable half-bound database row.
+    try {
+      await this.#storage.putImmutable(objects.source);
+      await this.#storage.putImmutable(objects.output);
+    } catch {
+      throw new McpEditingError("REVIEWED_ASTRO_OBJECT_STORAGE_WRITE_FAILED", "Reviewed Astro object storage rejected the immutable bundle");
+    }
     const databaseScope = scope(this.#context);
     const fingerprint = registrationFingerprint(input);
     const eventIdempotencyKey = `${REGISTRATION_OPERATION}:${input.idempotencyKey}`;
 
-    return this.#database.withScope(databaseScope, async (client) => {
+    const binding = await this.#database.withScope(databaseScope, async (client) => {
       const binding = await requireExactRelease(client, this.#context, this.#environmentKey, input);
       let reservation;
       try {
-        reservation = await this.#idempotency.reserve<ReviewedAstroArtifactRecord>(databaseScope, REGISTRATION_OPERATION, input.idempotencyKey, fingerprint);
+        reservation = await this.#idempotency.reserve<object>(databaseScope, REGISTRATION_OPERATION, input.idempotencyKey, fingerprint);
       } catch (error) {
         if (error instanceof Error && error.message === "IDEMPOTENCY_KEY_REUSED") {
           throw new McpEditingError("IDEMPOTENCY_KEY_REUSED", "Idempotency key was reused with different input");
@@ -141,33 +164,28 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
         throw error;
       }
       if (reservation.status === "completed") {
-        const replay = persistedRecord(reservation.value);
-        if (replay.tenantId !== this.#context.site.tenantId || replay.siteId !== this.#context.site.siteId || replay.environmentKey !== this.#environmentKey) {
-          throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro idempotency result is outside its scope");
-        }
+        const replay = persistedBinding(reservation.value, this.#context, this.#environmentKey);
+        if (!sameBinding(replay, input, objects)) throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro idempotency result is outside its scope");
         return replay;
       }
       if (reservation.status !== "reserved") {
         throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_PENDING", "Reviewed artifact registration is pending");
       }
 
+      const candidate = objectBinding(input, this.#context.site, this.#environmentKey, objects);
       const inserted = await client.query(
-        `INSERT INTO navocms.reviewed_astro_artifacts (
+        `INSERT INTO navocms.reviewed_astro_artifact_object_bindings (
            tenant_id, site_id, environment_id, environment_key, release_id, release_hash,
-           artifact_hash, astro_artifact_hash, source_commit_sha, artifact_json, output_json
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) ON CONFLICT DO NOTHING`,
+           artifact_hash, astro_artifact_hash, source_commit_sha, source_object_key, source_object_sha256,
+           source_object_bytes, output_object_key, output_object_sha256, output_object_bytes, state, evidence_hash
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT DO NOTHING`,
         [this.#context.site.tenantId, this.#context.site.siteId, binding.environment_id, this.#environmentKey,
           input.releaseId, input.releaseHash, input.releaseArtifactHash, input.expectedAstroArtifactHash,
-          input.sourceCommitSha, JSON.stringify(input.artifact), JSON.stringify(input.output)]
+          input.sourceCommitSha, candidate.sourceObjectKey, candidate.sourceObjectSha256, candidate.sourceObjectBytes,
+          candidate.outputObjectKey, candidate.outputObjectSha256, candidate.outputObjectBytes, "ready", candidate.evidenceHash]
       );
-      const record = (inserted.rowCount ?? 0) === 1
-        ? freezeRecord({ tenantId: this.#context.site.tenantId, siteId: this.#context.site.siteId,
-          environment: "staging", environmentKey: this.#environmentKey, releaseId: input.releaseId,
-          releaseHash: input.releaseHash, releaseArtifactHash: input.releaseArtifactHash,
-          expectedAstroArtifactHash: input.expectedAstroArtifactHash, sourceCommitSha: input.sourceCommitSha,
-          artifact: input.artifact, output: input.output })
-        : await requireStoredRecord(client, this.#context, this.#environmentKey, input.releaseId);
-      if (!sameRegistration(record, input)) {
+      const stored = (inserted.rowCount ?? 0) === 1 ? candidate : await requireObjectBinding(client, this.#context, this.#environmentKey, input.releaseId);
+      if (!sameBinding(stored, input, objects)) {
         throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_DRIFT", "A different reviewed Astro artifact already exists for this release");
       }
       if ((inserted.rowCount ?? 0) === 1) {
@@ -182,9 +200,10 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
             releaseArtifactHash: input.releaseArtifactHash, astroArtifactHash: input.expectedAstroArtifactHash })
         }));
       }
-      await this.#idempotency.complete(databaseScope, REGISTRATION_OPERATION, input.idempotencyKey, fingerprint, record);
-      return record;
+      await this.#idempotency.complete(databaseScope, REGISTRATION_OPERATION, input.idempotencyKey, fingerprint, idempotencyBinding(stored));
+      return stored;
     });
+    return this.loadObjectRecord(binding);
   }
 
   public async get(scopeInput: Readonly<{ tenantId: string; siteId: string; environment: "staging"; environmentKey: string; releaseId: string }>): Promise<ReviewedAstroArtifactRecord | undefined> {
@@ -192,12 +211,101 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
       scopeInput.environment !== "staging" || scopeInput.environmentKey !== this.#environmentKey) {
       throw new McpEditingError("REVIEWED_ASTRO_SCOPE_DENIED", "Reviewed Astro artifact scope is denied");
     }
-    return this.#database.withScope(scope(this.#context), async (client) => findStoredRecord(client, this.#context, this.#environmentKey, scopeInput.releaseId));
+    const result = await this.#database.withScope(scope(this.#context), async (client) => {
+      const binding = await findObjectBinding(client, this.#context, this.#environmentKey, scopeInput.releaseId);
+      return binding ? { binding } : { legacy: await findStoredRecord(client, this.#context, this.#environmentKey, scopeInput.releaseId) };
+    });
+    return result.binding ? this.loadObjectRecord(result.binding) : result.legacy;
+  }
+
+  private async loadObjectRecord(binding: ObjectBinding): Promise<ReviewedAstroArtifactRecord> {
+    if (!this.#storage) throw new McpEditingError("REVIEWED_ASTRO_OBJECT_STORAGE_UNAVAILABLE", "Reviewed Astro object storage is not configured");
+    try {
+      assertBindingScope(binding, this.#context.site, this.#environmentKey);
+      const [source, output] = await Promise.all([
+        this.#storage.read(binding.sourceObjectKey, binding.sourceObjectBytes), this.#storage.read(binding.outputObjectKey, binding.outputObjectBytes)
+      ]);
+      if (!source || !output || source.mediaType !== "application/vnd.navocms.astro-source-bundle+json" || output.mediaType !== "application/vnd.navocms.astro-output-bundle+json" ||
+        reviewedAstroObjectDigest(source.bytes) !== binding.sourceObjectSha256 || reviewedAstroObjectDigest(output.bytes) !== binding.outputObjectSha256 ||
+        source.bytes.byteLength !== binding.sourceObjectBytes || output.bytes.byteLength !== binding.outputObjectBytes) throw new Error("object mismatch");
+      const artifact = JSON.parse(new TextDecoder().decode(source.bytes)) as AstroArtifact;
+      const built = JSON.parse(new TextDecoder().decode(output.bytes)) as Readonly<Record<string, string>>;
+      verifyAstroArtifact(artifact, binding.expectedAstroArtifactHash);
+      verifyBuiltAstroOutput(built, artifact, binding.expectedAstroArtifactHash);
+      if (artifact.manifest.tenantId !== binding.tenantId || artifact.manifest.siteId !== binding.siteId) throw new Error("scope mismatch");
+      return freezeRecord({ tenantId: binding.tenantId, siteId: binding.siteId, environment: "staging", environmentKey: binding.environmentKey,
+        releaseId: binding.releaseId, releaseHash: binding.releaseHash, releaseArtifactHash: binding.releaseArtifactHash,
+        expectedAstroArtifactHash: binding.expectedAstroArtifactHash, sourceCommitSha: binding.sourceCommitSha, artifact, output: built });
+    } catch {
+      throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_INVALID", "Reviewed Astro object bundle verification failed");
+    }
   }
 }
 
 function scope(context: RepositoryContext) {
   return { tenantId: context.site.tenantId, siteId: context.site.siteId, principalId: context.principalId };
+}
+
+interface ObjectBinding {
+  readonly tenantId: string; readonly siteId: string; readonly environmentKey: string;
+  readonly releaseId: string; readonly releaseHash: string; readonly releaseArtifactHash: string;
+  readonly expectedAstroArtifactHash: string; readonly sourceCommitSha: string;
+  readonly sourceObjectKey: string; readonly sourceObjectSha256: string; readonly sourceObjectBytes: number;
+  readonly outputObjectKey: string; readonly outputObjectSha256: string; readonly outputObjectBytes: number;
+  readonly evidenceHash: string;
+}
+
+function storedObjects(input: RegisterReviewedAstroArtifactInput, site: Readonly<{ tenantId: string; siteId: string }>) {
+  const sourceBytes = new TextEncoder().encode(canonical(input.artifact));
+  const outputBytes = new TextEncoder().encode(canonical(input.output));
+  const sourceDigest = reviewedAstroObjectDigest(sourceBytes); const outputDigest = reviewedAstroObjectDigest(outputBytes);
+  return Object.freeze({
+    source: Object.freeze({ key: reviewedAstroObjectKey(site, "source", sourceDigest), bytes: sourceBytes, mediaType: "application/vnd.navocms.astro-source-bundle+json" as const }),
+    output: Object.freeze({ key: reviewedAstroObjectKey(site, "output", outputDigest), bytes: outputBytes, mediaType: "application/vnd.navocms.astro-output-bundle+json" as const })
+  });
+}
+
+function objectBinding(input: RegisterReviewedAstroArtifactInput, site: Readonly<{ tenantId: string; siteId: string }>, environmentKey: string, objects: ReturnType<typeof storedObjects>): ObjectBinding {
+  const binding = { tenantId: site.tenantId, siteId: site.siteId, environmentKey, releaseId: input.releaseId,
+    releaseHash: input.releaseHash, releaseArtifactHash: input.releaseArtifactHash, expectedAstroArtifactHash: input.expectedAstroArtifactHash,
+    sourceCommitSha: input.sourceCommitSha, sourceObjectKey: objects.source.key, sourceObjectSha256: reviewedAstroObjectDigest(objects.source.bytes), sourceObjectBytes: objects.source.bytes.byteLength,
+    outputObjectKey: objects.output.key, outputObjectSha256: reviewedAstroObjectDigest(objects.output.bytes), outputObjectBytes: objects.output.bytes.byteLength };
+  return Object.freeze({ ...binding, evidenceHash: bindingEvidence(binding) });
+}
+
+function bindingEvidence(binding: Omit<ObjectBinding, "evidenceHash">): string {
+  return `sha256:${sha256(canonical({ tenantId: binding.tenantId, siteId: binding.siteId, environmentKey: binding.environmentKey,
+    releaseId: binding.releaseId, releaseHash: binding.releaseHash, releaseArtifactHash: binding.releaseArtifactHash,
+    astroArtifactHash: binding.expectedAstroArtifactHash, sourceCommitSha: binding.sourceCommitSha,
+    sourceObjectKey: binding.sourceObjectKey, sourceObjectSha256: binding.sourceObjectSha256, sourceObjectBytes: binding.sourceObjectBytes,
+    outputObjectKey: binding.outputObjectKey, outputObjectSha256: binding.outputObjectSha256, outputObjectBytes: binding.outputObjectBytes }))}`;
+}
+
+function idempotencyBinding(binding: ObjectBinding): object {
+  return { version: 1, tenantId: binding.tenantId, siteId: binding.siteId, environmentKey: binding.environmentKey, releaseId: binding.releaseId,
+    releaseHash: binding.releaseHash, releaseArtifactHash: binding.releaseArtifactHash, expectedAstroArtifactHash: binding.expectedAstroArtifactHash,
+    sourceCommitSha: binding.sourceCommitSha, sourceObjectKey: binding.sourceObjectKey, sourceObjectSha256: binding.sourceObjectSha256, sourceObjectBytes: binding.sourceObjectBytes,
+    outputObjectKey: binding.outputObjectKey, outputObjectSha256: binding.outputObjectSha256, outputObjectBytes: binding.outputObjectBytes, evidenceHash: binding.evidenceHash };
+}
+
+function persistedBinding(value: unknown, context: RepositoryContext, environmentKey: string): ObjectBinding {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro idempotency result is invalid");
+  const row = value as Record<string, unknown>;
+  if (row.version !== 1 || Object.keys(row).length !== 16 || Object.keys(row).some((key) => !["version", "tenantId", "siteId", "environmentKey", "releaseId", "releaseHash", "releaseArtifactHash", "expectedAstroArtifactHash", "sourceCommitSha", "sourceObjectKey", "sourceObjectSha256", "sourceObjectBytes", "outputObjectKey", "outputObjectSha256", "outputObjectBytes", "evidenceHash"].includes(key))) throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro idempotency result is invalid");
+  const binding = Object.freeze({ ...row, tenantId: String(row.tenantId), siteId: String(row.siteId), environmentKey: String(row.environmentKey), releaseId: String(row.releaseId), releaseHash: String(row.releaseHash), releaseArtifactHash: String(row.releaseArtifactHash), expectedAstroArtifactHash: String(row.expectedAstroArtifactHash), sourceCommitSha: String(row.sourceCommitSha), sourceObjectKey: String(row.sourceObjectKey), sourceObjectSha256: String(row.sourceObjectSha256), sourceObjectBytes: Number(row.sourceObjectBytes), outputObjectKey: String(row.outputObjectKey), outputObjectSha256: String(row.outputObjectSha256), outputObjectBytes: Number(row.outputObjectBytes), evidenceHash: String(row.evidenceHash) }) as ObjectBinding;
+  try { assertBindingScope(binding, context.site, environmentKey); } catch { throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro idempotency result is invalid"); }
+  return binding;
+}
+
+function sameBinding(binding: ObjectBinding, input: RegisterReviewedAstroArtifactInput, objects: ReturnType<typeof storedObjects>): boolean {
+  return binding.releaseId === input.releaseId && binding.releaseHash === input.releaseHash && binding.releaseArtifactHash === input.releaseArtifactHash && binding.expectedAstroArtifactHash === input.expectedAstroArtifactHash && binding.sourceCommitSha === input.sourceCommitSha && binding.sourceObjectKey === objects.source.key && binding.sourceObjectSha256 === reviewedAstroObjectDigest(objects.source.bytes) && binding.sourceObjectBytes === objects.source.bytes.byteLength && binding.outputObjectKey === objects.output.key && binding.outputObjectSha256 === reviewedAstroObjectDigest(objects.output.bytes) && binding.outputObjectBytes === objects.output.bytes.byteLength;
+}
+
+function assertBindingScope(binding: ObjectBinding, site: Readonly<{ tenantId: string; siteId: string }>, environmentKey: string): void {
+  if (binding.tenantId !== site.tenantId || binding.siteId !== site.siteId || binding.environmentKey !== environmentKey || !uuid(binding.releaseId) || !hash(binding.releaseHash) || !hash(binding.releaseArtifactHash) || !/^sha256:[a-f0-9]{64}$/.test(binding.expectedAstroArtifactHash) || !commit(binding.sourceCommitSha) || !hash(binding.sourceObjectSha256) || !hash(binding.outputObjectSha256) || !Number.isSafeInteger(binding.sourceObjectBytes) || binding.sourceObjectBytes < 2 || binding.sourceObjectBytes > 4 * 1024 * 1024 || !Number.isSafeInteger(binding.outputObjectBytes) || binding.outputObjectBytes < 2 || binding.outputObjectBytes > 16 * 1024 * 1024 || !/^sha256:[a-f0-9]{64}$/.test(binding.evidenceHash)) throw new Error("binding invalid");
+  if (binding.evidenceHash !== bindingEvidence(binding)) throw new Error("binding evidence invalid");
+  assertReviewedAstroObjectKey(site, "source", binding.sourceObjectKey, binding.sourceObjectSha256);
+  assertReviewedAstroObjectKey(site, "output", binding.outputObjectKey, binding.outputObjectSha256);
 }
 
 function assertAuthority(authority: ReviewedAstroArtifactAuthority, context: RepositoryContext): void {
@@ -246,6 +354,36 @@ async function requireExactRelease(client: SqlClient, context: RepositoryContext
   return row;
 }
 
+async function findObjectBinding(client: SqlClient, context: RepositoryContext, environmentKey: string, releaseId: string): Promise<ObjectBinding | undefined> {
+  const row = (await client.query<StoredObjectBindingRow>(
+    `SELECT a.tenant_id, a.site_id, a.environment_key, a.release_id, a.release_hash, a.artifact_hash,
+            a.astro_artifact_hash, a.source_commit_sha, a.source_object_key, a.source_object_sha256,
+            a.source_object_bytes, a.output_object_key, a.output_object_sha256, a.output_object_bytes,
+            a.state, a.evidence_hash
+       FROM navocms.reviewed_astro_artifact_object_bindings a
+       JOIN navocms.environments e ON e.tenant_id = a.tenant_id AND e.site_id = a.site_id
+        AND e.id = a.environment_id AND e.environment_key = a.environment_key AND e.kind = 'staging'
+       JOIN navocms.release_candidates r ON r.tenant_id = a.tenant_id AND r.site_id = a.site_id
+        AND r.id = a.release_id AND r.environment_id = a.environment_id
+        AND r.release_hash = a.release_hash AND r.artifact_hash = a.artifact_hash
+      WHERE a.tenant_id = $1 AND a.site_id = $2 AND a.environment_key = $3 AND a.release_id = $4 AND a.state = 'ready'`,
+    [context.site.tenantId, context.site.siteId, environmentKey, releaseId]
+  )).rows[0];
+  if (!row) return undefined;
+  const binding: ObjectBinding = Object.freeze({ tenantId: row.tenant_id, siteId: row.site_id, environmentKey: row.environment_key,
+    releaseId: row.release_id, releaseHash: row.release_hash, releaseArtifactHash: row.artifact_hash, expectedAstroArtifactHash: row.astro_artifact_hash,
+    sourceCommitSha: row.source_commit_sha, sourceObjectKey: row.source_object_key, sourceObjectSha256: row.source_object_sha256, sourceObjectBytes: Number(row.source_object_bytes),
+    outputObjectKey: row.output_object_key, outputObjectSha256: row.output_object_sha256, outputObjectBytes: Number(row.output_object_bytes), evidenceHash: row.evidence_hash });
+  try { assertBindingScope(binding, context.site, environmentKey); } catch { throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_INVALID", "Reviewed Astro object binding is invalid"); }
+  return binding;
+}
+
+async function requireObjectBinding(client: SqlClient, context: RepositoryContext, environmentKey: string, releaseId: string): Promise<ObjectBinding> {
+  const binding = await findObjectBinding(client, context, environmentKey, releaseId);
+  if (!binding) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_MISSING", "Reviewed Astro object binding disappeared during registration");
+  return binding;
+}
+
 async function findStoredRecord(client: SqlClient, context: RepositoryContext, environmentKey: string, releaseId: string): Promise<ReviewedAstroArtifactRecord | undefined> {
   const row = (await client.query<StoredArtifactRow>(
     `SELECT a.tenant_id, a.site_id, a.environment_key, a.release_id, a.release_hash,
@@ -262,42 +400,12 @@ async function findStoredRecord(client: SqlClient, context: RepositoryContext, e
   return row ? rowToRecord(row) : undefined;
 }
 
-async function requireStoredRecord(client: SqlClient, context: RepositoryContext, environmentKey: string, releaseId: string): Promise<ReviewedAstroArtifactRecord> {
-  const record = await findStoredRecord(client, context, environmentKey, releaseId);
-  if (!record) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_MISSING", "Reviewed Astro artifact disappeared during registration");
-  return record;
-}
-
 function rowToRecord(row: StoredArtifactRow): ReviewedAstroArtifactRecord {
   return freezeRecord({ tenantId: row.tenant_id, siteId: row.site_id, environment: "staging",
     environmentKey: row.environment_key, releaseId: row.release_id, releaseHash: row.release_hash,
     releaseArtifactHash: row.artifact_hash, expectedAstroArtifactHash: row.astro_artifact_hash,
     sourceCommitSha: row.source_commit_sha, artifact: row.artifact_json as AstroArtifact,
     output: row.output_json as Readonly<Record<string, string>> });
-}
-
-function persistedRecord(value: unknown): ReviewedAstroArtifactRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro idempotency result is invalid");
-  }
-  const record = value as ReviewedAstroArtifactRecord;
-  try {
-    assertRegistration({ releaseId: record.releaseId, releaseHash: record.releaseHash,
-      releaseArtifactHash: record.releaseArtifactHash, expectedAstroArtifactHash: record.expectedAstroArtifactHash,
-      sourceCommitSha: record.sourceCommitSha, artifact: record.artifact, output: record.output,
-      idempotencyKey: "persisted-reviewed-astro-record" }, { tenantId: record.tenantId, siteId: record.siteId });
-    if (record.environment !== "staging" || !/^[a-z0-9][a-z0-9-]{1,62}$/.test(record.environmentKey)) throw new Error("environment invalid");
-  } catch {
-    throw new McpEditingError("REVIEWED_ASTRO_IDEMPOTENCY_CORRUPT", "Reviewed Astro idempotency result is invalid");
-  }
-  return freezeRecord(record);
-}
-
-function sameRegistration(record: ReviewedAstroArtifactRecord, input: RegisterReviewedAstroArtifactInput): boolean {
-  return record.releaseId === input.releaseId && record.releaseHash === input.releaseHash &&
-    record.releaseArtifactHash === input.releaseArtifactHash && record.expectedAstroArtifactHash === input.expectedAstroArtifactHash &&
-    record.sourceCommitSha === input.sourceCommitSha && canonical(record.artifact) === canonical(input.artifact) &&
-    canonical(record.output) === canonical(input.output);
 }
 
 function freezeRecord(record: ReviewedAstroArtifactRecord): ReviewedAstroArtifactRecord { return deepFreeze(structuredClone(record)); }

@@ -1,4 +1,6 @@
 import { sha256 } from "@navocms/kernel";
+import { hash as blake3 } from "blake3-wasm";
+import { extname } from "node:path";
 
 import {
   CloudflareDeliveryError,
@@ -11,7 +13,8 @@ import {
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const MAX_PAGES = 10;
-const PAGE_SIZE = 100;
+// Pages deployment listing rejects values above 25 (error 8000024).
+const PAGE_SIZE = 25;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 export interface FetchCloudflarePagesTransportOptions {
@@ -103,31 +106,33 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     assertImmutableFiles(input.reference, input.files);
     await this.#preflightBranch(branch, environment);
     const fileEntries = Object.entries(input.files).sort(([left], [right]) => left.localeCompare(right));
-    const hashes = fileEntries.map(([, body]) => sha256(body));
+    const hashes = fileEntries.map(([path, body]) => pagesAssetHash(path, body));
     if (fileEntries.length !== input.reference.fileCount || hashes.length < 1 || hashes.length > 512) throw new CloudflareDeliveryError("CLOUDFLARE_ASSET_BOUNDS", "Cloudflare asset manifest exceeds delivery bounds");
 
     const uploadToken = await this.#uploadToken();
-    const missing = await this.#uploadJson("/pages/assets/check-missing", uploadToken, { hashes });
+    const missing = await providerPhase("ASSET_CHECK", () => this.#uploadJson("/pages/assets/check-missing", uploadToken, { hashes }));
     const missingHashes = new Set(resultArray(missing).filter((value): value is string => typeof value === "string"));
     const assets = fileEntries.flatMap(([path, body]) => {
-      const key = sha256(body);
+      const key = pagesAssetHash(path, body);
       return missingHashes.has(key) ? [{ key, value: Buffer.from(body).toString("base64"), base64: true, metadata: { contentType: contentType(path) } }] : [];
     });
-    if (assets.length > 0) await this.#uploadJson("/pages/assets/upload", uploadToken, assets);
+    if (assets.length > 0) await providerPhase("ASSET_UPLOAD", () => this.#uploadJson("/pages/assets/upload", uploadToken, assets));
 
     const form = new FormData();
     form.set("branch", branch);
     form.set("commit_dirty", "false");
     form.set("commit_hash", input.reference.sourceCommitSha);
     form.set("commit_message", marker(input.referenceHash, environment));
-    form.set("manifest", JSON.stringify(Object.fromEntries(fileEntries.map(([path, body]) => [path, sha256(body)]))));
-    form.set("pages_build_output_dir", "dist");
+    // Pages Direct Upload uses URL-rooted manifest keys. The build output
+    // directory is a local Wrangler setting and is not part of this multipart
+    // API contract.
+    form.set("manifest", JSON.stringify(Object.fromEntries(fileEntries.map(([path, body]) => [`/${path}`, pagesAssetHash(path, body)]))));
     // This file is derived solely from the immutable reference and lets a bounded HTTPS probe
     // confirm the deployed output without trusting a mutable preview URL or response body.
     form.set("_headers", new Blob([headersFile(input.reference, input.referenceHash, environment)], { type: "text/plain" }), "_headers");
-    const response = await this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}/deployments`, {
+    const response = await providerPhase("DEPLOY", () => this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}/deployments`, {
       method: "POST", body: form
-    });
+    }));
     const row = resultObject(requiredResponse(response));
     const value = deployment(row, this.#projectKey, input.referenceHash);
     if (value.environment !== environment) throw new CloudflareDeliveryError("CLOUDFLARE_ENVIRONMENT_MISMATCH", "Cloudflare deployment did not return the requested environment");
@@ -154,7 +159,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     const files: ImmutableArtifactFile[] = [];
     let headers: Headers | undefined;
     for (const expected of input.reference.files) {
-      const live = await this.#request(new URL(expected.path, url.endsWith("/") ? url : `${url}/`), { method: "GET", redirect: "error", headers: { "accept": "*/*" } }, async (response, signal) => {
+      const live = await this.#request(new URL(livePath(expected.path), url.endsWith("/") ? url : `${url}/`), { method: "GET", redirect: "error", headers: { "accept": "*/*" } }, async (response, signal) => {
         if (!response.ok) return { status: response.status, headers: response.headers };
         return { status: response.status, headers: response.headers, body: await boundedBody(response, expected.byteSize, signal) };
       }, remaining(deadline));
@@ -273,14 +278,24 @@ function canonicalDeployment(project: Record<string, unknown>, productionBranch:
 
 function canonicalAlias(row: Record<string, unknown>, suffix: string, expectedHostname?: string): string {
   const aliases = row.aliases;
-  if (!Array.isArray(aliases) || aliases.length < 1 || aliases.length > 64 || !aliases.every((value) => typeof value === "string")) throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment aliases are invalid");
-  for (const alias of aliases) {
+  if (aliases !== null && (!Array.isArray(aliases) || aliases.length > 64 || !aliases.every((value) => typeof value === "string"))) throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment aliases are invalid");
+  const candidates = [...(Array.isArray(aliases) ? aliases : []), row.url];
+  for (const alias of candidates) {
+    if (typeof alias !== "string") continue;
     try {
       const url = new URL(alias);
-      if (url.protocol === "https:" && !url.username && !url.password && !url.port && (expectedHostname ? url.hostname === expectedHostname : url.hostname.endsWith(suffix))) return url.toString();
+      const pagesDeploymentHostname = expectedHostname?.endsWith(suffix)
+        ? url.hostname.endsWith(`.${expectedHostname}`) && !url.hostname.slice(0, -(expectedHostname.length + 1)).includes(".")
+        : false;
+      if (url.protocol === "https:" && !url.username && !url.password && !url.port && url.pathname === "/" && !url.search && !url.hash && (expectedHostname ? url.hostname === expectedHostname || pagesDeploymentHostname : url.hostname.endsWith(suffix))) return url.toString();
     } catch { /* bounded hostile alias is ignored */ }
   }
   throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment has no allowed Pages alias");
+}
+
+function livePath(path: string): string {
+  if (path === "index.html") return "";
+  return path.endsWith("/index.html") ? path.slice(0, -"index.html".length) : path;
 }
 
 function deployment(row: Record<string, unknown>, projectKey: string, referenceHash: string): CloudflareDeployment {
@@ -360,6 +375,12 @@ async function readWithAbort(reader: ReadableStreamDefaultReader<Uint8Array>, si
   ]);
 }
 function contentType(path: string): string { return path.endsWith(".html") ? "text/html; charset=utf-8" : path.endsWith(".css") ? "text/css; charset=utf-8" : path.endsWith(".js") ? "application/javascript; charset=utf-8" : path.endsWith(".json") ? "application/json" : "application/octet-stream"; }
+/** Cloudflare Pages uses Wrangler's truncated BLAKE3 identity, not the artifact SHA-256. */
+function pagesAssetHash(path: string, body: string): string {
+  const extension = extname(path).slice(1);
+  const identity = `${Buffer.from(body).toString("base64")}${extension}`;
+  return blake3(identity).toString("hex").slice(0, 32);
+}
 function safeOutputPath(value: string): boolean { return /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*\/$)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && Buffer.byteLength(value, "utf8") <= 512; }
 function canonical(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; if (value !== null && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`; return JSON.stringify(value) ?? "null"; }
 
@@ -369,6 +390,17 @@ async function parseResponse(response: Response, signal: AbortSignal): Promise<R
   try { value = await jsonWithAbort(response, signal); } catch { throw new CloudflareDeliveryError("CLOUDFLARE_RESPONSE_INVALID", "Cloudflare API response is invalid"); }
   if (!value || typeof value !== "object" || Array.isArray(value) || ("success" in value && value.success !== true)) throw new CloudflareDeliveryError("CLOUDFLARE_RESPONSE_INVALID", "Cloudflare API response is invalid");
   return value as Record<string, unknown>;
+}
+
+async function providerPhase<T>(phase: "ASSET_CHECK" | "ASSET_UPLOAD" | "DEPLOY", action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof CloudflareDeliveryError && /^CLOUDFLARE_HTTP_[1-5][0-9]{2}$/.test(error.code)) {
+      throw new CloudflareDeliveryError(`CLOUDFLARE_${phase}_HTTP_${error.httpStatus}`, "Cloudflare provider phase failed", error.httpStatus);
+    }
+    throw error;
+  }
 }
 
 async function jsonWithAbort(response: Response, signal: AbortSignal): Promise<unknown> {

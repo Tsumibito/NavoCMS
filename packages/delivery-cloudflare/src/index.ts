@@ -1,8 +1,5 @@
 import {
-  DomainEventFactory,
   sha256,
-  type EventFactoryContext,
-  type EventStore,
   type ReleaseArtifact,
   type ReleaseProvider,
   type ReleaseProviderPublication,
@@ -15,7 +12,6 @@ import {
 } from "@navocms/design-astro";
 
 export * from "./cloudflare-pages-http.js";
-export * from "./coolify-http.js";
 
 /** Bounds remote provider input and operational telemetry; no credential is ever accepted here. */
 export const CLOUDFLARE_DELIVERY_LIMITS = Object.freeze({
@@ -37,7 +33,8 @@ export const CLOUDFLARE_CACHE_CONTROL = Object.freeze({
 
 const PROVIDER_KEY = "navocms.cloudflare-pages.v1";
 const REFERENCE_SCHEMA = "io.navocms.cloudflare-artifact-reference.v1" as const;
-const REFERENCE_FORMAT = "navocms-cloudflare-pages/v1" as const;
+const REFERENCE_FORMAT = "navocms-cloudflare-pages/v2" as const;
+const LEGACY_REFERENCE_FORMAT = "navocms-cloudflare-pages/v1" as const;
 
 export class CloudflareDeliveryError extends Error {
   public readonly code: string;
@@ -52,9 +49,71 @@ export class CloudflareDeliveryError extends Error {
 }
 
 /**
- * The immutable binding passed between the renderer, release workflow, Pages, and Coolify.
- * Hashes are carried, never credentials, API tokens, transport headers, or provider URLs.
+ * Deliberately small public vocabulary for MCP/operator recovery.  Error
+ * messages and provider response bodies are never suitable for that surface:
+ * they may contain request details or credentials.  HTTP codes are accepted
+ * only in the fixed provider namespaces; all other values fall back to the
+ * generic MCP rejection code.
  */
+const PUBLIC_ERROR_CODES: ReadonlySet<string> = new Set([
+  "ARTIFACT_COMMIT_INVALID",
+  "ARTIFACT_OUTPUT_BOUNDS",
+  "ARTIFACT_OUTPUT_INVALID",
+  "ARTIFACT_REFERENCE_INVALID",
+  "ARTIFACT_REFERENCE_MISMATCH",
+  "CLOUDFLARE_ASSET_BOUNDS",
+  "CLOUDFLARE_ASSET_INVALID",
+  "CLOUDFLARE_ASSET_REFERENCE_MISMATCH",
+  "CLOUDFLARE_CANONICAL_ALIAS_INVALID",
+  "CLOUDFLARE_CANONICAL_DEPLOYMENT_MISMATCH",
+  "CLOUDFLARE_CANONICAL_DEPLOYMENT_MISSING",
+  "CLOUDFLARE_CONFIG_INVALID",
+  "CLOUDFLARE_DEPLOYMENT_INVALID",
+  "CLOUDFLARE_ENVIRONMENT_MISMATCH",
+  "CLOUDFLARE_LIVE_BODY_MISSING",
+  "CLOUDFLARE_LIVE_BODY_OVERSIZED",
+  "CLOUDFLARE_LIVE_BYTES_MISMATCH",
+  "CLOUDFLARE_LIVE_ENVIRONMENT_DENIED",
+  "CLOUDFLARE_PAGINATION_BOUND",
+  "CLOUDFLARE_PREVIEW_INVALID",
+  "CLOUDFLARE_PRODUCTION_BRANCH_DENIED",
+  "CLOUDFLARE_PRODUCTION_BRANCH_MISMATCH",
+  "CLOUDFLARE_PROJECT_SCOPE_DENIED",
+  "CLOUDFLARE_RESPONSE_INVALID",
+  "CLOUDFLARE_RETRY_INVALID",
+  "CLOUDFLARE_ROLLBACK_INVALID",
+  "CLOUDFLARE_TIMEOUT",
+  "CLOUDFLARE_TIMEOUT_INVALID",
+  "CLOUDFLARE_TOKEN_INVALID",
+  "CLOUDFLARE_UPLOAD_TOKEN_INVALID",
+  "DELIVERY_ATTEMPTS_INVALID",
+  "DELIVERY_CONFIG_INVALID",
+  "DELIVERY_PHASE_CONFLICT",
+  "DELIVERY_PHASE_EFFECT_MISSING",
+  "DELIVERY_PHASE_HUMAN_RESOLUTION_REQUIRED",
+  "DELIVERY_PHASE_INVALID",
+  "DELIVERY_PHASE_MISSING",
+  "DELIVERY_PHASE_NOT_APPLIED_INVALID",
+  "DELIVERY_PHASE_OUTCOME_CONFLICT",
+  "DELIVERY_PHASE_RESOLUTION_INVALID",
+  "PROVIDER_REFERENCE_BOUNDS",
+  "PROVIDER_REFERENCE_INVALID",
+  "RELEASE_INPUT_INVALID",
+  "ROLLBACK_PROVIDER_MISMATCH",
+  "ROLLBACK_TARGET_VERIFICATION_FAILED"
+]);
+
+const PUBLIC_HTTP_ERROR_CODE = /^(?:CLOUDFLARE_HTTP|CLOUDFLARE_(?:ASSET_CHECK|ASSET_UPLOAD|DEPLOY)_HTTP)_[1-5][0-9]{2}$/;
+
+/** Returns a safe, statically validated recovery code; never a provider message. */
+export function publicCloudflareDeliveryErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof CloudflareDeliveryError)) return undefined;
+  return PUBLIC_ERROR_CODES.has(error.code) || PUBLIC_HTTP_ERROR_CODE.test(error.code)
+    ? error.code
+    : undefined;
+}
+
+/** The immutable binding passed between the renderer, release workflow, and Pages. */
 export interface ImmutableArtifactReference {
   readonly schema: typeof REFERENCE_SCHEMA;
   readonly releaseHash: string;
@@ -145,49 +204,8 @@ export interface CloudflarePagesTransport {
   }>): Promise<void>;
 }
 
-export interface CoolifyPromotion {
-  readonly id: string;
-  readonly applicationKey: string;
-  readonly sourceCommitSha: string;
-  readonly referenceHash: string;
-  readonly status: "queued" | "running" | "finished" | "failed";
-}
-
-/**
- * Coolify does not become a source of truth: it is asked to promote the commit already pinned by
- * the immutable artifact reference, and can be queried by that same operation identity on retry.
- */
-export interface CoolifyCommitTransport {
-  findPromotion(input: Readonly<{
-    applicationKey: string;
-    sourceCommitSha: string;
-    referenceHash: string;
-  }>): Promise<CoolifyPromotion | undefined>;
-  promoteCommit(input: Readonly<{
-    applicationKey: string;
-    sourceCommitSha: string;
-    referenceHash: string;
-    operationKey: string;
-  }>): Promise<CoolifyPromotion>;
-  retryPromotion(input: Readonly<{
-    applicationKey: string;
-    sourceCommitSha: string;
-    referenceHash: string;
-    operationKey: string;
-  }>): Promise<CoolifyPromotion>;
-  inspectPromotion(input: Readonly<{ applicationKey: string; promotionId: string; referenceHash: string }>): Promise<CoolifyPromotion | undefined>;
-  rollback(input: Readonly<{
-    applicationKey: string;
-    currentPromotionId: string;
-    targetPromotionId: string;
-    targetCommitSha: string;
-    referenceHash: string;
-    operationKey: string;
-  }>): Promise<CoolifyPromotion>;
-}
-
 export interface DeliveryTelemetryRecord {
-  readonly provider: "cloudflare-pages" | "coolify";
+  readonly provider: "cloudflare-pages";
   readonly operation: "discover" | "preview" | "verify" | "promote" | "rollback";
   readonly outcome: "attempt" | "retry" | "success" | "failure";
   readonly attempt: number;
@@ -291,66 +309,32 @@ export class InMemoryDeliveryPhaseStore implements DeliveryPhaseStore {
   public async attempt(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2> { return this.#entries.get(phaseKey(input))?.attempt ?? 1; }
 }
 
-export class InMemoryDeliveryTelemetry implements DeliveryTelemetry {
-  readonly records: DeliveryTelemetryRecord[] = [];
-
-  public async record(record: DeliveryTelemetryRecord): Promise<void> {
-    this.records.push(Object.freeze({ ...record }));
-  }
-}
-
-/** Optional bridge to the existing Event Ledger; it does not introduce a telemetry database. */
-export class EventLedgerDeliveryTelemetry implements DeliveryTelemetry {
-  readonly #events: EventStore;
-  readonly #factory: DomainEventFactory;
-
-  public constructor(events: EventStore, context: Readonly<{
-    source: string;
-    tenantId: string;
-    siteId: string;
-    correlationId: string;
-    actor: EventFactoryContext["actor"];
-  }>) {
-    this.#events = events;
-    this.#factory = new DomainEventFactory(context);
-  }
-
-  public async record(record: DeliveryTelemetryRecord): Promise<void> {
-    await this.#events.append(this.#factory.create({
-      type: "io.navocms.delivery.provider.attempt.v1",
-      subject: record.referenceHash,
-      consequence: "G0",
-      data: Object.freeze({
-        provider: record.provider,
-        operation: record.operation,
-        outcome: record.outcome,
-        attempt: record.attempt,
-        releaseHash: record.releaseHash,
-        artifactHash: record.artifactHash,
-        referenceHash: record.referenceHash,
-        ...(record.httpStatus !== undefined ? { httpStatus: record.httpStatus } : {}),
-        ...(record.errorCode ? { errorCode: record.errorCode } : {})
-      })
-    }));
-  }
-}
-
 export interface CloudflarePagesReleaseProviderOptions {
   readonly projectKey: string;
   readonly previewBranch: string;
   readonly productionBranch: string;
-  readonly coolifyApplicationKey: string;
   readonly resolver: ImmutableArtifactResolver;
   readonly cloudflare: CloudflarePagesTransport;
-  readonly coolify: CoolifyCommitTransport;
   readonly phases: DeliveryPhaseStore;
   readonly telemetry?: DeliveryTelemetry;
   readonly attempts?: number;
 }
 
-interface ProviderReferenceV1 {
+interface ProviderReferenceV2 {
   readonly schema: typeof REFERENCE_SCHEMA;
   readonly format: typeof REFERENCE_FORMAT;
+  readonly projectKey: string;
+  readonly releaseId: string;
+  readonly previewDeploymentId: string;
+  readonly productionDeploymentId: string;
+  readonly reference: ImmutableArtifactReference;
+  readonly referenceHash: string;
+}
+
+/** Read-only decoder for content publications already written by v1. */
+interface LegacyProviderReferenceV1 {
+  readonly schema: typeof REFERENCE_SCHEMA;
+  readonly format: typeof LEGACY_REFERENCE_FORMAT;
   readonly projectKey: string;
   readonly releaseId: string;
   readonly previewDeploymentId: string;
@@ -361,18 +345,20 @@ interface ProviderReferenceV1 {
   readonly referenceHash: string;
 }
 
+type ProviderReference = ProviderReferenceV2 | LegacyProviderReferenceV1;
+
 /**
  * Provider implementation for the existing ReleaseProvider workflow. It is deliberately dormant
- * until a host injects both real transports and an immutable Astro artifact resolver.
+ * until a host injects a Pages transport and an immutable Astro artifact resolver.
  */
 export class CloudflarePagesReleaseProvider implements ReleaseProvider {
   public readonly key = PROVIDER_KEY;
-  readonly #options: Required<Pick<CloudflarePagesReleaseProviderOptions, "projectKey" | "previewBranch" | "productionBranch" | "coolifyApplicationKey">> & CloudflarePagesReleaseProviderOptions;
+  readonly #options: Required<Pick<CloudflarePagesReleaseProviderOptions, "projectKey" | "previewBranch" | "productionBranch">> & CloudflarePagesReleaseProviderOptions;
   readonly #telemetry: DeliveryTelemetry;
   readonly #attempts: number;
 
   public constructor(options: CloudflarePagesReleaseProviderOptions) {
-    if (!safeIdentifier(options.projectKey) || !safeIdentifier(options.previewBranch) || !safeIdentifier(options.productionBranch) || !safeIdentifier(options.coolifyApplicationKey) || options.previewBranch === options.productionBranch) {
+    if (!safeIdentifier(options.projectKey) || !safeIdentifier(options.previewBranch) || !safeIdentifier(options.productionBranch) || options.previewBranch === options.productionBranch) {
       throw new CloudflareDeliveryError("DELIVERY_CONFIG_INVALID", "Cloudflare delivery identifiers are invalid");
     }
     this.#options = Object.freeze({ ...options });
@@ -416,30 +402,6 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
     ));
     assertCloudflareDeployment(production, this.#options.projectKey, referenceHash, "production");
 
-    const coolifyPhase = "publish.coolify";
-    const promotionState = await this.#options.phases.reserve({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase });
-    let promotion: CoolifyPromotion;
-    if (promotionState === "completed") {
-      const promotionId = await this.#options.phases.externalId({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase });
-      if (!promotionId) throw new CloudflareDeliveryError("DELIVERY_PHASE_INVALID", "Completed Coolify phase has no durable deployment identifier");
-      const found = await this.#call("coolify", "discover", input, referenceHash, () => this.#options.coolify.inspectPromotion({ applicationKey: this.#options.coolifyApplicationKey, promotionId, referenceHash }));
-      if (!found) throw new CloudflareDeliveryError("DELIVERY_PHASE_EFFECT_MISSING", "Recorded Coolify deployment no longer exists");
-      promotion = found;
-    } else {
-      if (promotionState === "reserved") {
-        promotion = await this.#recoverCoolifyPhase({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase }, input, deployable.reference.sourceCommitSha);
-      } else {
-        const attempt = await this.#options.phases.attempt({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase });
-        promotion = await this.#call("coolify", "promote", input, referenceHash, () => this.#options.coolify.promoteCommit({
-          applicationKey: this.#options.coolifyApplicationKey,
-          sourceCommitSha: deployable.reference.sourceCommitSha,
-          referenceHash,
-          operationKey: operationKey("promote", input.releaseHash, referenceHash, attempt)
-        }));
-        await this.#options.phases.complete({ releaseId: input.releaseId, referenceHash, phase: coolifyPhase, externalId: promotion.id });
-      }
-    }
-    assertCoolifyPromotion(promotion, this.#options.coolifyApplicationKey, deployable.reference.sourceCommitSha, referenceHash);
     const reference = Object.freeze({
       schema: REFERENCE_SCHEMA,
       format: REFERENCE_FORMAT,
@@ -447,8 +409,6 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
       releaseId: input.releaseId,
       previewDeploymentId: preview.id,
       productionDeploymentId: production.id,
-      coolifyApplicationKey: this.#options.coolifyApplicationKey,
-      coolifyPromotionId: promotion.id,
       reference: deployable.reference,
       referenceHash
     });
@@ -456,7 +416,7 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
   }
 
   public async verify(publication: ReleaseProviderPublication): Promise<boolean> {
-    let reference: ProviderReferenceV1;
+    let reference: ProviderReference;
     try { reference = decodeProviderReference(publication, this.key); } catch { return false; }
     const releaseInput = { releaseHash: reference.reference.releaseHash, artifact: { hash: publication.artifactHash } };
     try {
@@ -472,10 +432,7 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
         })
       ));
       if (probe.status !== 200 || probe.referenceHash !== reference.referenceHash || probe.releaseHash !== reference.reference.releaseHash || probe.outputHash !== reference.reference.outputHash || probe.cacheControl !== CLOUDFLARE_CACHE_CONTROL.production || !sameFileManifest(probe.files, reference.reference.files)) return false;
-      const promotion = await this.#call("coolify", "verify", releaseInput, reference.referenceHash, () => (
-        this.#options.coolify.inspectPromotion({ applicationKey: reference.coolifyApplicationKey, promotionId: reference.coolifyPromotionId, referenceHash: reference.referenceHash })
-      ));
-      return Boolean(promotion && promotion.status === "finished" && promotion.applicationKey === reference.coolifyApplicationKey && promotion.sourceCommitSha === reference.reference.sourceCommitSha && promotion.referenceHash === reference.referenceHash);
+      return true;
     } catch (error) {
       if (error instanceof CloudflareDeliveryError && error.httpStatus === 502) return false;
       throw error;
@@ -485,7 +442,7 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
   public async rollback(current: ReleaseProviderPublication, target: ReleaseProviderPublication): Promise<void> {
     const currentReference = decodeProviderReference(current, this.key);
     const targetReference = decodeProviderReference(target, this.key);
-    if (currentReference.projectKey !== targetReference.projectKey || currentReference.coolifyApplicationKey !== targetReference.coolifyApplicationKey) {
+    if (currentReference.projectKey !== targetReference.projectKey) {
       throw new CloudflareDeliveryError("ROLLBACK_PROVIDER_MISMATCH", "Rollback target belongs to another delivery binding");
     }
     const input = { releaseHash: currentReference.reference.releaseHash, artifact: { hash: current.artifactHash } };
@@ -511,56 +468,10 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
       await this.#verifyRollbackTarget(targetReference, input);
       await this.#options.phases.complete({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: cloudflarePhase, externalId: targetReference.productionDeploymentId });
     }
-    const coolifyPhase = "rollback.coolify";
-    const coolifyState = await this.#options.phases.reserve({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase });
-    let rollbackPromotion: CoolifyPromotion;
-    if (coolifyState === "completed") {
-      const promotionId = await this.#options.phases.externalId({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase });
-      if (!promotionId) throw new CloudflareDeliveryError("DELIVERY_PHASE_INVALID", "Completed Coolify rollback phase has no durable deployment identifier");
-      const found = await this.#call("coolify", "discover", input, targetReference.referenceHash, () => this.#options.coolify.inspectPromotion({ applicationKey: targetReference.coolifyApplicationKey, promotionId, referenceHash: targetReference.referenceHash }));
-      if (!found) throw new CloudflareDeliveryError("DELIVERY_PHASE_EFFECT_MISSING", "Recorded Coolify rollback deployment no longer exists");
-      rollbackPromotion = found;
-    } else {
-      if (coolifyState === "reserved") {
-        rollbackPromotion = await this.#recoverCoolifyPhase({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase }, input, targetReference.reference.sourceCommitSha);
-      } else {
-        const attempt = await this.#options.phases.attempt({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase });
-        rollbackPromotion = await this.#call("coolify", "rollback", input, currentReference.referenceHash, () => (
-          this.#options.coolify.rollback({
-          applicationKey: currentReference.coolifyApplicationKey,
-          currentPromotionId: currentReference.coolifyPromotionId,
-          targetPromotionId: targetReference.coolifyPromotionId,
-          targetCommitSha: targetReference.reference.sourceCommitSha,
-          referenceHash: targetReference.referenceHash,
-          operationKey: operationKey("rollback", currentReference.referenceHash, targetReference.referenceHash, attempt)
-          })
-        ));
-        await this.#options.phases.complete({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: coolifyPhase, externalId: rollbackPromotion.id });
-      }
-    }
     await this.#verifyRollbackTarget(targetReference, input);
-    assertCoolifyPromotion(rollbackPromotion, targetReference.coolifyApplicationKey, targetReference.reference.sourceCommitSha, targetReference.referenceHash);
-    const targetPromotion = await this.#call("coolify", "verify", input, targetReference.referenceHash, () => this.#options.coolify.inspectPromotion({ applicationKey: targetReference.coolifyApplicationKey, promotionId: rollbackPromotion.id, referenceHash: targetReference.referenceHash }));
-    if (!targetPromotion || targetPromotion.status !== "finished" || targetPromotion.sourceCommitSha !== targetReference.reference.sourceCommitSha || targetPromotion.referenceHash !== targetReference.referenceHash) throw new CloudflareDeliveryError("ROLLBACK_TARGET_VERIFICATION_FAILED", "Rollback target Coolify promotion has not finished");
   }
 
-  async #recoverCoolifyPhase(phase: Readonly<{ releaseId: string; referenceHash: string; phase: string }>, input: Readonly<{ releaseHash: string; artifact: Readonly<{ hash: string }> }>, sourceCommitSha: string): Promise<CoolifyPromotion> {
-    const candidate = await this.#options.phases.resolution(phase);
-    if (!candidate) {
-      throw new CloudflareDeliveryError("DELIVERY_PHASE_HUMAN_RESOLUTION_REQUIRED", "Coolify has no immutable operation lookup; a human operator must record the exact deployment UUID and evidence before reconciliation can continue");
-    }
-    const promotion = await this.#call("coolify", "discover", input, phase.referenceHash, () => this.#options.coolify.inspectPromotion({
-      applicationKey: this.#options.coolifyApplicationKey,
-      promotionId: candidate.externalId,
-      referenceHash: phase.referenceHash
-    }));
-    if (!promotion) throw new CloudflareDeliveryError("DELIVERY_PHASE_RESOLUTION_INVALID", "The human-recorded Coolify deployment UUID no longer exists");
-    assertCoolifyPromotion(promotion, this.#options.coolifyApplicationKey, sourceCommitSha, phase.referenceHash);
-    await this.#options.phases.complete({ ...phase, externalId: promotion.id });
-    return promotion;
-  }
-
-  async #verifyRollbackTarget(targetReference: ProviderReferenceV1, input: Readonly<{ releaseHash: string; artifact: Readonly<{ hash: string }> }>): Promise<void> {
+  async #verifyRollbackTarget(targetReference: ProviderReference, input: Readonly<{ releaseHash: string; artifact: Readonly<{ hash: string }> }>): Promise<void> {
     const targetDeployment = await this.#call("cloudflare-pages", "verify", input, targetReference.referenceHash, () => this.#options.cloudflare.inspectDeployment({ projectKey: targetReference.projectKey, deploymentId: targetReference.productionDeploymentId }));
     if (!targetDeployment || targetDeployment.status !== "success") throw new CloudflareDeliveryError("ROLLBACK_TARGET_VERIFICATION_FAILED", "Rollback target deployment is not successful");
     assertCloudflareDeployment(targetDeployment, targetReference.projectKey, targetReference.referenceHash, "production");
@@ -673,24 +584,22 @@ function assertCloudflareDeployment(value: CloudflareDeployment, projectKey: str
   if (!value || !safeIdentifier(value.id) || value.projectKey !== projectKey || value.referenceHash !== referenceHash || value.environment !== environment) throw new CloudflareDeliveryError("CLOUDFLARE_DEPLOYMENT_INVALID", "Cloudflare deployment does not match immutable reference");
 }
 
-function assertCoolifyPromotion(value: CoolifyPromotion, applicationKey: string, sourceCommitSha: string, referenceHash: string): void {
-  if (!value || !safeIdentifier(value.id) || value.applicationKey !== applicationKey || value.sourceCommitSha !== sourceCommitSha || value.referenceHash !== referenceHash) throw new CloudflareDeliveryError("COOLIFY_PROMOTION_INVALID", "Coolify promotion does not match immutable reference");
-}
-
-function encodeProviderReference(reference: ProviderReferenceV1): string {
+function encodeProviderReference(reference: ProviderReferenceV2): string {
   const encoded = Buffer.from(canonical(reference)).toString("base64url");
   const value = `${REFERENCE_FORMAT}:${encoded}`;
   if (bytes(value) > CLOUDFLARE_DELIVERY_LIMITS.providerReferenceBytes) throw new CloudflareDeliveryError("PROVIDER_REFERENCE_BOUNDS", "Provider reference exceeds bound");
   return value;
 }
 
-function decodeProviderReference(publication: ReleaseProviderPublication, expectedKey: string): ProviderReferenceV1 {
-  if (!publication || publication.providerKey !== expectedKey || !hash(publication.artifactHash) || typeof publication.providerReference !== "string" || bytes(publication.providerReference) > CLOUDFLARE_DELIVERY_LIMITS.providerReferenceBytes || !publication.providerReference.startsWith(`${REFERENCE_FORMAT}:`)) throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference is invalid");
+function decodeProviderReference(publication: ReleaseProviderPublication, expectedKey: string): ProviderReference {
+  if (!publication || publication.providerKey !== expectedKey || !hash(publication.artifactHash) || typeof publication.providerReference !== "string" || bytes(publication.providerReference) > CLOUDFLARE_DELIVERY_LIMITS.providerReferenceBytes || (!publication.providerReference.startsWith(`${REFERENCE_FORMAT}:`) && !publication.providerReference.startsWith(`${LEGACY_REFERENCE_FORMAT}:`))) throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference is invalid");
   let value: unknown;
-  try { value = JSON.parse(Buffer.from(publication.providerReference.slice(REFERENCE_FORMAT.length + 1), "base64url").toString("utf8")); } catch { throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference is invalid"); }
+  try { value = JSON.parse(Buffer.from(publication.providerReference.slice(publication.providerReference.indexOf(":") + 1), "base64url").toString("utf8")); } catch { throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference is invalid"); }
   if (!value || typeof value !== "object") throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference is invalid");
-  const reference = value as ProviderReferenceV1;
-  if (!exactKeys(reference, ["schema", "format", "projectKey", "releaseId", "previewDeploymentId", "productionDeploymentId", "coolifyApplicationKey", "coolifyPromotionId", "reference", "referenceHash"]) || reference.schema !== REFERENCE_SCHEMA || reference.format !== REFERENCE_FORMAT || !safeIdentifier(reference.projectKey) || !safeIdentifier(reference.releaseId) || !safeIdentifier(reference.previewDeploymentId) || !safeIdentifier(reference.productionDeploymentId) || !safeIdentifier(reference.coolifyApplicationKey) || !safeIdentifier(reference.coolifyPromotionId) || !hash(reference.referenceHash)) throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference is invalid");
+  const reference = value as ProviderReference;
+  const v2 = exactKeys(reference, ["schema", "format", "projectKey", "releaseId", "previewDeploymentId", "productionDeploymentId", "reference", "referenceHash"]) && reference.format === REFERENCE_FORMAT;
+  const v1 = exactKeys(reference, ["schema", "format", "projectKey", "releaseId", "previewDeploymentId", "productionDeploymentId", "coolifyApplicationKey", "coolifyPromotionId", "reference", "referenceHash"]) && reference.format === LEGACY_REFERENCE_FORMAT && "coolifyApplicationKey" in reference && "coolifyPromotionId" in reference && safeIdentifier(reference.coolifyApplicationKey) && safeIdentifier(reference.coolifyPromotionId);
+  if ((!v2 && !v1) || reference.schema !== REFERENCE_SCHEMA || !safeIdentifier(reference.projectKey) || !safeIdentifier(reference.releaseId) || !safeIdentifier(reference.previewDeploymentId) || !safeIdentifier(reference.productionDeploymentId) || !hash(reference.referenceHash)) throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference is invalid");
   assertReference(reference.reference);
   if (reference.reference.releaseArtifactHash !== publication.artifactHash || immutableReferenceHash(reference.reference) !== reference.referenceHash) throw new CloudflareDeliveryError("PROVIDER_REFERENCE_INVALID", "Cloudflare provider reference hash mismatch");
   return Object.freeze(reference);
@@ -713,7 +622,6 @@ function operationKey(operation: string, left: string, right: string, attempt = 
 function phaseKey(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): string { return `${input.releaseId}:${input.referenceHash}:${input.phase}`; }
 
 function terminalDeployment(value: CloudflareDeployment): boolean { return value.status === "failure" || value.status === "canceled"; }
-function terminalPromotion(value: CoolifyPromotion): boolean { return value.status === "failed"; }
 function sameFileManifest(actual: readonly ImmutableArtifactFile[] | undefined, expected: readonly ImmutableArtifactFile[]): boolean {
   if (!actual || actual.length !== expected.length) return false;
   const normalized = (values: readonly ImmutableArtifactFile[]) => values.map((value) => `${value.path}:${value.sha256}:${value.byteSize}`).sort();

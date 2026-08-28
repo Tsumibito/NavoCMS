@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual, webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 
 import { SecurityError } from "./errors.js";
 import type { Principal } from "./authorization.js";
@@ -278,14 +278,4 @@ export function createRemoteJwksProvider(jwksUrl: string, fetcher: typeof fetch 
     cached = { value, expiresAt: Date.now() + 300_000 };
     return value;
   };
-}
-
-export function tokenFingerprint(token: string): string {
-  return createHash("sha256").update(token).digest("hex").slice(0, 16);
-}
-
-export function constantTimeTokenMatch(left: string, right: string): boolean {
-  const leftHash = createHash("sha256").update(left).digest();
-  const rightHash = createHash("sha256").update(right).digest();
-  return timingSafeEqual(leftHash, rightHash);
 }

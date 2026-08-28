@@ -9,6 +9,8 @@ export * from "./staging-profile.js";
 export * from "./staging-runtime.js";
 export * from "./staging-composition.js";
 export * from "./reviewed-astro-resolver.js";
+export * from "./reviewed-astro-object-storage.js";
+export * from "./r2-storage-runtime.js";
 export * from "./postgres-reviewed-astro-artifact-store.js";
 export * from "./postgres-reviewed-astro-build-input-store.js";
 export * from "./staging-astro-preview-preparer.js";

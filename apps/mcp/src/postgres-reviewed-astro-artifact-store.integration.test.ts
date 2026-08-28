@@ -4,6 +4,7 @@ import { dryRunCloudflareStaging } from "./staging-profile.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { PostgresReviewedAstroArtifactStore, reviewedAstroArtifactAuthority, type RegisterReviewedAstroArtifactInput } from "./postgres-reviewed-astro-artifact-store.js";
+import { LocalDeterministicReviewedAstroObjectStorage, reviewedAstroObjectPrefix } from "./reviewed-astro-object-storage.js";
 import { PostgresReviewedAstroBuildInputStore } from "./postgres-reviewed-astro-build-input-store.js";
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
 import { StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
@@ -25,6 +26,7 @@ const humanPrincipalId = "016ef382-bf28-406b-9321-1fc580b6ea00";
 const servicePrincipalId = "216ef382-bf28-406b-9321-1fc580b6ea01";
 const database = databaseUrl ? new PostgresDatabase({ connectionString: databaseUrl, applicationName: "navocms-reviewed-astro-integration", maxConnections: 4 }) : undefined;
 const adminDatabase = adminDatabaseUrl ? new PostgresDatabase({ connectionString: adminDatabaseUrl, applicationName: "navocms-reviewed-astro-policy-integration", maxConnections: 1 }) : undefined;
+const artifactStorage = new LocalDeterministicReviewedAstroObjectStorage();
 const humanRepositoryContext = Object.freeze({
   site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] },
   principalId: humanPrincipalId
@@ -34,10 +36,9 @@ const serviceRepositoryContext = Object.freeze({
   principalId: servicePrincipalId
 });
 const binding = Object.freeze({
-  schema: "io.navocms.cloudflare-staging-binding.v2" as const,
+  schema: "io.navocms.cloudflare-staging-binding.v3" as const,
   tenantId, siteId, environment: "staging" as const,
-  cloudflare: { accountId: "test-account", projectId: "test-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" },
-  coolify: { baseUrl: "https://coolify.example.test", applicationUuid: "33333333-3333-4333-8333-333333333333", tokenSecretRef: "secret:delivery/coolify-token" }
+  cloudflare: { accountId: "test-account", projectId: "test-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" }
 });
 
 afterAll(async () => { await database?.close(); await adminDatabase?.close(); });
@@ -45,21 +46,21 @@ afterAll(async () => { await database?.close(); await adminDatabase?.close(); })
 integration("reviewed Astro artifact PostgreSQL boundary", () => {
   it("registers as a human, resolves after restart as a service, and rejects replay drift", async () => {
     const release = await createRelease("durable");
-    const store = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default");
+    const store = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { storage: artifactStorage });
     await expect(store.ready()).resolves.toBe(true);
     const input = registrationInput(release);
     const first = await store.register(input, authority());
     const replay = await store.register(structuredClone(input), authority());
     expect(replay).toEqual(first);
 
-    const restartedStore = new PostgresReviewedAstroArtifactStore(database!, serviceRepositoryContext, "default");
+    const restartedStore = new PostgresReviewedAstroArtifactStore(database!, serviceRepositoryContext, "default", { storage: artifactStorage });
     const resolver = new ReviewedAstroArtifactResolver(restartedStore, { tenantId, siteId, environment: "staging", environmentKey: "default" });
     await expect(resolver.ready()).resolves.toBe(true);
     await expect(resolver.resolve({ releaseId: release.id, releaseHash: release.releaseHash, releaseArtifact: release.artifact })).resolves.toMatchObject({
       reference: { releaseHash: release.releaseHash, releaseArtifactHash: release.artifact.hash }
     });
     const dryRun = await dryRunCloudflareStaging({ context: requestContext(), binding, resolver, release: { releaseId: release.id, releaseHash: release.releaseHash, artifact: release.artifact } });
-    expect(dryRun).toEqual({ referenceHash: expect.any(String), cloudflareProjectId: "test-pages", coolifyApplicationUuid: binding.coolify.applicationUuid });
+    expect(dryRun).toEqual({ referenceHash: expect.any(String), cloudflareProjectId: "test-pages" });
 
     await expect(store.register({ ...input, output: { ...input.output, "assets/drift.txt": "different" } }, authority())).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
     await expect(store.register({ ...input, idempotencyKey: `reviewed-second-${randomUUID()}`, output: { ...input.output, "assets/drift.txt": "different" } }, authority())).rejects.toMatchObject({ code: "REVIEWED_ASTRO_ARTIFACT_DRIFT" });
@@ -67,36 +68,42 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
     const events = await new PostgresEventStore(database!).query({ tenantId, siteId, principalId: servicePrincipalId, type: "io.navocms.release.astro-artifact-registered.v1" });
     const event = events.find(({ event: candidate }) => candidate.data.releaseId === release.id)?.event;
     expect(event).toMatchObject({ navoactor: { id: humanPrincipalId, type: "human" }, navoconsequence: "G1", navocorrelationid: release.correlationId });
+    const columns = await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => (
+      await client.query<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_schema = 'navocms' AND table_name = 'reviewed_astro_artifact_object_bindings'")
+    ).rows.map(({ column_name }) => column_name));
+    expect(columns).not.toContain("artifact_json");
+    expect(columns).not.toContain("output_json");
   });
 
   it("serializes concurrent registrations and rolls back artifact, idempotency, ledger, and outbox after event failure", async () => {
     const concurrentRelease = await createRelease("concurrent");
     const input = registrationInput(concurrentRelease);
-    const first = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default");
-    const second = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default");
+    const first = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { storage: artifactStorage });
+    const second = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { storage: artifactStorage });
     const results = await Promise.all([first.register(input, authority()), second.register(structuredClone(input), authority())]);
     expect(results[0]).toEqual(results[1]);
     const concurrentCount = await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => (
       await client.query<{ count: string }>(
-        "SELECT count(*)::text AS count FROM navocms.reviewed_astro_artifacts WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3",
+        "SELECT count(*)::text AS count FROM navocms.reviewed_astro_artifact_object_bindings WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3",
         [tenantId, siteId, concurrentRelease.id]
       )).rows[0]!.count
     );
     expect(concurrentCount).toBe("1");
 
     const failedRelease = await createRelease("rollback");
-    const failedInput = registrationInput(failedRelease);
+    const failedInput = registrationInput(failedRelease, "rollback-orphan");
+    const objectsBeforeFailure = await artifactStorage.inventory(reviewedAstroObjectPrefix({ tenantId, siteId }), 100);
     const persisted = new PostgresEventStore(database!);
     const failingEvents: EventStore = {
       append: async (event) => { await persisted.append(event); throw new Error("injected event/outbox failure"); },
       query: (query) => persisted.query(query)
     };
-    const failingStore = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { events: failingEvents });
+    const failingStore = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { events: failingEvents, storage: artifactStorage });
     await expect(failingStore.register(failedInput, authority())).rejects.toThrow("injected event/outbox failure");
     const counts = await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => (
       await client.query<{ artifacts: string; idempotency: string; ledger: string; outbox: string }>(
         `SELECT
-          (SELECT count(*) FROM navocms.reviewed_astro_artifacts WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3) AS artifacts,
+          (SELECT count(*) FROM navocms.reviewed_astro_artifact_object_bindings WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3) AS artifacts,
           (SELECT count(*) FROM navocms.idempotency_records WHERE tenant_id = $1 AND site_id = $2 AND operation = $4 AND idempotency_key = $5) AS idempotency,
           (SELECT count(*) FROM navocms.event_ledger WHERE tenant_id = $1 AND site_id = $2 AND idempotency_key = $6) AS ledger,
           (SELECT count(*) FROM navocms.domain_outbox WHERE tenant_id = $1 AND site_id = $2 AND idempotency_key = $6) AS outbox`,
@@ -104,11 +111,58 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
       )).rows[0]!
     );
     expect(counts).toEqual({ artifacts: "0", idempotency: "0", ledger: "0", outbox: "0" });
+    const objectsAfterFailure = await artifactStorage.inventory(reviewedAstroObjectPrefix({ tenantId, siteId }), 100);
+    expect(objectsAfterFailure.objects).toHaveLength(objectsBeforeFailure.objects.length + 2);
+  });
+
+  it("allows two releases in one site to reuse exactly the same immutable source and output objects", async () => {
+    const firstRelease = await createRelease("shared-one");
+    const secondRelease = await createRelease("shared-two");
+    const store = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { storage: artifactStorage });
+    const firstInput = registrationInput(firstRelease, "shared-object");
+    const secondInput: RegisterReviewedAstroArtifactInput = Object.freeze({
+      ...firstInput, idempotencyKey: `reviewed-shared-${randomUUID()}`,
+      releaseId: secondRelease.id, releaseHash: secondRelease.releaseHash, releaseArtifactHash: secondRelease.artifact.hash
+    });
+    const before = await artifactStorage.inventory(reviewedAstroObjectPrefix({ tenantId, siteId }), 100);
+    await store.register(firstInput, authority());
+    const afterFirst = await artifactStorage.inventory(reviewedAstroObjectPrefix({ tenantId, siteId }), 100);
+    await store.register(secondInput, authority());
+    const afterSecond = await artifactStorage.inventory(reviewedAstroObjectPrefix({ tenantId, siteId }), 100);
+    expect(afterFirst.objects).toHaveLength(before.objects.length + 2);
+    expect(afterSecond.objects).toHaveLength(afterFirst.objects.length);
+    const rows = await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => (
+      await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM navocms.reviewed_astro_artifact_object_bindings
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = ANY($3::uuid[])`,
+        [tenantId, siteId, [firstRelease.id, secondRelease.id]]
+      )).rows[0]!.count
+    );
+    expect(rows).toBe("2");
+  });
+
+  it("reads a legacy row when no object binding exists", async () => {
+    const release = await createRelease("legacy");
+    const input = registrationInput(release);
+    await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => {
+      await client.query(
+        `INSERT INTO navocms.reviewed_astro_artifacts (
+           tenant_id, site_id, environment_id, environment_key, release_id, release_hash,
+           artifact_hash, astro_artifact_hash, source_commit_sha, artifact_json, output_json
+         ) SELECT r.tenant_id, r.site_id, r.environment_id, $1, r.id, r.release_hash,
+                  r.artifact_hash, $2, $3, $4::jsonb, $5::jsonb
+             FROM navocms.release_candidates r WHERE r.tenant_id = $6 AND r.site_id = $7 AND r.id = $8`,
+        ["default", input.expectedAstroArtifactHash, input.sourceCommitSha, JSON.stringify(input.artifact), JSON.stringify(input.output), tenantId, siteId, release.id]
+      );
+    });
+    const legacyOnly = new PostgresReviewedAstroArtifactStore(database!, serviceRepositoryContext, "default");
+    await expect(legacyOnly.get({ tenantId, siteId, environment: "staging", environmentKey: "default", releaseId: release.id })).resolves.toMatchObject({ expectedAstroArtifactHash: input.expectedAstroArtifactHash, output: input.output });
   });
 
   it("rejects malformed, missing, extra, and oversized source/output before SQL", async () => {
     const release = await createRelease("invalid");
-    const store = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default");
+    const store = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { storage: artifactStorage });
     const input = registrationInput(release);
     const cases: readonly RegisterReviewedAstroArtifactInput[] = [
       { ...input, idempotencyKey: `reviewed-missing-${randomUUID()}`, artifact: { ...input.artifact, files: {} } },
@@ -120,7 +174,7 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
       await expect(store.register(candidate, authority())).rejects.toMatchObject({ code: "REVIEWED_ASTRO_ARTIFACT_INVALID" });
     }
     const count = await database!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => (
-      await client.query<{ count: string }>("SELECT count(*)::text AS count FROM navocms.reviewed_astro_artifacts WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3", [tenantId, siteId, release.id])
+      await client.query<{ count: string }>("SELECT count(*)::text AS count FROM navocms.reviewed_astro_artifact_object_bindings WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3", [tenantId, siteId, release.id])
     ).rows[0]!.count);
     expect(count).toBe("0");
   });
@@ -128,16 +182,16 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
 
 policyIntegration("reviewed Astro artifact readiness policy", () => {
   it("fails closed when an additional permissive policy is present", async () => {
-    const store = new PostgresReviewedAstroArtifactStore(database!, serviceRepositoryContext, "default");
+    const store = new PostgresReviewedAstroArtifactStore(database!, serviceRepositoryContext, "default", { storage: artifactStorage });
     await expect(store.ready()).resolves.toBe(true);
     try {
       await adminDatabase!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => {
-        await client.query("CREATE POLICY reviewed_astro_artifacts_extra_scope ON navocms.reviewed_astro_artifacts TO navocms_app USING (true) WITH CHECK (true)");
+        await client.query("CREATE POLICY reviewed_astro_artifact_object_bindings_extra_scope ON navocms.reviewed_astro_artifact_object_bindings TO navocms_app USING (true) WITH CHECK (true)");
       });
       await expect(store.ready()).resolves.toBe(false);
     } finally {
       await adminDatabase!.withScope({ tenantId, siteId, principalId: servicePrincipalId }, async (client) => {
-        await client.query("DROP POLICY IF EXISTS reviewed_astro_artifacts_extra_scope ON navocms.reviewed_astro_artifacts");
+        await client.query("DROP POLICY IF EXISTS reviewed_astro_artifact_object_bindings_extra_scope ON navocms.reviewed_astro_artifact_object_bindings");
       });
     }
     await expect(store.ready()).resolves.toBe(true);
@@ -255,8 +309,8 @@ async function createBoundAstroRelease(label: string) {
   return { release, render };
 }
 
-function registrationInput(release: Awaited<ReturnType<typeof createRelease>>): RegisterReviewedAstroArtifactInput {
-  const artifact = astroArtifact();
+function registrationInput(release: Awaited<ReturnType<typeof createRelease>>, marker = "reviewed"): RegisterReviewedAstroArtifactInput {
+  const artifact = astroArtifact(marker);
   return Object.freeze({
     idempotencyKey: `reviewed-register-${randomUUID()}`,
     releaseId: release.id,
@@ -265,12 +319,12 @@ function registrationInput(release: Awaited<ReturnType<typeof createRelease>>): 
     expectedAstroArtifactHash: artifact.hash,
     sourceCommitSha: "c".repeat(40),
     artifact,
-    output: Object.freeze({ "index.html": html() })
+    output: Object.freeze({ "index.html": html(marker) })
   });
 }
 
-function astroArtifact(): AstroArtifact {
-  const source = Object.freeze({ "src/pages/index.astro": "<main>reviewed</main>" });
+function astroArtifact(marker = "reviewed"): AstroArtifact {
+  const source = Object.freeze({ "src/pages/index.astro": `<main>${marker}</main>` });
   const manifest = Object.freeze({
     schema: "io.navocms.astro-artifact.v1" as const,
     format: "navocms-astro-source-bundle/v1" as const,
@@ -283,8 +337,8 @@ function astroArtifact(): AstroArtifact {
   return Object.freeze({ format: "navocms-astro-source-bundle/v1" as const, manifest, files, hash: `sha256:${sha256(canonical({ manifest, files }))}` });
 }
 
-function html(): string {
-  return '<!doctype html><html><head><meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1"><script src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"></script></head><body>reviewed</body></html>';
+function html(marker = "reviewed"): string {
+  return `<!doctype html><html><head><meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1"><script src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"></script></head><body>${marker}</body></html>`;
 }
 
 function authority() { return reviewedAstroArtifactAuthority(requestContext()); }

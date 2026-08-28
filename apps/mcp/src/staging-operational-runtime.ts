@@ -4,6 +4,7 @@ import type { PostgresDatabase } from "@navocms/persistence-postgres";
 
 import type { McpRequestContext } from "./model.js";
 import { PostgresReviewedAstroArtifactStore } from "./postgres-reviewed-astro-artifact-store.js";
+import type { ReviewedAstroObjectStorage } from "./reviewed-astro-object-storage.js";
 import { PostgresReviewedAstroBuildInputStore } from "./postgres-reviewed-astro-build-input-store.js";
 import type { RepositoryContext } from "./repository.js";
 import type { StoredRelease } from "./release-repository.js";
@@ -22,18 +23,21 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
   readonly #environmentKey: string;
   readonly #runner: TrustedAstroBuildRunner;
   readonly #readinessContext: RepositoryContext;
+  readonly #objectStorage: ReviewedAstroObjectStorage | undefined;
   readonly #preparer = new StagingAstroPreviewPreparer();
   #runnerReadiness: Promise<boolean> | undefined;
 
-  public constructor(input: Readonly<{ database: PostgresDatabase; environmentKey: string; reviewedSourceCommit: string; toolchainDirectory: string; readinessContext: RepositoryContext; runner?: TrustedAstroBuildRunner }>) {
+  public constructor(input: Readonly<{ database: PostgresDatabase; environmentKey: string; reviewedSourceCommit: string; toolchainDirectory: string; readinessContext: RepositoryContext; runner?: TrustedAstroBuildRunner; objectStorage?: ReviewedAstroObjectStorage }>) {
     this.#database = input.database;
     this.#environmentKey = input.environmentKey;
     this.#readinessContext = input.readinessContext;
+    this.#objectStorage = input.objectStorage;
     this.#runner = input.runner ?? new ImageAttestedAstroBuildRunner({ sourceCommitSha: input.reviewedSourceCommit, toolchainDirectory: input.toolchainDirectory });
   }
 
   public async ready(): Promise<boolean> {
     if (!await new PostgresReviewedAstroBuildInputStore(this.#database, this.#readinessContext, this.#environmentKey).ready()) return false;
+    if (!await new PostgresReviewedAstroArtifactStore(this.#database, this.#readinessContext, this.#environmentKey, this.#objectStorage ? { storage: this.#objectStorage } : {}).ready()) return false;
     this.#runnerReadiness ??= this.#runner.attest().then(() => true, () => false);
     return this.#runnerReadiness;
   }
@@ -55,7 +59,7 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
   }
 
   public async ensureArtifact(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease): Promise<void> {
-    const artifacts = new PostgresReviewedAstroArtifactStore(this.#database, repository, this.#environmentKey);
+    const artifacts = new PostgresReviewedAstroArtifactStore(this.#database, repository, this.#environmentKey, this.#objectStorage ? { storage: this.#objectStorage } : {});
     const existing = await artifacts.get({ tenantId: repository.site.tenantId, siteId: repository.site.siteId, environment: "staging", environmentKey: this.#environmentKey, releaseId: release.id });
     if (existing) {
       if (existing.releaseHash !== release.releaseHash || existing.releaseArtifactHash !== release.artifactHash) throw new Error("REVIEWED_ASTRO_ARTIFACT_DRIFT");

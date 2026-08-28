@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.com/schemas/v1/r2-runtime-binding.schema.json",
+  "title": "NavoCMS R2 runtime binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "tenantId", "siteId", "environment", "endpoint", "bucket", "namespace", "accessKeySecretRef", "secretKeySecretRef"],
+  "properties": {
+    "schema": { "const": "io.navocms.r2-runtime-binding.v1" },
+    "tenantId": { "$ref": "#/$defs/uuid" },
+    "siteId": { "$ref": "#/$defs/uuid" },
+    "environment": { "const": "staging" },
+    "endpoint": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 512 },
+    "bucket": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?$", "maxLength": 63 },
+    "namespace": { "const": "navocms/v1/" },
+    "accessKeySecretRef": { "$ref": "#/$defs/secretRef" },
+    "secretKeySecretRef": { "$ref": "#/$defs/secretRef" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "secretRef": { "type": "string", "pattern": "^secret:[A-Za-z0-9][A-Za-z0-9._/-]{2,159}$", "maxLength": 167 }
+  }
+}

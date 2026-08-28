@@ -1,5 +1,11 @@
 # ADR 0015: Safe remote media ingest
 
+**Status:** superseded by ADR 0024
+
+The implementation was removed because it had no production caller. These
+constraints remain design input for Sprint 9 if the importer needs remote
+fetching; they do not describe the current runtime.
+
 ## Decision
 
 Remote ingest is an injected, provider-neutral `RemoteMediaIngestService` in

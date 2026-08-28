@@ -20,6 +20,26 @@ Sprint 7 adds protected content-preview releases. Later CI may also create short
 named `preview/pr-<number>-<branch>` for schema-changing pull requests; those branches are not the
 editorial staging environment.
 
+## Operator/runtime release boundary
+
+Coolify is an operator/runtime release procedure, not a content delivery
+provider. Editorial draft, preview, approval, publish, reconcile, and rollback
+release only immutable static output to Cloudflare Pages. They must not update,
+restart, deploy, or roll back either Coolify application.
+
+For a runtime release, an operator separately selects a reviewed immutable
+commit or tag, applies the migration gate when required, deploys the matching
+Coolify application, and records the resulting deployment identifier and
+evidence outside the content release. Verify `/healthz`, `/readyz`, OAuth
+metadata, and one authenticated API read after the deployment. Roll back the
+runtime only through this operator procedure; use a Pages release rollback only
+to restore public static content.
+
+Legacy v1 content publication references remain Pages-reconcilable during their
+retention period. Do not reactivate their former Coolify coupling: migrate an
+activated v1/v2 staging binding to the Pages-only v3 binding and pin its new
+digest before the next content publish.
+
 ## Required runtime configuration
 
 The public repository contains names and safe defaults only. Store encrypted `.env.staging` and

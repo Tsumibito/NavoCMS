@@ -58,6 +58,22 @@ INSERT INTO reviewed_astro_artifacts (
   '72800000-0000-4000-8000-000000000002', repeat('c', 64), repeat('d', 64),
   concat('sha256:', repeat('e', 64)), repeat('f', 40), '{}'::jsonb, '{}'::jsonb
 );
+INSERT INTO reviewed_astro_artifact_object_bindings (
+  id, tenant_id, site_id, environment_id, environment_key, release_id,
+  release_hash, artifact_hash, astro_artifact_hash, source_commit_sha,
+  source_object_key, source_object_sha256, source_object_bytes,
+  output_object_key, output_object_sha256, output_object_bytes, evidence_hash
+) VALUES (
+  '73900000-0000-4000-8000-000000000001',
+  '71000000-0000-4000-8000-000000000001',
+  '71200000-0000-4000-8000-000000000002',
+  '71300000-0000-4000-8000-000000000002', 'default',
+  '71800000-0000-4000-8000-000000000002', repeat('e', 64), repeat('f', 64),
+  concat('sha256:', repeat('a', 64)), repeat('b', 40),
+  concat('tenants/71000000-0000-4000-8000-000000000001/sites/71200000-0000-4000-8000-000000000002/reviewed-astro/source/sha256/', repeat('a', 64), '.json'), repeat('a', 64), 2,
+  concat('tenants/71000000-0000-4000-8000-000000000001/sites/71200000-0000-4000-8000-000000000002/reviewed-astro/output/sha256/', repeat('b', 64), '.json'), repeat('b', 64), 2,
+  concat('sha256:', repeat('c', 64))
+);
 INSERT INTO reviewed_astro_build_inputs (
   id, tenant_id, site_id, environment_id, environment_key, release_id,
   release_hash, artifact_hash, binding_digest, render_json, created_by
@@ -88,6 +104,7 @@ DO $assertions$
 DECLARE visible_releases integer;
 DECLARE visible_outbox integer;
 DECLARE visible_reviewed_artifacts integer;
+DECLARE visible_object_bindings integer;
 DECLARE same_tenant_cross_site_artifacts integer;
 DECLARE visible_build_inputs integer;
 BEGIN
@@ -112,6 +129,30 @@ BEGIN
   SELECT count(*) INTO same_tenant_cross_site_artifacts FROM navocms.reviewed_astro_artifacts
    WHERE site_id = '71200000-0000-4000-8000-000000000002';
   IF same_tenant_cross_site_artifacts <> 0 THEN RAISE EXCEPTION 'RLS exposed % same-tenant cross-site reviewed artifacts', same_tenant_cross_site_artifacts; END IF;
+  INSERT INTO navocms.reviewed_astro_artifact_object_bindings (
+    id, tenant_id, site_id, environment_id, environment_key, release_id,
+    release_hash, artifact_hash, astro_artifact_hash, source_commit_sha,
+    source_object_key, source_object_sha256, source_object_bytes,
+    output_object_key, output_object_sha256, output_object_bytes, evidence_hash
+  ) VALUES (
+    '73900000-0000-4000-8000-000000000002',
+    '71000000-0000-4000-8000-000000000001',
+    '71100000-0000-4000-8000-000000000001',
+    '71300000-0000-4000-8000-000000000001', 'default',
+    '71800000-0000-4000-8000-000000000001', repeat('a', 64), repeat('b', 64),
+    concat('sha256:', repeat('c', 64)), repeat('d', 40),
+    concat('tenants/71000000-0000-4000-8000-000000000001/sites/71100000-0000-4000-8000-000000000001/reviewed-astro/source/sha256/', repeat('c', 64), '.json'), repeat('c', 64), 2,
+    concat('tenants/71000000-0000-4000-8000-000000000001/sites/71100000-0000-4000-8000-000000000001/reviewed-astro/output/sha256/', repeat('d', 64), '.json'), repeat('d', 64), 2,
+    concat('sha256:', repeat('e', 64))
+  );
+  SELECT count(*) INTO visible_object_bindings FROM navocms.reviewed_astro_artifact_object_bindings;
+  IF visible_object_bindings <> 1 THEN RAISE EXCEPTION 'RLS exposed % reviewed Astro object bindings instead of 1', visible_object_bindings; END IF;
+  BEGIN
+    UPDATE navocms.reviewed_astro_artifact_object_bindings SET state = 'ready'
+     WHERE id = '73900000-0000-4000-8000-000000000002';
+    RAISE EXCEPTION 'reviewed Astro object binding update privilege unexpectedly succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
   INSERT INTO navocms.reviewed_astro_build_inputs (
     id, tenant_id, site_id, environment_id, environment_key, release_id,
     release_hash, artifact_hash, binding_digest, render_json, created_by

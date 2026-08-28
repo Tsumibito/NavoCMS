@@ -11,6 +11,7 @@ These JSON Schemas are the executable `navocms.io/v0alpha1` foundation contracts
 | [`design-override.schema.json`](design-override.schema.json) | `examples/design-systems/*.design-override.json` |
 | [`event-envelope.schema.json`](event-envelope.schema.json) | `examples/events/*.json` |
 | [`astro-artifact-manifest.schema.json`](astro-artifact-manifest.schema.json) | `examples/astro/*.astro-artifact-manifest.json` and adversarial fixtures |
+| [`r2-runtime-binding-v1.schema.json`](r2-runtime-binding-v1.schema.json) | `examples/staging/*.r2-runtime-binding.json` and adversarial fixtures |
 
 Run `pnpm check:contracts` to compile all schemas, validate fixtures, and apply cross-field semantic
 checks that JSON Schema alone does not express clearly.

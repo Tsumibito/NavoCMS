@@ -1,10 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdtemp, lstat, open, readdir, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { promisify } from "node:util";
 
 import { ASTRO_BUILT_OUTPUT_LIMITS, materializeAstroArtifact, renderAstroArtifact, verifyAstroArtifact, verifyBuiltAstroOutput, type AstroArtifact, type AstroRenderInput } from "@navocms/design-astro";
 import { createReleaseManifest, sha256, type ReleaseManifestV1 } from "@navocms/kernel";
@@ -15,7 +14,6 @@ import { reviewedAstroArtifactAuthority, type RegisterReviewedAstroArtifactInput
 import type { RepositoryContext } from "./repository.js";
 import type { ReviewedAstroArtifactRecord } from "./reviewed-astro-resolver.js";
 
-const exec = promisify(execFile);
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
@@ -23,8 +21,6 @@ const IDENTITY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const MAX_IDEMPOTENCY_KEY_BYTES = 128;
 const MAX_OUTPUT_DEPTH = 16;
 const DEFAULT_PROCESS_TIMEOUT_MS = 30_000;
-const DEFAULT_PREPARATION_TIMEOUT_MS = 120_000;
-const REVIEWED_TOOLCHAIN_DIRECTORY = "apps/design-catalogue/node_modules";
 const TOOLCHAIN = Object.freeze({ astro: "7.2.4", "@astrojs/check": "0.9.10", typescript: "5.9.3" });
 
 /** Exact reviewed inputs are internal durable evidence, never an MCP request envelope. */
@@ -116,68 +112,6 @@ export class TrustedAstroBuilder {
     return this.#registrations.register({ idempotencyKey: request.idempotencyKey, releaseId: request.releaseId,
       releaseHash: request.releaseHash, releaseArtifactHash: request.releaseArtifactHash,
       expectedAstroArtifactHash: artifact.hash, sourceCommitSha: checkout.sourceCommitSha, artifact, output: first.output }, authority);
-  }
-}
-
-/** The configured directory must itself be a clean detached reviewed checkout. */
-export class GitPinnedAstroBuildRunner implements TrustedAstroBuildRunner {
-  readonly #reviewedCheckoutDirectory: string;
-  readonly #timeoutMs: number;
-  readonly #preparationTimeoutMs: number;
-  #preparation: Promise<void> | undefined;
-
-  public constructor(input: Readonly<{ reviewedCheckoutDirectory: string; processTimeoutMs?: number; preparationTimeoutMs?: number }>) {
-    this.#reviewedCheckoutDirectory = resolve(input.reviewedCheckoutDirectory);
-    this.#timeoutMs = boundedTimeout(input.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS);
-    this.#preparationTimeoutMs = boundedTimeout(input.preparationTimeoutMs ?? DEFAULT_PREPARATION_TIMEOUT_MS, 120_000);
-  }
-
-  public async attest(): Promise<ReviewedCheckoutAttestation> {
-    await this.#prepare();
-    const checkout = await verifiedCheckoutDirectory(this.#reviewedCheckoutDirectory);
-    await assertDetachedCleanCheckout(checkout, this.#timeoutMs);
-    const commit = (await run("git", ["-C", checkout, "rev-parse", "--verify", "HEAD^{commit}"], this.#timeoutMs)).stdout.trim().toLowerCase();
-    if (!COMMIT.test(commit)) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "Reviewed Astro checkout did not resolve to a canonical commit");
-    const toolchain = await verifyReviewedToolchain(checkout);
-    return Object.freeze({ sourceCommitSha: commit, toolchainFingerprint: toolchain.fingerprint });
-  }
-
-  public async build(attestation: ReviewedCheckoutAttestation, artifact: AstroArtifact): Promise<CheckedOutAstroBuild> {
-    if (!COMMIT.test(attestation.sourceCommitSha) || !/^sha256:[a-f0-9]{64}$/.test(attestation.toolchainFingerprint)) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "Reviewed Astro checkout attestation is invalid");
-    const current = await this.attest();
-    if (current.sourceCommitSha !== attestation.sourceCommitSha || current.toolchainFingerprint !== attestation.toolchainFingerprint) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_DRIFT", "Reviewed Astro checkout or toolchain changed during build");
-    verifyPinnedArtifactPolicy(artifact);
-    const root = await mkdtemp(join(tmpdir(), "navocms-trusted-astro-")); const buildDirectory = join(root, "build");
-    let primaryFailure: unknown;
-    try {
-      const toolchain = await verifyReviewedToolchain(this.#reviewedCheckoutDirectory);
-      if (toolchain.fingerprint !== attestation.toolchainFingerprint) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_DRIFT", "Reviewed Astro toolchain changed before materialization");
-      await materializeAstroArtifact(buildDirectory, artifact, artifact.hash);
-      await symlink(toolchain.directory, join(buildDirectory, "node_modules"), "dir");
-      await run(process.execPath, [toolchain.astroCli, "check"], this.#timeoutMs, buildDirectory);
-      await run(process.execPath, [toolchain.astroCli, "build"], this.#timeoutMs, buildDirectory);
-      const output = await readBoundedAstroOutput(join(buildDirectory, "dist"));
-      verifyBuiltAstroOutput(output, artifact, artifact.hash);
-      return Object.freeze({ sourceCommitSha: attestation.sourceCommitSha, output: Object.freeze(output) });
-    } catch (error) { primaryFailure = error; throw error; }
-    finally {
-      const cleanupError = await rm(root, { recursive: true, force: true }).then(() => undefined).catch((error: unknown) => error);
-      if (cleanupError) {
-        if (primaryFailure) process.emitWarning(`Reviewed Astro build-directory cleanup failed after primary error: ${safeError(cleanupError)}`);
-        else throw new McpEditingError("REVIEWED_ASTRO_CLEANUP_FAILED", "Reviewed Astro build-directory cleanup failed");
-      }
-    }
-  }
-
-  async #prepare(): Promise<void> {
-    this.#preparation ??= this.#prepareOnce();
-    return this.#preparation;
-  }
-
-  async #prepareOnce(): Promise<void> {
-    const checkout = await verifiedCheckoutDirectory(this.#reviewedCheckoutDirectory);
-    await assertDetachedCleanCheckout(checkout, this.#timeoutMs);
-    await run("corepack", ["pnpm@10.24.0", "install", "--offline", "--frozen-lockfile"], this.#preparationTimeoutMs, checkout);
   }
 }
 
@@ -292,26 +226,6 @@ function verifyPinnedArtifactPolicy(artifact: AstroArtifact): void {
   if (!exactKeys(value, ["dependencies", "devDependencies", "packageManager", "private", "scripts", "type"]) || value.packageManager !== "pnpm@10.24.0" || !exactDependencyVersions(value)) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Astro artifact package policy is not pinned");
 }
 
-async function verifyReviewedToolchain(checkout: string): Promise<Readonly<{ directory: string; astroCli: string; fingerprint: `sha256:${string}` }>> {
-  try {
-  const root = await realpath(checkout); const lock = await readFile(join(root, "pnpm-lock.yaml"), "utf8");
-  for (const [name, version] of Object.entries(TOOLCHAIN)) if (!lock.includes(`${name}@${version}`)) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed lockfile does not pin required Astro toolchain");
-  const directory = join(root, REVIEWED_TOOLCHAIN_DIRECTORY); const directoryStat = await lstat(directory);
-  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro toolchain directory is invalid");
-  const canonicalDirectory = await realpath(directory);
-  if (!inside(root, canonicalDirectory)) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro toolchain escapes its checkout");
-  for (const [name, version] of Object.entries(TOOLCHAIN)) {
-    const packageDirectory = await realpath(join(canonicalDirectory, name));
-    const packageJson = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8")) as { version?: unknown };
-    if (packageJson.version !== version) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro package version differs from pinned artifact policy");
-  }
-  const astroCli = await realpath(join(canonicalDirectory, "astro/bin/astro.mjs"));
-  if (!inside(root, astroCli)) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro CLI escapes its checkout");
-  const fingerprint = await fingerprintReviewedToolchain(root, canonicalDirectory, lock);
-  return Object.freeze({ directory: canonicalDirectory, astroCli, fingerprint });
-  } catch (error) { if (error instanceof McpEditingError) throw error; throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro toolchain cannot be verified"); }
-}
-
 async function verifyImageToolchain(directory: string): Promise<Readonly<{ directory: string; astroCli: string; fingerprint: `sha256:${string}` }>> {
   try {
     const root = await realpath(directory); const stat = await lstat(root);
@@ -360,42 +274,7 @@ async function fingerprintImageToolchain(root: string): Promise<`sha256:${string
   return `sha256:${digest.digest("hex")}` as `sha256:${string}`;
 }
 
-/** Hash every checkout-local file reachable from the packages executed by Astro. */
-async function fingerprintReviewedToolchain(checkout: string, directory: string, lock: string): Promise<`sha256:${string}`> {
-  const digest = createHash("sha256"); const visitedDirectories = new Set<string>(); const root = await realpath(checkout);
-  const record = (kind: string, path: string, value?: string | Buffer) => { digest.update(`${kind}\0${relative(root, path).split("\\").join("/")}\0`); if (value !== undefined) digest.update(value); digest.update("\0"); };
-  const assertInside = (path: string) => { if (!inside(root, path)) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro toolchain contains an escaping link"); };
-  const walk = async (path: string): Promise<void> => {
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink()) {
-      const target = await realpath(path); assertInside(target); record("link", path, relative(root, target)); await walk(target); return;
-    }
-    const canonicalPath = await realpath(path); assertInside(canonicalPath);
-    if (stat.isFile()) { record("file", canonicalPath, await readFile(canonicalPath)); return; }
-    if (!stat.isDirectory()) throw new McpEditingError("REVIEWED_ASTRO_TOOLCHAIN_INVALID", "Reviewed Astro toolchain contains an unsupported entry");
-    if (visitedDirectories.has(canonicalPath)) return;
-    visitedDirectories.add(canonicalPath); record("directory", canonicalPath);
-    const entries = await readdir(canonicalPath, { withFileTypes: true });
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) await walk(join(canonicalPath, entry.name));
-  };
-  record("lock", join(root, "pnpm-lock.yaml"), lock); record("toolchain", directory);
-  for (const name of Object.keys(TOOLCHAIN).sort()) await walk(join(directory, name));
-  return `sha256:${digest.digest("hex")}` as `sha256:${string}`;
-}
-
-async function verifiedCheckoutDirectory(directory: string): Promise<string> {
-  const stat = await lstat(directory).catch(() => undefined);
-  if (!stat?.isDirectory() || stat.isSymbolicLink()) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "Reviewed Astro checkout directory is invalid");
-  return realpath(directory);
-}
-async function assertDetachedCleanCheckout(checkout: string, timeoutMs: number): Promise<void> {
-  const branch = await symbolicRef(checkout, timeoutMs);
-  if (branch !== undefined) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_NOT_DETACHED", "Reviewed Astro checkout must be detached");
-  const status = await run("git", ["-C", checkout, "status", "--porcelain=v1", "--untracked-files=all"], timeoutMs);
-  if (status.stdout.trim()) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_DIRTY", "Reviewed Astro checkout must be clean");
-}
-async function symbolicRef(directory: string, timeoutMs: number): Promise<string | undefined> { try { return (await exec("git", ["-C", directory, "symbolic-ref", "-q", "HEAD"], { env: minimalEnvironment(), timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024 })).stdout.trim() || undefined; } catch (error) { const candidate = error as { code?: unknown; killed?: unknown; signal?: unknown }; if (candidate.code === 1) return undefined; if (candidate.killed === true || candidate.signal === "SIGKILL") throw new McpEditingError("REVIEWED_ASTRO_PROCESS_TIMEOUT", "Reviewed Astro process timed out: git"); throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "Reviewed Astro checkout branch state is invalid"); } }
-/** Bounded process-group primitive shared by Git, corepack, and Astro invocations. */
+/** Bounded process-group primitive shared by trusted Astro invocations. */
 export async function runBoundedTrustedAstroProcess(command: string, args: readonly string[], timeoutMs: number, cwd?: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     let stdout = ""; let stderr = ""; let timedOut = false; let overflowed = false;

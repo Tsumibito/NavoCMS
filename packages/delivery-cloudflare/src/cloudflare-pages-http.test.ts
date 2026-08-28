@@ -23,7 +23,7 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     const responses = [
       json({ result: { production_branch: "main" } }),
       json({ result: { jwt: "upload-token-0123456789" } }),
-      json({ result: [sha256("<html>en</html>")] }),
+      json({ result: ["d4eb547c199ef336cae19e3248b71bdc"] }),
       json({ result: {} }),
       json({ result: { id: "deployment-1", environment: "preview", url: "https://hash.pages-project.pages.dev", latest_stage: { status: "success" } } })
     ];
@@ -53,10 +53,14 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     expect(header(calls[2]!, "authorization")).toBe("Bearer upload-token-0123456789");
     expect(header(calls[3]!, "authorization")).toBe("Bearer upload-token-0123456789");
     expect(header(calls[4]!, "authorization")).toBe("Bearer api-token-0123456789");
+    expect(JSON.parse(String(calls[2]!.init.body))).toEqual({ hashes: ["d4eb547c199ef336cae19e3248b71bdc"] });
+    expect(JSON.parse(String(calls[3]!.init.body))).toEqual([expect.objectContaining({ key: "d4eb547c199ef336cae19e3248b71bdc" })]);
     const form = calls[4]!.init.body as FormData;
     expect(form.get("branch")).toBe("preview");
     expect(form.get("commit_hash")).toBe(reference.sourceCommitSha);
     expect(form.get("commit_message")).toBe(`navocms:preview:${referenceHash}`);
+    expect(JSON.parse(String(form.get("manifest")))).toEqual({ "/en/index.html": "d4eb547c199ef336cae19e3248b71bdc" });
+    expect(form.get("pages_build_output_dir")).toBeNull();
     await expect((form.get("_headers") as Blob).text()).resolves.toContain(`X-NavoCMS-Artifact-Reference: ${referenceHash}`);
   });
 
@@ -66,6 +70,16 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
       fetcher: async () => { throw new Error("fetch must not run"); }
     });
     await expect(transport.findDeployment({ projectKey: "other-project", referenceHash, environment: "preview" })).rejects.toMatchObject({ code: "CLOUDFLARE_PROJECT_SCOPE_DENIED" });
+  });
+
+  it("keeps deployment discovery within the Pages pagination bound", async () => {
+    let requested: URL | undefined;
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
+      fetcher: async (url) => { requested = new URL(String(url)); return json({ result: [] }); }
+    });
+    await expect(transport.findDeployment({ projectKey: "pages-project", referenceHash, environment: "preview" })).resolves.toBeUndefined();
+    expect(requested?.searchParams.get("per_page")).toBe("25");
   });
 
   it("denies the configured production branch from the preview-only operation before any request", async () => {
@@ -134,6 +148,22 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     });
   });
 
+  it("classifies a failed direct-upload phase without exposing its response", async () => {
+    const responses = [
+      json({ result: { production_branch: "main" } }),
+      json({ result: { jwt: "upload-token-0123456789" } }),
+      new Response(JSON.stringify({ success: false, errors: [{ message: "must-not-leak" }] }), { status: 400 })
+    ];
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
+      fetcher: async () => responses.shift()!
+    });
+    await expect(transport.createPreview({
+      projectKey: "pages-project", previewBranch: "preview", reference, referenceHash,
+      files: { "en/index.html": "<html>en</html>" }
+    })).rejects.toMatchObject({ code: "CLOUDFLARE_ASSET_CHECK_HTTP_400", message: "Cloudflare provider phase failed" });
+  });
+
   it("rejects a swapped live file even when all immutable headers are correct", async () => {
     const responses = [
       json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: ["https://production.pages.dev/"] } } }),
@@ -160,6 +190,28 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
       fetcher: async () => json({ result: { production_branch: "other", canonical_deployment: { id: "production-1", environment: "production", aliases: ["https://production.pages.dev/"] } } })
     });
     await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).rejects.toMatchObject({ code: "CLOUDFLARE_PRODUCTION_BRANCH_MISMATCH" });
+  });
+
+  it("accepts the exact canonical Pages deployment URL when aliases are null", async () => {
+    const requested: string[] = [];
+    const responses = [
+      json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: null, url: "https://a1b2c3d4.pages-project.pages.dev/" } } }),
+      new Response("<html>en</html>", { status: 200, headers: { "x-navocms-artifact-reference": referenceHash, "x-navocms-release-hash": reference.releaseHash, "x-navocms-output-hash": reference.outputHash, "cache-control": "public, max-age=300, must-revalidate" } })
+    ];
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", productionHostname: "pages-project.pages.dev", apiToken: async () => "api-token-0123456789",
+      fetcher: async (url) => { requested.push(String(url)); return responses.shift()!; }
+    });
+    await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).resolves.toMatchObject({ status: 200, referenceHash });
+    expect(requested[1]).toBe("https://a1b2c3d4.pages-project.pages.dev/en/");
+  });
+
+  it("does not broaden a custom production hostname to deployment subdomains", async () => {
+    const transport = new FetchCloudflarePagesTransport({
+      accountId: "account-1", projectKey: "pages-project", productionBranch: "main", productionHostname: "staging.example.test", apiToken: async () => "api-token-0123456789",
+      fetcher: async () => json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: null, url: "https://a1b2c3d4.staging.example.test/" } } })
+    });
+    await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).rejects.toMatchObject({ code: "CLOUDFLARE_CANONICAL_ALIAS_INVALID" });
   });
 
   it("aborts a stalled Cloudflare request within the configured timeout", async () => {

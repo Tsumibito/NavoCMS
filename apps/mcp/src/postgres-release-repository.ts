@@ -159,8 +159,12 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
   public async beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string) {
     return this.#database.withScope(databaseScope(context), async (client) => {
       const release = await requireExactRelease(client, context, releaseId, releaseHash, true);
-      await requireCurrentHumanApproval(client, context, release);
       if (release.status !== "publishing") {
+        // Approval gates the durable transition into publication. Once that
+        // exact release hash is checkpointed as publishing, a restarted
+        // reconciler must be able to finish it even if the approval expires
+        // while recovering a provider failure.
+        await requireCurrentHumanApproval(client, context, release);
         releaseTransition(release.status, "publishing");
         await client.query(
           `UPDATE navocms.release_candidates SET status = 'publishing', updated_at = now()
@@ -168,6 +172,8 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
           [context.site.tenantId, context.site.siteId, releaseId]
         );
         await writePublishingRun(client, context, release);
+      } else {
+        await requireValidatedHumanApprovalCheckpoint(client, context, release);
       }
       const previous = await activePublication(client, context, release.environment_id);
       return Object.freeze({
@@ -415,6 +421,30 @@ async function requireCurrentHumanApproval(client: SqlClient, context: Repositor
   )).rows[0];
   if (!approval?.present) {
     throw new McpEditingError("RELEASE_APPROVAL_EXPIRED", "A current human approval is required before publication");
+  }
+}
+
+async function requireValidatedHumanApprovalCheckpoint(client: SqlClient, context: RepositoryContext, release: ReleaseRow): Promise<void> {
+  const approval = (await client.query<{ present: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1 FROM navocms.release_approvals approval
+       JOIN navocms.workflow_runs run
+         ON run.tenant_id = approval.tenant_id AND run.site_id = approval.site_id
+        AND run.release_id = approval.release_id AND run.status = 'running'
+       JOIN navocms.workflow_checkpoints checkpoint
+         ON checkpoint.tenant_id = run.tenant_id AND checkpoint.site_id = run.site_id
+        AND checkpoint.run_id = run.id AND checkpoint.step_key = 'approval.validated'
+        AND checkpoint.input_hash = approval.release_hash
+        AND checkpoint.output_json->>'releaseHash' = approval.release_hash
+      WHERE approval.tenant_id = $1 AND approval.site_id = $2
+        AND approval.release_id = $3 AND approval.release_hash = $4
+        AND approval.actor_kind = 'human' AND approval.revoked_at IS NULL
+        AND approval.scope_json->>'environmentId' = $5
+     ) AS present`,
+    [context.site.tenantId, context.site.siteId, release.id, release.release_hash, release.environment_id]
+  )).rows[0];
+  if (!approval?.present) {
+    throw new McpEditingError("RELEASE_APPROVAL_CHECKPOINT_INVALID", "Publication approval was revoked or its durable validation checkpoint is missing");
   }
 }
 

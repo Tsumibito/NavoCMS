@@ -13,7 +13,13 @@ async function readJson(relativePath) {
 }
 
 async function listJsonFiles(directory) {
-  const entries = await readdir(path.join(root, directory), { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(path.join(root, directory), { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
   const files = [];
   for (const entry of entries) {
     const relative = path.join(directory, entry.name);
@@ -33,8 +39,10 @@ const schemaPaths = {
   mediaAsset: "schemas/media-asset.schema.json",
   astroArtifact: "schemas/astro-artifact-manifest.schema.json",
   cloudflareArtifactReference: "schemas/cloudflare-artifact-reference.schema.json",
-  cloudflareStagingBinding: "schemas/cloudflare-staging-binding-v2.schema.json",
-  cloudflareStagingBindingV1: "schemas/cloudflare-staging-binding.schema.json"
+  cloudflareStagingBinding: "schemas/cloudflare-staging-binding-v3.schema.json",
+  cloudflareStagingBindingV1: "schemas/cloudflare-staging-binding.schema.json",
+  cloudflareStagingBindingV2: "schemas/cloudflare-staging-binding-v2.schema.json",
+  r2RuntimeBinding: "schemas/r2-runtime-binding-v1.schema.json"
 };
 
 const validators = {};
@@ -140,8 +148,17 @@ function semanticDesignSystem(document, file) {
 
 function semanticDesignOverride() {}
 
+function semanticR2RuntimeBinding(document, file) {
+  const endpoint = new URL(document.endpoint);
+  assert(endpoint.protocol === "https:" && endpoint.hostname.endsWith(".r2.cloudflarestorage.com") && !/^https:\/\/[^/?#]+:\d+(?:[/?#]|$)/.test(document.endpoint) && !endpoint.port && !endpoint.username && !endpoint.password && endpoint.pathname === "/" && !endpoint.search && !endpoint.hash, `${file}: R2 endpoint must be a credential-free HTTPS origin`);
+  const dotenvxKey = (reference) => reference.slice("secret:".length).replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+  assert(document.accessKeySecretRef !== document.secretKeySecretRef && dotenvxKey(document.accessKeySecretRef) !== dotenvxKey(document.secretKeySecretRef), `${file}: R2 secret references must be distinct`);
+}
+
 const fixtureKinds = [
   { suffix: ".cloudflare-staging-binding-v1.json", validator: "cloudflareStagingBindingV1", semantic: () => {} },
+  { suffix: ".cloudflare-staging-binding-v2.json", validator: "cloudflareStagingBindingV2", semantic: () => {} },
+  { suffix: ".cloudflare-staging-binding-v3.json", validator: "cloudflareStagingBinding", semantic: () => {} },
   { suffix: ".plugin.json", validator: "plugin", semantic: semanticPlugin },
   { suffix: ".profile.json", validator: "profile", semantic: semanticProfile },
   { suffix: ".content-type.json", validator: "contentType", semantic: semanticContentType },
@@ -151,7 +168,8 @@ const fixtureKinds = [
   { suffix: ".media-asset.json", validator: "mediaAsset", semantic: semanticMediaAsset },
   { suffix: ".astro-artifact-manifest.json", validator: "astroArtifact", semantic: semanticAstroArtifact },
   { suffix: ".cloudflare-artifact-reference.json", validator: "cloudflareArtifactReference", semantic: () => {} },
-  { suffix: ".cloudflare-staging-binding.json", validator: "cloudflareStagingBinding", semantic: () => {} }
+  { suffix: ".cloudflare-staging-binding.json", validator: "cloudflareStagingBinding", semantic: () => {} },
+  { suffix: ".r2-runtime-binding.json", validator: "r2RuntimeBinding", semantic: semanticR2RuntimeBinding }
 ];
 
 let validated = 0;
@@ -176,8 +194,10 @@ const negativeChecks = [
   ["mediaAsset", { apiVersion: "navocms.io/v0alpha1", kind: "MediaAsset" }],
   ["astroArtifact", { schema: "io.navocms.astro-artifact.v1" }],
   ["cloudflareArtifactReference", { schema: "io.navocms.cloudflare-artifact-reference.v1" }],
-  ["cloudflareStagingBinding", { schema: "io.navocms.cloudflare-staging-binding.v2" }],
-  ["cloudflareStagingBindingV1", { schema: "io.navocms.cloudflare-staging-binding.v1" }]
+  ["cloudflareStagingBinding", { schema: "io.navocms.cloudflare-staging-binding.v3" }],
+  ["cloudflareStagingBindingV1", { schema: "io.navocms.cloudflare-staging-binding.v1" }],
+  ["cloudflareStagingBindingV2", { schema: "io.navocms.cloudflare-staging-binding.v2" }],
+  ["r2RuntimeBinding", { schema: "io.navocms.r2-runtime-binding.v1" }]
 ];
 
 for (const [name, invalidDocument] of negativeChecks) {
@@ -206,6 +226,16 @@ for (const file of cloudflareStagingAdversarialFixtures) {
   assert(!validators.cloudflareStagingBinding(await readJson(file)), `${file}: invalid Cloudflare staging binding fixture was accepted`);
 }
 
+const r2RuntimeAdversarialFixtures = fixtureFiles.filter((file) => file.endsWith(".r2-runtime-binding.invalid.json"));
+assert(r2RuntimeAdversarialFixtures.length > 0, "Expected an adversarial R2 runtime binding fixture");
+for (const file of r2RuntimeAdversarialFixtures) {
+  const document = await readJson(file);
+  if (!validators.r2RuntimeBinding(document)) continue;
+  let semanticRejected = false;
+  try { semanticR2RuntimeBinding(document, file); } catch { semanticRejected = true; }
+  assert(semanticRejected, `${file}: invalid R2 runtime binding fixture was accepted`);
+}
+
 const astroCorpus = await readJson("examples/astro/path-and-identifier-corpus.json");
 const validAstroManifest = await readJson("examples/astro/valid.astro-artifact-manifest.json");
 for (const mutation of astroCorpus) {
@@ -218,5 +248,5 @@ for (const mutation of astroCorpus) {
   assert(!validators.astroArtifact(document), `Astro corpus accepted ${mutation.name}`);
 }
 
-assert(validated >= 9, `Expected at least nine contract fixtures, validated ${validated}`);
+assert(validated >= 10, `Expected at least ten contract fixtures, validated ${validated}`);
 console.log(`Validated ${Object.keys(schemaPaths).length} schemas and ${validated} contract fixtures.`);

@@ -1,7 +1,6 @@
 import {
   CloudflarePagesReleaseProvider,
   FetchCloudflarePagesTransport,
-  FetchCoolifyCommitTransport,
   type DeliveryPhaseStore
 } from "@navocms/delivery-cloudflare";
 import type { CloudflareStagingBinding } from "@navocms/contracts";
@@ -12,7 +11,7 @@ import type { DotenvxSecretBroker } from "./staging-runtime.js";
 
 /**
  * The only composition point for the activated staging provider. Resolver
- * failure happens inside CloudflarePagesReleaseProvider before either transport
+ * failure happens inside CloudflarePagesReleaseProvider before the transport
  * asks the secret broker for a credential or performs network I/O.
  */
 export function composeCloudflareStagingReleaseProvider(input: Readonly<{
@@ -34,7 +33,6 @@ export function composeCloudflareStagingReleaseProvider(input: Readonly<{
     projectKey: input.binding.cloudflare.projectId,
     previewBranch: input.binding.cloudflare.previewBranch,
     productionBranch: input.binding.cloudflare.productionBranch,
-    coolifyApplicationKey: input.binding.coolify.applicationUuid,
     resolver,
     cloudflare: new FetchCloudflarePagesTransport({
       accountId: input.binding.cloudflare.accountId,
@@ -43,12 +41,6 @@ export function composeCloudflareStagingReleaseProvider(input: Readonly<{
       previewHostnameSuffix: input.binding.cloudflare.previewHostnameSuffix,
       productionHostname: input.binding.cloudflare.allowedHostname,
       apiToken: () => input.secrets.use(input.binding.cloudflare.tokenSecretRef, async (value) => value),
-      ...fetcher
-    }),
-    coolify: new FetchCoolifyCommitTransport({
-      applicationKey: input.binding.coolify.applicationUuid,
-      baseUrl: input.binding.coolify.baseUrl,
-      apiToken: () => input.secrets.use(input.binding.coolify.tokenSecretRef, async (value) => value),
       ...fetcher
     }),
     phases: input.phases

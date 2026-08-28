@@ -5,8 +5,6 @@ import {
   type CloudflareDeployment,
   type CloudflarePagesTransport,
   type CloudflareLiveProbe,
-  type CoolifyCommitTransport,
-  type CoolifyPromotion,
   type ImmutableArtifactReference,
   type ImmutableArtifactResolver
 } from "@navocms/delivery-cloudflare";
@@ -26,9 +24,9 @@ const site = Object.freeze({
 });
 
 describe("Cloudflare provider through the durable release workflow", () => {
-  it("reconciles a verified external preview without a second Cloudflare or Coolify effect", async () => {
+  it("reconciles a verified Pages publication without a second Pages or Coolify effect", async () => {
     const cloudflare = new WorkflowCloudflare();
-    const coolify = new WorkflowCoolify();
+    const coolifyCalls = 0;
     const repository = new InMemoryEditingRepository();
     repository.registerSite(site);
     const service = new McpEditingService(
@@ -40,10 +38,8 @@ describe("Cloudflare provider through the durable release workflow", () => {
         projectKey: "pages-project",
         previewBranch: "preview",
         productionBranch: "main",
-        coolifyApplicationKey: "coolify-app",
         resolver: resolver(),
         cloudflare,
-        coolify,
         phases: new InMemoryDeliveryPhaseStore()
       })
     );
@@ -55,14 +51,14 @@ describe("Cloudflare provider through the durable release workflow", () => {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-cloudflare-release-001"
     })).rejects.toMatchObject({ code: "LIVE_VERIFICATION_FAILED" });
     expect(cloudflare.createCount).toBe(1);
-    expect(coolify.promoteCount).toBe(1);
+    expect(coolifyCalls).toBe(0);
 
     cloudflare.live = true;
     await expect(service.reconcileRelease(context, {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-cloudflare-release-001"
     })).resolves.toMatchObject({ release: { status: "published" } });
     expect(cloudflare.createCount).toBe(1);
-    expect(coolify.promoteCount).toBe(1);
+    expect(coolifyCalls).toBe(0);
   });
 });
 
@@ -121,25 +117,6 @@ class WorkflowCloudflare implements CloudflarePagesTransport {
     return { status: 200, referenceHash: input.referenceHash, releaseHash: reference.releaseHash, outputHash: reference.outputHash, cacheControl: "public, max-age=300, must-revalidate", files: reference.files };
   }
   public async rollback(): Promise<void> { return undefined; }
-}
-
-class WorkflowCoolify implements CoolifyCommitTransport {
-  public promoteCount = 0;
-  readonly #promotions = new Map<string, CoolifyPromotion>();
-  public async findPromotion(input: Parameters<CoolifyCommitTransport["findPromotion"]>[0]) { return this.#promotions.get(input.referenceHash); }
-  public async promoteCommit(input: Parameters<CoolifyCommitTransport["promoteCommit"]>[0]) {
-    this.promoteCount += 1;
-    const promotion: CoolifyPromotion = { id: `promotion-${this.promoteCount}`, applicationKey: input.applicationKey, sourceCommitSha: input.sourceCommitSha, referenceHash: input.referenceHash, status: "finished" };
-    this.#promotions.set(input.referenceHash, promotion);
-    return promotion;
-  }
-  public async retryPromotion(input: Parameters<CoolifyCommitTransport["retryPromotion"]>[0]) { return this.promoteCommit(input); }
-  public async inspectPromotion(input: Parameters<CoolifyCommitTransport["inspectPromotion"]>[0]) { return [...this.#promotions.values()].find((promotion) => promotion.id === input.promotionId); }
-  public async rollback(): Promise<CoolifyPromotion> {
-    const promotion = [...this.#promotions.values()][0];
-    if (!promotion) throw new Error("missing promotion");
-    return promotion;
-  }
 }
 
 async function draftPreviewApprove(service: McpEditingService, context: { authorization: AuthorizationContext }) {

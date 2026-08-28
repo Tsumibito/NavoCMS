@@ -1,4 +1,4 @@
-import { parseCloudflareStagingBinding, type CloudflareStagingBinding } from "@navocms/contracts";
+import { parseCompatibleCloudflareStagingBinding, type CloudflareStagingBinding } from "@navocms/contracts";
 
 import { assertStagingReadiness, stagingBindingDigest, type StagingReadiness, type StagingReadinessExpectation } from "./staging-profile.js";
 
@@ -34,12 +34,14 @@ export function selectReleaseProvider(input: Readonly<{ requested: string | unde
   const requested = input.requested ?? "embedded";
   if (requested === "embedded") return Object.freeze({ selection: "embedded" });
   if (requested !== "cloudflare-staging" || input.environment !== "staging") throw new StagingRuntimeError("STAGING_PROFILE_DENIED", "Cloudflare staging provider is allowed only in the staging environment");
-  const binding = parseCloudflareStagingBinding(input.binding);
+  const compatible = parseCompatibleCloudflareStagingBinding(input.binding);
+  if (compatible.schema !== "io.navocms.cloudflare-staging-binding.v3") {
+    throw new StagingRuntimeError("STAGING_BINDING_MIGRATION_REQUIRED", `Legacy ${compatible.schema} must be migrated to io.navocms.cloudflare-staging-binding.v3 before Pages delivery can activate`);
+  }
+  const binding = compatible;
   const readiness = assertStagingReadiness(binding, input.expected);
-  // Check references before any transport is constructed, still without touching a provider.
-  const cloudflareKey = dotenvxKey(binding.cloudflare.tokenSecretRef); const coolifyKey = dotenvxKey(binding.coolify.tokenSecretRef);
-  if (binding.cloudflare.tokenSecretRef === binding.coolify.tokenSecretRef || cloudflareKey === coolifyKey) throw new StagingRuntimeError("STAGING_SECRET_REFERENCE_COLLISION", "Staging secret references must be distinct");
-  input.secrets.assertAvailable(binding.cloudflare.tokenSecretRef); input.secrets.assertAvailable(binding.coolify.tokenSecretRef);
+  // Check the Pages reference before any transport is constructed.
+  input.secrets.assertAvailable(binding.cloudflare.tokenSecretRef);
   return Object.freeze({ selection: "cloudflare-staging", binding: deepFreeze(structuredClone(binding)), readiness, secrets: input.secrets });
 }
 
