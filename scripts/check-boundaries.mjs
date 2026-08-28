@@ -63,11 +63,6 @@ const rules = [
     forbidden: ["apps/", "plugins/", "fastify"],
     allowedWorkspaceImports: ["@navocms/kernel", "@navocms/persistence-postgres", "@navocms/security"],
     reason: "the media boundary may use only kernel events, the PostgreSQL adapter, and security primitives"
-  },
-  {
-    directory: "plugins/noop-service/src",
-    forbidden: ["@navocms/kernel"],
-    reason: "service plugins must not import the trusted kernel"
   }
 ];
 

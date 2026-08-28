@@ -21,32 +21,26 @@ export interface ProcessedVariant {
   readonly mediaType: VariantMediaType;
 }
 
-export interface MediaProcessor {
-  process(input: VariantProcessInput): Promise<ProcessedVariant>;
-}
-
 /**
  * Pinned sharp/libvips engine. The explicit encoder options and `rotate()`
  * provide a stable, orientation-correct, metadata-free output in the pinned
  * production image. No `withMetadata()` call is permitted here.
  */
-export class PinnedMediaProcessor implements MediaProcessor {
-  public async process(input: VariantProcessInput): Promise<ProcessedVariant> {
-    inspectMedia(input.bytes, input.mediaType);
-    assertVariantTransform(input.preset, input.width, input.format, input.crop, input.focalPoint);
-    const focal = input.crop === "focal" ? input.focalPoint : undefined;
-    const pipeline = sharp(input.bytes, { failOn: "error", limitInputPixels: MEDIA_LIMITS.maxPixels, sequentialRead: true })
-      .rotate()
-      .resize({ width: input.width, ...(input.preset.maxHeight ? { height: input.preset.maxHeight } : {}), fit: input.preset.fit, position: focal ? focalGravity(focal) : "centre", withoutEnlargement: true });
-    const encoded = input.format === "image/avif"
-      ? pipeline.avif({ quality: 50, effort: 4, chromaSubsampling: "4:2:0" })
-      : input.format === "image/webp"
-        ? pipeline.webp({ quality: 75, effort: 4, smartSubsample: false })
-        : pipeline.jpeg({ quality: 82, chromaSubsampling: "4:2:0", progressive: false, mozjpeg: false });
-    const { data, info } = await encoded.toBuffer({ resolveWithObject: true });
-    if (!info.width || !info.height || info.width > MEDIA_LIMITS.maxDimension || info.height > MEDIA_LIMITS.maxDimension || info.width * info.height > MEDIA_LIMITS.maxPixels) throw new Error("MEDIA_VARIANT_DECODE_LIMIT");
-    return Object.freeze({ bytes: new Uint8Array(data), width: info.width, height: info.height, mediaType: input.format });
-  }
+export async function processVariant(input: VariantProcessInput): Promise<ProcessedVariant> {
+  inspectMedia(input.bytes, input.mediaType);
+  assertVariantTransform(input.preset, input.width, input.format, input.crop, input.focalPoint);
+  const focal = input.crop === "focal" ? input.focalPoint : undefined;
+  const pipeline = sharp(input.bytes, { failOn: "error", limitInputPixels: MEDIA_LIMITS.maxPixels, sequentialRead: true })
+    .rotate()
+    .resize({ width: input.width, ...(input.preset.maxHeight ? { height: input.preset.maxHeight } : {}), fit: input.preset.fit, position: focal ? focalGravity(focal) : "centre", withoutEnlargement: true });
+  const encoded = input.format === "image/avif"
+    ? pipeline.avif({ quality: 50, effort: 4, chromaSubsampling: "4:2:0" })
+    : input.format === "image/webp"
+      ? pipeline.webp({ quality: 75, effort: 4, smartSubsample: false })
+      : pipeline.jpeg({ quality: 82, chromaSubsampling: "4:2:0", progressive: false, mozjpeg: false });
+  const { data, info } = await encoded.toBuffer({ resolveWithObject: true });
+  if (!info.width || !info.height || info.width > MEDIA_LIMITS.maxDimension || info.height > MEDIA_LIMITS.maxDimension || info.width * info.height > MEDIA_LIMITS.maxPixels) throw new Error("MEDIA_VARIANT_DECODE_LIMIT");
+  return Object.freeze({ bytes: new Uint8Array(data), width: info.width, height: info.height, mediaType: input.format });
 }
 
 export function assertVariantTransform(

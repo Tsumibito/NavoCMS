@@ -26,7 +26,7 @@ import type {
 import { assertOriginalKey, originalKey, originalPrefix, sha256, variantIdentity, variantKey, type MediaStorage } from "./storage.js";
 import { inspectMedia, MEDIA_LIMITS, verifyUpload } from "./validation.js";
 import { resolvePreset } from "./presets.js";
-import { assertVariantTransform, PinnedMediaProcessor, type MediaProcessor } from "./processor.js";
+import { assertVariantTransform, processVariant } from "./processor.js";
 
 interface AssetRow extends Record<string, unknown> {
   readonly id: string;
@@ -131,20 +131,17 @@ export class PostgresMediaRepository implements MediaRepository {
   readonly #storage: MediaStorage | undefined;
   readonly #idempotency: PostgresIdempotencyStore;
   readonly #events: EventStore;
-  readonly #processor: MediaProcessor;
 
   public constructor(
     database: PostgresDatabase,
     storage?: MediaStorage,
     idempotency: PostgresIdempotencyStore = new PostgresIdempotencyStore(database),
-    events: EventStore = new PostgresEventStore(database),
-    processor: MediaProcessor = new PinnedMediaProcessor()
+    events: EventStore = new PostgresEventStore(database)
   ) {
     this.#database = database;
     this.#storage = storage;
     this.#idempotency = idempotency;
     this.#events = events;
-    this.#processor = processor;
   }
 
   public async createUploadIntent(scope: MediaScope, input: CreateUploadIntentInput): Promise<CreateUploadResult> {
@@ -454,7 +451,7 @@ export class PostgresMediaRepository implements MediaRepository {
     const source = await this.#storage.read(original.storage_key, Number(original.byte_size));
     if (!source || source.key !== original.storage_key || source.mediaType !== original.media_type || source.bytes.byteLength !== header.byteSize || sha256(source.bytes) !== original.sha256) throw new Error("MEDIA_VARIANT_SOURCE_MISMATCH");
     inspectMedia(source.bytes, original.media_type);
-    const processed = await this.#processor.process({ bytes: source.bytes, mediaType: original.media_type, preset, width: input.width, format: input.format, crop, ...(input.focalPoint ? { focalPoint: input.focalPoint } : {}) });
+    const processed = await processVariant({ bytes: source.bytes, mediaType: original.media_type, preset, width: input.width, format: input.format, crop, ...(input.focalPoint ? { focalPoint: input.focalPoint } : {}) });
     if (processed.bytes.byteLength < 1 || processed.bytes.byteLength > MEDIA_LIMITS.maxBytes ||
       processed.mediaType !== input.format || !Number.isSafeInteger(processed.width) || !Number.isSafeInteger(processed.height) ||
       processed.width < 1 || processed.height < 1 || processed.width > input.width ||

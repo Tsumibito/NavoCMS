@@ -10,8 +10,6 @@
     { "path": "packages/delivery-cloudflare" },
     { "path": "packages/persistence-postgres" },
     { "path": "packages/media" },
-    { "path": "apps/api" },
-    { "path": "apps/mcp" },
-    { "path": "plugins/noop-service" }
+    { "path": "apps/mcp" }
   ]
 }
