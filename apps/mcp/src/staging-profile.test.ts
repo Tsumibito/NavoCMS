@@ -23,7 +23,7 @@ describe("Cloudflare staging activation boundary", () => {
     expect(manifest).toMatchObject({ metadata: { version: "0.2.0", description: expect.stringContaining("external") } });
     expect(manifest.spec.permissions).toEqual({
       data: {
-        read: ["environments", "release_candidates", "reviewed_astro_artifacts", "workflow_runs", "workflow_checkpoints"],
+        read: ["environments", "release_candidates", "reviewed_astro_artifact_object_bindings", "workflow_runs", "workflow_checkpoints"],
         write: ["workflow_runs", "workflow_checkpoints", "event_ledger", "domain_outbox"]
       },
       network: ["*.staging-pages.pages.dev", "api.cloudflare.com", "coolify.staging.example.test", "staging.example.test"],

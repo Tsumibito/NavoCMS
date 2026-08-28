@@ -22,6 +22,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0017](0017-cloudflare-preview-delivery-provider.md) | Proposed | Immutable Cloudflare preview and exact-commit Coolify delivery boundary |
 | [0018](0018-trusted-astro-builder-registration.md) | Superseded | Trusted internal Astro build and durable reviewed-artifact registration |
 | [0019](0019-staging-astro-release-input-and-image-attestation.md) | Proposed | Preview-bound staging Astro input and image-attested build runner |
+| [0022](0022-reviewed-astro-object-storage.md) | Proposed | Immutable object storage for reviewed Astro source and output |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

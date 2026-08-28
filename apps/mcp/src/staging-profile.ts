@@ -95,7 +95,7 @@ export function cloudflareStagingManifest(binding: CloudflareStagingBinding) {
       requires: [],
       permissions: {
         data: {
-          read: ["environments", "release_candidates", "reviewed_astro_artifacts", "workflow_runs", "workflow_checkpoints"],
+          read: ["environments", "release_candidates", "reviewed_astro_artifact_object_bindings", "workflow_runs", "workflow_checkpoints"],
           write: ["workflow_runs", "workflow_checkpoints", "event_ledger", "domain_outbox"]
         },
         network,
