@@ -28,7 +28,7 @@
     "@navocms/security": "workspace:*",
     "@navocms/s3-core": "workspace:*",
     "@astrojs/check": "0.9.10",
-    "astro": "7.2.4",
+    "astro": "7.2.6",
     "typescript": "5.9.3",
     "zod": "4.4.3"
   },
