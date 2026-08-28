@@ -1,1 +1,1 @@
-{ "extends": "../../tsconfig.base.json", "compilerOptions": { "outDir": "dist", "rootDir": "src", "tsBuildInfoFile": "dist/.tsbuildinfo" }, "include": ["src/**/*.ts"], "references": [{ "path": "../security" }, { "path": "../kernel" }, { "path": "../persistence-postgres" }] }
+{ "extends": "../../tsconfig.base.json", "compilerOptions": { "outDir": "dist", "rootDir": "src", "tsBuildInfoFile": "dist/.tsbuildinfo" }, "include": ["src/**/*.ts"], "references": [{ "path": "../s3-core" }, { "path": "../security" }, { "path": "../kernel" }, { "path": "../persistence-postgres" }] }

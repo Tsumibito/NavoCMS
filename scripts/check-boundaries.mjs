@@ -59,10 +59,15 @@ const rules = [
     reason: "the Cloudflare delivery adapter may depend only on immutable renderer and release contracts"
   },
   {
+    directory: "packages/s3-core/src",
+    forbidden: ["@navocms/media", "@navocms/kernel", "@navocms/persistence-postgres", "apps/", "plugins/", "fastify"],
+    reason: "the shared S3/R2 core is provider-neutral and cannot depend on domain adapters"
+  },
+  {
     directory: "packages/media/src",
     forbidden: ["apps/", "plugins/", "fastify"],
-    allowedWorkspaceImports: ["@navocms/kernel", "@navocms/persistence-postgres", "@navocms/security"],
-    reason: "the media boundary may use only kernel events, the PostgreSQL adapter, and security primitives"
+    allowedWorkspaceImports: ["@navocms/kernel", "@navocms/persistence-postgres", "@navocms/security", "@navocms/s3-core"],
+    reason: "the media boundary may use only kernel events, the PostgreSQL adapter, security primitives, and the shared object core"
   }
 ];
 

@@ -13,6 +13,7 @@
     "dist"
   ],
   "dependencies": {
+    "@navocms/s3-core": "workspace:*",
     "@navocms/kernel": "workspace:*",
     "@navocms/persistence-postgres": "workspace:*",
     "@navocms/security": "workspace:*",

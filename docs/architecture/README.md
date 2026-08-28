@@ -25,6 +25,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0020](0020-pluginhost-runtime-simplification.md) | Accepted | Direct validation for embedded and staging runtime selection |
 | [0021](0021-pages-coolify-decoupling.md) | Proposed | Pages-only content publication and independent Coolify runtime releases |
 | [0022](0022-reviewed-astro-object-storage.md) | Proposed | Immutable object storage for reviewed Astro source and output |
+| [0023](0023-shared-s3-object-core.md) | Proposed | Shared S3/R2 core with reviewed physical namespaces |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

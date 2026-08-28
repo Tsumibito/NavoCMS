@@ -193,6 +193,9 @@ importers:
       '@navocms/security':
         specifier: workspace:*
         version: link:../security
+      '@navocms/s3-core':
+        specifier: workspace:*
+        version: link:../s3-core
       sharp:
         specifier: 0.35.3
         version: 0.35.3(@types/node@24.10.1)
@@ -214,6 +217,8 @@ importers:
         version: 8.15.5
 
   packages/security: {}
+
+  packages/s3-core: {}
 
 packages:
 

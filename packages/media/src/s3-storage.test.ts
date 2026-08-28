@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { PostgresDatabase, SqlClient } from "@navocms/persistence-postgres";
 
-import { PostgresMediaUploadIntentSigner, S3CompatibleMediaStorage, type S3Transport, type S3TransportResponse } from "./s3-storage.js";
+import type { S3Transport, S3TransportResponse } from "@navocms/s3-core";
+import { PostgresMediaUploadIntentSigner, S3CompatibleMediaStorage } from "./s3-storage.js";
 import { sha256 } from "./storage.js";
 import { MEDIA_LIMITS } from "./validation.js";
 
@@ -12,13 +13,13 @@ const pendingKey = `tenants/${scope.tenantId}/sites/${scope.siteId}/pending/3333
 const originalOne = `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/${"a".repeat(64)}`;
 const originalTwo = `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/${"b".repeat(64)}`;
 // Retained AWS SDK v3/Smithy SignatureV4 vector generated on 2026-08-24.
-const AWS_SDK_V3_SIGV4_VECTOR = "https://r2.example.test/navocms-media/tenants/11111111-1111-4111-8111-111111111111/sites/22222222-2222-4222-8222-222222222222/pending/33333333-3333-4333-8333-333333333333?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIDEXAMPLE%2F20260824%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20260824T120000Z&X-Amz-Expires=120&x-amz-meta-expected-size=42&x-amz-meta-media-type=image%2Fpng&x-amz-meta-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&X-Amz-Signature=27bb6633ee98f93e829a13ef70c51b2341ebd0faaf6eccab4af91dcdd7af40eb&X-Amz-SignedHeaders=content-type%3Bhost%3Bif-none-match%3Bx-navocms-upload-intent%3Bx-navocms-upload-ttl";
+const AWS_SDK_V3_SIGV4_VECTOR = "https://r2.example.test/navocms-media/navocms/v1/media/tenants/11111111-1111-4111-8111-111111111111/sites/22222222-2222-4222-8222-222222222222/pending/33333333-3333-4333-8333-333333333333?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIDEXAMPLE%2F20260824%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20260824T120000Z&X-Amz-Expires=120&x-amz-meta-expected-size=42&x-amz-meta-media-type=image%2Fpng&x-amz-meta-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&X-Amz-Signature=dea43c5de4d6481316d61fd586f8f08ed87dbd97eda9f2bf51428a47e12e1ec0&X-Amz-SignedHeaders=content-type%3Bhost%3Bif-none-match%3Bx-navocms-upload-intent%3Bx-navocms-upload-ttl";
 
 describe("S3-compatible media storage contract", () => {
   it("uses conditional immutable PUT and rejects a foreign key before transport", async () => {
     const transport = new RecordingTransport(); const storage = adapter(transport);
     await storage.putImmutable({ key: pendingKey, bytes: bytes("one"), mediaType: "image/png" });
-    expect(transport.requests[0]).toMatchObject({ method: "PUT", key: pendingKey, headers: { "if-none-match": "*" } });
+    expect(transport.requests[0]).toMatchObject({ method: "PUT", key: physical(pendingKey), headers: { "if-none-match": "*" } });
     await expect(storage.head(pendingKey.replace(scope.siteId, "44444444-4444-4444-8444-444444444444"))).rejects.toThrow("SCOPE");
     expect(transport.requests).toHaveLength(1);
   });
@@ -56,7 +57,7 @@ describe("S3-compatible media storage contract", () => {
     const transport = new RecordingTransport(); const storage = adapter(transport); const body = bytes("one"); const deadline = new Date("2026-08-24T12:05:00.000Z");
     transport.responses.push(response(200, metadata(body)), response(200), response(200, { ...metadata(body), "x-amz-meta-recoverable-until": deadline.toISOString() }), response(204));
     await storage.deleteRecoverable(originalOne, deadline);
-    expect(transport.requests[1]).toMatchObject({ method: "PUT", headers: { "x-amz-metadata-directive": "REPLACE", "x-amz-meta-sha256": sha256(body), "x-amz-meta-media-type": "image/png", "x-amz-meta-recoverable-until": deadline.toISOString() } });
+    expect(transport.requests[1]).toMatchObject({ method: "PUT", key: physical(recoveryKey(originalOne)), headers: { "x-amz-copy-source": `/navocms-media/${physical(originalOne)}`, "x-amz-metadata-directive": "REPLACE", "x-amz-meta-sha256": sha256(body), "x-amz-meta-media-type": "image/png", "x-amz-meta-recoverable-until": deadline.toISOString() } });
     transport.responses.push(response(200, { ...metadata(body), "x-amz-meta-recoverable-until": deadline.toISOString() }), response(200, { ...metadata(body), "x-amz-meta-recoverable-until": deadline.toISOString() }), response(200, {}, stream(body)), response(200), response(204));
     await expect(storage.restore(originalOne)).resolves.toBe(true);
     transport.responses.push(response(200, { ...metadata(body), "x-amz-meta-recoverable-until": deadline.toISOString() }));
@@ -71,7 +72,7 @@ describe("S3-compatible media storage contract", () => {
     await expect(storage.deleteRecoverable(originalOne, deadline)).rejects.toThrow("UNAVAILABLE");
     transport.responses.push(response(200, metadata(body)), response(200), response(200, { ...metadata(body), "x-amz-meta-recoverable-until": deadline.toISOString() }), response(204));
     await expect(storage.deleteRecoverable(originalOne, deadline)).resolves.toBeUndefined();
-    expect(transport.requests.filter(({ method, key }) => method === "PUT" && key !== originalOne)).toHaveLength(2);
+    expect(transport.requests.filter(({ method, key }) => method === "PUT" && key !== physical(originalOne))).toHaveLength(2);
   });
 
   it("reconciles an exact existing original on restore retry and then deletes recovery", async () => {
@@ -87,13 +88,13 @@ describe("S3-compatible media storage contract", () => {
 
   it("uses a validated lexical start-after cursor across two inventory pages", async () => {
     const transport = new RecordingTransport(); const storage = adapter(transport); const one = bytes("one"); const two = bytes("two"); const prefix = `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/`;
-    transport.responses.push(response(200, {}, streamText(listPage(originalOne, one.byteLength, true))), response(200, metadata(one)));
+    transport.responses.push(response(200, {}, streamText(listPage(physical(originalOne), one.byteLength, true))), response(200, metadata(one)));
     const first = await storage.inventory(prefix, 1);
     expect(first).toMatchObject({ nextCursor: originalOne });
-    transport.responses.push(response(200, {}, streamText(listPage(originalTwo, two.byteLength, false))), response(200, metadata(two)));
+    transport.responses.push(response(200, {}, streamText(listPage(physical(originalTwo), two.byteLength, false))), response(200, metadata(two)));
     const second = await storage.inventory(prefix, 1, first.nextCursor);
     expect(second.objects.map(({ key }) => key)).toEqual([originalTwo]);
-    expect(transport.requests[2]?.query).toMatchObject({ "start-after": originalOne });
+    expect(transport.requests[2]?.query).toMatchObject({ "start-after": physical(originalOne), prefix: physical(prefix) });
     await expect(storage.inventory(prefix, 1, pendingKey)).rejects.toThrow("CURSOR");
   });
 
@@ -139,6 +140,8 @@ function databaseFor(intent: ReturnType<typeof binding>): PostgresDatabase {
   } as unknown as PostgresDatabase;
 }
 function canonicalUrl(value: string): string { const url = new URL(value); const query = [...url.searchParams.entries()].sort(([left], [right]) => left.localeCompare(right)); url.search = new URLSearchParams(query).toString(); return url.toString(); }
+function physical(key: string): string { return `navocms/v1/media/${key}`; }
+function recoveryKey(key: string): string { const [prefix] = key.split("/originals/"); return `${prefix}/__recoverable/${Buffer.from(key).toString("base64url")}`; }
 function bytes(value: string): Uint8Array { return new TextEncoder().encode(value); }
 function metadata(body: Uint8Array, mediaType = "image/png"): Record<string, string> { return { "content-length": String(body.byteLength), "x-amz-meta-sha256": sha256(body), "x-amz-meta-media-type": mediaType }; }
 function response(status: number, headers: Record<string, string> = {}, body?: AsyncIterable<Uint8Array>, abort?: () => void): S3TransportResponse { return { status, headers, ...(body ? { body } : {}), ...(abort ? { abort } : {}) }; }

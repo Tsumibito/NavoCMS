@@ -9,6 +9,7 @@
     { "path": "packages/kernel" },
     { "path": "packages/delivery-cloudflare" },
     { "path": "packages/persistence-postgres" },
+    { "path": "packages/s3-core" },
     { "path": "packages/media" },
     { "path": "apps/mcp" }
   ]
