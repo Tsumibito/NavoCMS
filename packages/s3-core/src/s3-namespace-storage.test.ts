@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createFetchS3Transport, NAVOCMS_ARTIFACTS_NAMESPACE, NAVOCMS_MEDIA_NAMESPACE, reviewedS3Namespace, S3NamespaceStorage, type S3Transport, type S3TransportResponse } from "./s3-namespace-storage.js";
+import { createFetchS3Transport, NAVOCMS_ARTIFACTS_NAMESPACE, NAVOCMS_MEDIA_NAMESPACE, reviewedS3Namespace, S3NamespaceStorage, sha256, type S3Transport, type S3TransportResponse } from "./s3-namespace-storage.js";
 
 const namespace = NAVOCMS_MEDIA_NAMESPACE;
 const logicalKey = "tenants/11111111-1111-4111-8111-111111111111/sites/22222222-2222-4222-8222-222222222222/originals/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -26,7 +26,7 @@ describe("S3 namespace storage", () => {
   it("maps every provider key, list prefix, cursor, and copy source into its fixed namespace", async () => {
     const transport = new RecordingTransport(); const storage = core(transport); const body = bytes("one");
     await storage.putImmutable({ key: logicalKey, bytes: body, mediaType: "image/png" });
-    expect(transport.requests[0]).toMatchObject({ method: "PUT", key: `${namespace}${logicalKey}`, headers: { "if-none-match": "*" } });
+    expect(transport.requests[0]).toMatchObject({ method: "PUT", key: `${namespace}${logicalKey}`, headers: { "if-none-match": "*", "x-amz-meta-byte-size": String(body.byteLength) } });
     transport.responses.push(response(200, {}, text(listPage(`${namespace}${logicalKey}`, body.byteLength, true))), response(200, metadata(body)));
     const page = await storage.inventory(logicalPrefix, 1);
     expect(page).toMatchObject({ nextCursor: logicalKey });
@@ -54,6 +54,13 @@ describe("S3 namespace storage", () => {
     transport.responses.push(response(200, metadata(body)), response(200, {}, brokenStream(), () => { aborted += 1; }));
     await expect(storage.read(logicalKey, body.byteLength)).rejects.toThrow("PROVIDER_UNAVAILABLE");
     expect(aborted).toBe(2);
+  });
+
+  it("uses immutable byte-size metadata when an R2 fetch omits content-length", async () => {
+    const transport = new RecordingTransport(); const storage = core(transport); const body = bytes("one");
+    const { "content-length": _omitted, ...withoutContentLength } = metadata(body);
+    transport.responses.push(response(200, { ...withoutContentLength, "x-amz-meta-byte-size": String(body.byteLength) }), response(200, {}, stream(body)));
+    await expect(storage.read(logicalKey, body.byteLength)).resolves.toMatchObject({ key: logicalKey, mediaType: "image/png" });
   });
 
   it("signs exact payload checksums with injected runtime configuration and never leaks failures", async () => {
@@ -96,7 +103,7 @@ class RecordingTransport implements S3Transport {
 }
 function core(transport: S3Transport): S3NamespaceStorage { return new S3NamespaceStorage({ bucket: "navocms-media", namespace, transport }); }
 function bytes(value: string): Uint8Array { return new TextEncoder().encode(value); }
-function metadata(body: Uint8Array): Record<string, string> { return { "content-length": String(body.byteLength), "x-amz-meta-sha256": "7692c3ad3540bb803c020b3aee66cd8887123231688b8aef35b980eb0c17ed88", "x-amz-meta-media-type": "image/png" }; }
+function metadata(body: Uint8Array): Record<string, string> { return { "content-length": String(body.byteLength), "x-amz-meta-sha256": sha256(body), "x-amz-meta-media-type": "image/png" }; }
 function response(status: number, headers: Record<string, string> = {}, body?: AsyncIterable<Uint8Array>, abort?: () => void): S3TransportResponse { return { status, headers, ...(body ? { body } : {}), ...(abort ? { abort } : {}) }; }
 function listPage(key: string, size: number, truncated: boolean): string { return `<ListBucketResult><Contents><Key>${key}</Key><Size>${size}</Size></Contents><IsTruncated>${truncated}</IsTruncated></ListBucketResult>`; }
 async function* stream(...chunks: Uint8Array[]): AsyncIterable<Uint8Array> { yield* chunks; }

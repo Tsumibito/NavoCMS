@@ -24,6 +24,9 @@ import { PostgresReviewedAstroArtifactStore } from "./postgres-reviewed-astro-ar
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
 import { composeCloudflareStagingReleaseProvider } from "./staging-composition.js";
 import { StagingOperationalRuntime } from "./staging-operational-runtime.js";
+import { composeR2Runtime } from "./r2-composition.js";
+import { createR2StorageRuntime } from "./r2-storage-runtime.js";
+import { createDotenvxR2SecretBroker, r2RuntimeBindingFromEnvironment, r2RuntimeExpectationFromEnvironment } from "./r2-runtime.js";
 
 const resource = required("NAVOCMS_MCP_RESOURCE");
 const issuer = required("NAVOCMS_OIDC_ISSUER");
@@ -63,14 +66,27 @@ const stagingRuntime = requestedProvider === "cloudflare-staging"
   ? selectReleaseProvider({ requested: requestedProvider, environment: environmentKey, binding: stagingBindingFromEnvironment(), expected: stagingExpectation!, secrets: createDotenvxSecretBroker() })
   : selectReleaseProvider({ requested: requestedProvider, environment: environmentKey, binding: {}, expected: { tenantId: deploymentScope.tenantId, siteId: deploymentScope.siteId, allowedHostname: "unused.invalid", bindingDigest: "sha256:unused" }, secrets: createDotenvxSecretBroker() });
 if (stagingRuntime.selection === "cloudflare-staging" && !database) throw new Error("cloudflare-staging requires PostgreSQL");
+const requestedR2 = process.env.NAVOCMS_R2_RUNTIME;
+if (requestedR2 !== undefined && requestedR2 !== "disabled" && requestedR2 !== "r2") throw new Error("NAVOCMS_R2_RUNTIME must be disabled or r2");
+const r2Composition = requestedR2 === "r2" ? composeR2Runtime({
+  requested: requestedR2,
+  runtimeMode,
+  environment: environmentKey,
+  binding: r2RuntimeBindingFromEnvironment(),
+  expected: r2RuntimeExpectationFromEnvironment(),
+  secrets: createDotenvxR2SecretBroker()
+}) : undefined;
+if (r2Composition && !database) throw new Error("R2 runtime requires PostgreSQL");
+if (stagingRuntime.selection === "cloudflare-staging" && !r2Composition) throw new Error("cloudflare-staging requires reviewed R2 object storage");
+const r2Storage = r2Composition ? createR2StorageRuntime({ composition: r2Composition, ...deploymentScope }) : undefined;
+if (r2Storage && !await r2Storage.ready()) throw new Error("R2 namespace readiness failed");
 if (runtimeMode === "production" && stagingRuntime.selection === "embedded") assertPinnedProductionProfile();
 const identityResolver = database ? new PostgresIdentityResolver(database, deploymentScope, {
   ...(issuerRolePermissions ? { issuerRolePermissions } : {})
 }) : undefined;
-// The pinned production profile deliberately has no media storage provider.
-// Read-only media review can still use PostgreSQL; upload tools require an
-// explicit future storage capability injection.
-const media = database ? new McpMediaService(new PostgresMediaRepository(database), { storageInjected: false }) : undefined;
+// Embedded production stays read-only. The staging media mutation surface is
+// enabled only after the reviewed R2 binding and all namespace markers pass.
+const media = database ? new McpMediaService(new PostgresMediaRepository(database, r2Storage?.media), { storageInjected: Boolean(r2Storage) }) : undefined;
 
 let service: McpEditingService;
 let reviewedAstroResolver: ReviewedAstroArtifactResolver | undefined;
@@ -81,7 +97,7 @@ if (database) {
     principalId: runtimePrincipalId!
   };
   const artifactStore = stagingRuntime.selection === "cloudflare-staging"
-    ? new PostgresReviewedAstroArtifactStore(database, deliveryRepositoryContext, deploymentEnvironmentKey)
+    ? new PostgresReviewedAstroArtifactStore(database, deliveryRepositoryContext, deploymentEnvironmentKey, { storage: r2Storage!.artifacts })
     : undefined;
   const stagingComposition = stagingRuntime.selection === "cloudflare-staging"
     ? composeCloudflareStagingReleaseProvider({
@@ -100,7 +116,8 @@ if (database) {
       environmentKey: deploymentEnvironmentKey,
       reviewedSourceCommit: required("NAVOCMS_REVIEWED_SOURCE_COMMIT"),
       toolchainDirectory: required("NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN"),
-      readinessContext: deliveryRepositoryContext
+      readinessContext: deliveryRepositoryContext,
+      objectStorage: r2Storage!.artifacts
     });
   }
   reviewedAstroResolver = stagingComposition?.resolver;
@@ -165,9 +182,20 @@ const server = createMcpHttpServer({
       const databaseReady = await database.ready();
       const resolverReady = reviewedAstroResolver ? await reviewedAstroResolver.ready() : true;
       const builderReady = stagingOperations ? await stagingOperations.ready() : true;
-      const providerReady = stagingRuntime.selection !== "cloudflare-staging" || (resolverReady && builderReady);
+      const objectStorageReady = r2Storage ? await r2Storage.ready() : true;
+      const providerReady = stagingRuntime.selection !== "cloudflare-staging" || (resolverReady && builderReady && objectStorageReady);
       return {
-        ready: databaseReady && providerReady,
+        ready: databaseReady && providerReady && objectStorageReady,
+        ...(r2Composition && r2Storage ? { r2: {
+          provider: "r2" as const,
+          ready: objectStorageReady,
+          tenantId: r2Composition.readiness.tenantId,
+          siteId: r2Composition.readiness.siteId,
+          bucket: r2Composition.readiness.bucket,
+          namespace: r2Composition.readiness.namespace,
+          prefix: r2Composition.readiness.prefix,
+          bindingDigest: r2Composition.readiness.bindingDigest
+        } } : {}),
         ...(stagingRuntime.selection === "cloudflare-staging" ? {
           provider: { key: "cloudflare-staging" as const, ready: providerReady },
           resolver: { ready: resolverReady, environment: "staging" as const, environmentKey: deploymentEnvironmentKey },

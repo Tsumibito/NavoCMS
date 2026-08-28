@@ -11,6 +11,7 @@
     { "path": "../../packages/content" },
     { "path": "../../packages/kernel" },
     { "path": "../../packages/media" },
+    { "path": "../../packages/s3-core" },
     { "path": "../../packages/persistence-postgres" }
   ],
   "include": ["src/**/*.ts"],

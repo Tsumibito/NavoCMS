@@ -40,6 +40,7 @@ export interface ReadinessResult {
   readonly resolver?: Readonly<{ ready: boolean; environment: "staging"; environmentKey: string }>;
   readonly builder?: Readonly<{ ready: boolean; environment: "staging"; environmentKey: string; policyDigest: string }>;
   readonly staging?: Readonly<{ provider: string; profileDigest: string; bindingDigest: string; tenantId: string; siteId: string; hostname: string }>;
+  readonly r2?: Readonly<{ provider: "r2"; ready: boolean; tenantId: string; siteId: string; bucket: string; namespace: "navocms/v1/"; prefix: "navocms/v1/"; bindingDigest: string }>;
 }
 
 export function createMcpHttpServer(options: McpHttpOptions) {
@@ -66,7 +67,8 @@ export function createMcpHttpServer(options: McpHttpOptions) {
           ...(readiness.provider ? { provider: readiness.provider } : {}),
           ...(readiness.resolver ? { resolver: readiness.resolver } : {}),
           ...(readiness.builder ? { builder: readiness.builder } : {}),
-          ...(readiness.staging ? { staging: readiness.staging } : {})
+          ...(readiness.staging ? { staging: readiness.staging } : {}),
+          ...(readiness.r2 ? { r2: readiness.r2 } : {})
         });
       } catch {
         return sendJson(response, 503, { status: "not-ready" });

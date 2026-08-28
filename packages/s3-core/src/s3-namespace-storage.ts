@@ -222,9 +222,9 @@ export function createFetchS3Transport(options: FetchS3TransportOptions): S3Tran
   });
 }
 
-function immutableHeaders(mediaType: string, digest: string, byteSize: number): Record<string, string> { return { "if-none-match": "*", "content-type": mediaType, "content-length": String(byteSize), "x-amz-meta-sha256": digest, "x-amz-meta-media-type": mediaType }; }
+function immutableHeaders(mediaType: string, digest: string, byteSize: number): Record<string, string> { return { "if-none-match": "*", "content-type": mediaType, "content-length": String(byteSize), "x-amz-meta-byte-size": String(byteSize), "x-amz-meta-sha256": digest, "x-amz-meta-media-type": mediaType }; }
 function parseMetadata(rawHeaders: Readonly<Record<string, string | undefined>>): S3ObjectMetadata {
-  const headers = normalized(rawHeaders); const byteSize = Number(headers["content-length"]); const sha = headers["x-amz-meta-sha256"]; const mediaType = headers["x-amz-meta-media-type"] ?? headers["content-type"];
+  const headers = normalized(rawHeaders); const byteSize = Number(headers["x-amz-meta-byte-size"] ?? headers["content-length"]); const sha = headers["x-amz-meta-sha256"]; const mediaType = headers["x-amz-meta-media-type"] ?? headers["content-type"];
   if (!Number.isSafeInteger(byteSize) || byteSize < 0 || !sha || !/^[a-f0-9]{64}$/.test(sha) || !mediaType) throw new Error("STORAGE_METADATA_INVALID");
   const metadata = Object.freeze(Object.fromEntries(Object.entries(headers).flatMap(([key, value]) => key.startsWith("x-amz-meta-") && value !== undefined ? [[key.slice("x-amz-meta-".length), value]] : [])));
   return Object.freeze({ byteSize, sha256: sha, mediaType, metadata });

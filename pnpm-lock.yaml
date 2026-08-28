@@ -87,6 +87,9 @@ importers:
       '@navocms/security':
         specifier: workspace:*
         version: link:../../packages/security
+      '@navocms/s3-core':
+        specifier: workspace:*
+        version: link:../../packages/s3-core
       astro:
         specifier: 7.2.4
         version: 7.2.4(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.10.1)(tsx@4.23.12)(yaml@2.9.0)

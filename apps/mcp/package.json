@@ -26,6 +26,7 @@
     "@navocms/media": "workspace:*",
     "@navocms/persistence-postgres": "workspace:*",
     "@navocms/security": "workspace:*",
+    "@navocms/s3-core": "workspace:*",
     "@astrojs/check": "0.9.10",
     "astro": "7.2.4",
     "typescript": "5.9.3",

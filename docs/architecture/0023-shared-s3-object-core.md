@@ -1,6 +1,6 @@
 # ADR 0023 — Shared S3/R2 object core
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-08-28
 
@@ -28,6 +28,11 @@ currently `navocms/v1/media/` or `navocms/v1/artifacts/`; logical domain keys
 are never stored or exposed with that prefix. The media adapter remains the
 owner of tenant/site key validation, upload-intent authority, and recovery
 lifecycle policy.
+
+The staging composition uses one transport and two domain adapters. Startup
+performs bounded, read-only verification of the exact root, media, and artifact
+namespace markers before either storage capability is injected. Embedded
+production remains read-only and does not select R2 implicitly.
 
 ## Consequences
 
