@@ -115,6 +115,19 @@ export interface LegacyCloudflareStagingBindingV2 {
 
 export type CompatibleCloudflareStagingBinding = CloudflareStagingBinding | LegacyCloudflareStagingBindingV1 | LegacyCloudflareStagingBindingV2;
 
+/** Reviewed, transport-neutral R2 coordinates. Secret refs are never values. */
+export interface R2RuntimeBinding {
+  readonly schema: "io.navocms.r2-runtime-binding.v1";
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly environment: "staging";
+  readonly endpoint: string;
+  readonly bucket: string;
+  readonly namespace: "navocms/v1/";
+  readonly accessKeySecretRef: string;
+  readonly secretKeySecretRef: string;
+}
+
 export type MediaAssetState = "pending" | "quarantined" | "verified" | "processing" | "ready" | "rejected" | "deleted";
 
 export interface MediaRights {

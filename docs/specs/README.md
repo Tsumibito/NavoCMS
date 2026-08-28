@@ -3,6 +3,9 @@
 These documents describe the first public `navocms.io/v0alpha1` contracts. Machine-readable JSON
 Schemas live in [`schemas/`](../../schemas/README.md).
 
+The independent R2 runtime binding is a versioned `io.navocms.r2-runtime-binding.v1` operational
+contract, not a `navocms.io/v0alpha1` content contract.
+
 | Specification | Purpose |
 |---|---|
 | [Plugin manifest](plugin-manifest-v0alpha1.md) | Capabilities, dependencies, trust, permissions, effects |

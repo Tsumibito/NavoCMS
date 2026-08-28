@@ -15,6 +15,7 @@ import type {
   DomainEvent,
   MediaAsset,
   PluginManifest,
+  R2RuntimeBinding,
   SiteProfile
 } from "./types.js";
 
@@ -28,7 +29,8 @@ const schemaFiles = {
   profile: "site-profile.schema.json",
   cloudflareStagingBinding: "cloudflare-staging-binding-v3.schema.json",
   cloudflareStagingBindingV1: "cloudflare-staging-binding.schema.json",
-  cloudflareStagingBindingV2: "cloudflare-staging-binding-v2.schema.json"
+  cloudflareStagingBindingV2: "cloudflare-staging-binding-v2.schema.json",
+  r2RuntimeBinding: "r2-runtime-binding-v1.schema.json"
 } as const;
 
 /** Exact, versioned parser shared by every staging activation boundary. */
@@ -41,6 +43,11 @@ export function parseCompatibleCloudflareStagingBinding(value: unknown): Compati
   if (schema === "io.navocms.cloudflare-staging-binding.v1") return contracts.cloudflareStagingBindingV1.parse(value);
   if (schema === "io.navocms.cloudflare-staging-binding.v2") return contracts.cloudflareStagingBindingV2.parse(value);
   return parseCloudflareStagingBinding(value);
+}
+
+/** Exact parser for the independent R2 runtime binding; it does not construct a transport. */
+export function parseR2RuntimeBinding(value: unknown): R2RuntimeBinding {
+  return contracts.r2RuntimeBinding.parse(value);
 }
 const MAX_VALIDATION_ISSUES = 20;
 
@@ -249,6 +256,27 @@ function cloudflareStagingBindingSemantics(binding: CloudflareStagingBinding): s
   return issues;
 }
 
+function r2RuntimeBindingSemantics(binding: R2RuntimeBinding): string[] {
+  const issues: string[] = [];
+  try {
+    const endpoint = new URL(binding.endpoint);
+    const explicitPort = /^https:\/\/[^/?#]+:\d+(?:[/?#]|$)/.test(binding.endpoint);
+    if (endpoint.protocol !== "https:" || !endpoint.hostname.endsWith(".r2.cloudflarestorage.com") || endpoint.port || explicitPort || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash) {
+      issues.push("R2 endpoint must be a credential-free HTTPS origin");
+    }
+  } catch {
+    issues.push("R2 endpoint must be a credential-free HTTPS origin");
+  }
+  if (binding.accessKeySecretRef === binding.secretKeySecretRef || dotenvxSecretKey(binding.accessKeySecretRef) === dotenvxSecretKey(binding.secretKeySecretRef)) {
+    issues.push("R2 secret references must be distinct");
+  }
+  return issues;
+}
+
+function dotenvxSecretKey(reference: string): string {
+  return `DOTENVX_SECRET_${reference.slice("secret:".length).replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
+}
+
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 const addFormats = (
   "default" in addFormatsModule ? addFormatsModule.default : addFormatsModule
@@ -292,5 +320,6 @@ export const contracts = {
   ),
   cloudflareStagingBinding: new ContractValidator<CloudflareStagingBinding>("Cloudflare staging binding", ajv.compile<CloudflareStagingBinding>(readSchema(schemaFiles.cloudflareStagingBinding)), cloudflareStagingBindingSemantics),
   cloudflareStagingBindingV1: new ContractValidator<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v1" }>>("legacy Cloudflare staging binding v1", ajv.compile<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v1" }>>(readSchema(schemaFiles.cloudflareStagingBindingV1))),
-  cloudflareStagingBindingV2: new ContractValidator<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>("legacy Cloudflare staging binding v2", ajv.compile<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>(readSchema(schemaFiles.cloudflareStagingBindingV2)))
+  cloudflareStagingBindingV2: new ContractValidator<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>("legacy Cloudflare staging binding v2", ajv.compile<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>(readSchema(schemaFiles.cloudflareStagingBindingV2))),
+  r2RuntimeBinding: new ContractValidator<R2RuntimeBinding>("R2 runtime binding", ajv.compile<R2RuntimeBinding>(readSchema(schemaFiles.r2RuntimeBinding)), r2RuntimeBindingSemantics)
 } as const;

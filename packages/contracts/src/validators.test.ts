@@ -25,6 +25,12 @@ describe("public contract validators", () => {
     expect(contracts.cloudflareStagingBinding.parse(await fixture("staging/valid.cloudflare-staging-binding-v3.json"))).toMatchObject({ schema: "io.navocms.cloudflare-staging-binding.v3" });
     expect(parseCompatibleCloudflareStagingBinding(await fixture("staging/valid.cloudflare-staging-binding-v1.json"))).toMatchObject({ schema: "io.navocms.cloudflare-staging-binding.v1" });
     expect(parseCompatibleCloudflareStagingBinding(await fixture("staging/valid.cloudflare-staging-binding-v2.json"))).toMatchObject({ schema: "io.navocms.cloudflare-staging-binding.v2" });
+    expect(contracts.r2RuntimeBinding.parse(await fixture("staging/valid.r2-runtime-binding.json"))).toBeTruthy();
+  });
+
+  it("rejects R2 endpoint paths and dotenvx reference collisions", async () => {
+    await expect(fixture("staging/path.r2-runtime-binding.invalid.json").then((value) => contracts.r2RuntimeBinding.parse(value))).rejects.toThrow(/R2 endpoint/);
+    await expect(fixture("staging/secret-collision.r2-runtime-binding.invalid.json").then((value) => contracts.r2RuntimeBinding.parse(value))).rejects.toThrow(/secret references/);
   });
 
   it("rejects adversarial media storage keys that point at another site", async () => {
