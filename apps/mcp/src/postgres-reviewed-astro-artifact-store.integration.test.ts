@@ -91,7 +91,7 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
     expect(concurrentCount).toBe("1");
 
     const failedRelease = await createRelease("rollback");
-    const failedInput = registrationInput(failedRelease);
+    const failedInput = registrationInput(failedRelease, "rollback-orphan");
     const objectsBeforeFailure = await artifactStorage.inventory(reviewedAstroObjectPrefix({ tenantId, siteId }), 100);
     const persisted = new PostgresEventStore(database!);
     const failingEvents: EventStore = {
@@ -119,7 +119,7 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
     const firstRelease = await createRelease("shared-one");
     const secondRelease = await createRelease("shared-two");
     const store = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { storage: artifactStorage });
-    const firstInput = registrationInput(firstRelease);
+    const firstInput = registrationInput(firstRelease, "shared-object");
     const secondInput: RegisterReviewedAstroArtifactInput = Object.freeze({
       ...firstInput, idempotencyKey: `reviewed-shared-${randomUUID()}`,
       releaseId: secondRelease.id, releaseHash: secondRelease.releaseHash, releaseArtifactHash: secondRelease.artifact.hash
@@ -309,8 +309,8 @@ async function createBoundAstroRelease(label: string) {
   return { release, render };
 }
 
-function registrationInput(release: Awaited<ReturnType<typeof createRelease>>): RegisterReviewedAstroArtifactInput {
-  const artifact = astroArtifact();
+function registrationInput(release: Awaited<ReturnType<typeof createRelease>>, marker = "reviewed"): RegisterReviewedAstroArtifactInput {
+  const artifact = astroArtifact(marker);
   return Object.freeze({
     idempotencyKey: `reviewed-register-${randomUUID()}`,
     releaseId: release.id,
@@ -319,12 +319,12 @@ function registrationInput(release: Awaited<ReturnType<typeof createRelease>>): 
     expectedAstroArtifactHash: artifact.hash,
     sourceCommitSha: "c".repeat(40),
     artifact,
-    output: Object.freeze({ "index.html": html() })
+    output: Object.freeze({ "index.html": html(marker) })
   });
 }
 
-function astroArtifact(): AstroArtifact {
-  const source = Object.freeze({ "src/pages/index.astro": "<main>reviewed</main>" });
+function astroArtifact(marker = "reviewed"): AstroArtifact {
+  const source = Object.freeze({ "src/pages/index.astro": `<main>${marker}</main>` });
   const manifest = Object.freeze({
     schema: "io.navocms.astro-artifact.v1" as const,
     format: "navocms-astro-source-bundle/v1" as const,
@@ -337,8 +337,8 @@ function astroArtifact(): AstroArtifact {
   return Object.freeze({ format: "navocms-astro-source-bundle/v1" as const, manifest, files, hash: `sha256:${sha256(canonical({ manifest, files }))}` });
 }
 
-function html(): string {
-  return '<!doctype html><html><head><meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1"><script src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"></script></head><body>reviewed</body></html>';
+function html(marker = "reviewed"): string {
+  return `<!doctype html><html><head><meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1"><script src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"></script></head><body>${marker}</body></html>`;
 }
 
 function authority() { return reviewedAstroArtifactAuthority(requestContext()); }

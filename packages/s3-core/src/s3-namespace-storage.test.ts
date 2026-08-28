@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createFetchS3Transport, NAVOCMS_ARTIFACTS_NAMESPACE, NAVOCMS_MEDIA_NAMESPACE, reviewedS3Namespace, S3NamespaceStorage, sha256, type S3Transport, type S3TransportResponse } from "./s3-namespace-storage.js";
+import { createFetchS3Transport, NAVOCMS_ARTIFACTS_NAMESPACE, NAVOCMS_MEDIA_NAMESPACE, S3NamespaceStorage, sha256, type S3Transport, type S3TransportResponse } from "./s3-namespace-storage.js";
 
 const namespace = NAVOCMS_MEDIA_NAMESPACE;
 const logicalKey = "tenants/11111111-1111-4111-8111-111111111111/sites/22222222-2222-4222-8222-222222222222/originals/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -10,8 +10,6 @@ describe("S3 namespace storage", () => {
   it("exposes only reviewed media and artifact children below the shared root", () => {
     expect(namespace).toBe("navocms/v1/media/");
     expect(NAVOCMS_ARTIFACTS_NAMESPACE).toBe("navocms/v1/artifacts/");
-    expect(reviewedS3Namespace("artifacts")).toBe(NAVOCMS_ARTIFACTS_NAMESPACE);
-    expect(() => reviewedS3Namespace("other" as never)).toThrow("NAMESPACE");
     expect(() => new S3NamespaceStorage({ bucket: "navocms-media", namespace: "navocms/v1/other/" as never, transport: new RecordingTransport() })).toThrow("NAMESPACE");
   });
 

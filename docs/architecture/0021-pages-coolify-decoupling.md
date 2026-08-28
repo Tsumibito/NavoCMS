@@ -38,6 +38,9 @@ runtime health, readiness, OAuth, and authenticated API checks documented in
 the deployment runbook. It has its own approval and rollback evidence; a
 content release neither triggers nor compensates for it.
 
+The repository does not keep a second Coolify HTTP client for that manual
+operation. The deployment platform API or dashboard is the operator boundary.
+
 ## Transition
 
 1. Inventory bindings and retained publications without changing either legacy

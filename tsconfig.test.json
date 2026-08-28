@@ -10,7 +10,6 @@
   "include": [
     "apps/**/*.test.ts",
     "packages/**/*.test.ts",
-    "packages/kernel/src/test-fixtures.ts",
     "plugins/**/*.test.ts",
     "vitest.config.ts"
   ]

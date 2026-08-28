@@ -9,9 +9,10 @@ resolver, and trusted builder directly. The embedded and staging paths no longer
 kernel `PluginHost` merely to register the provider capability, report host status, or dispose an
 empty activation scope.
 
-The public profile and plugin-manifest contracts remain unchanged. The generic kernel
-`PluginHost`, graph resolver, and capability registry remain available for independently deployed
-OSS plugins and future runtime composition.
+The public profile and plugin-manifest contracts remain unchanged. The unused generic kernel
+`PluginHost`, graph resolver, and capability registry were removed in the subsequent cleanup: a
+future OSS plugin host must be introduced with an actual runtime consumer rather than retained as
+speculative production code.
 
 `/readyz` reports database readiness and the selected provider's real dependencies. For staging,
 those dependencies are the reviewed Astro resolver and trusted builder; embedded readiness follows

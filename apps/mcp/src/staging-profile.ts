@@ -60,42 +60,6 @@ export function assertStagingReadiness(bindingValue: unknown, expected: StagingR
   return Object.freeze({ profileId: profile.metadata.name, profileDigest, bindingDigest: actualBindingDigest, tenantId: binding.tenantId, siteId: binding.siteId, allowedHostname: binding.cloudflare.allowedHostname });
 }
 
-/** The binding digest is checked before this derived manifest can be booted. */
-export function cloudflareStagingManifest(binding: CloudflareStagingBinding) {
-  const network = cloudflareStagingNetworkDestinations(binding);
-  return deepFreeze({
-    apiVersion: "navocms.io/v0alpha1" as const,
-    kind: "PluginManifest" as const,
-    metadata: {
-      id: CLOUDFLARE_STAGING_PLUGIN_ID,
-      version: "0.2.0",
-      displayName: "Cloudflare staging delivery",
-      description: "Reviewed-artifact-gated external Cloudflare Pages staging delivery provider"
-    },
-    spec: {
-      runtime: "kernel" as const,
-      provides: [{ name: "release.provider", version: 1 }],
-      requires: [],
-      permissions: {
-        data: {
-          read: ["environments", "release_candidates", "reviewed_astro_artifact_object_bindings", "workflow_runs", "workflow_checkpoints"],
-          write: ["workflow_runs", "workflow_checkpoints", "event_ledger", "domain_outbox"]
-        },
-        network,
-        scopes: ["content:publish"]
-      },
-      effects: [{ name: "release.publish", consequence: "G2" as const, idempotent: true }]
-    }
-  });
-}
-
-function cloudflareStagingNetworkDestinations(binding: CloudflareStagingBinding): readonly string[] {
-  return Object.freeze([...new Set([
-    "api.cloudflare.com",
-    `*.${binding.cloudflare.projectId}${binding.cloudflare.previewHostnameSuffix}`,
-    binding.cloudflare.allowedHostname
-  ])].sort());
-}
 export function stagingBindingDigest(binding: CloudflareStagingBinding) { return `sha256:${createHash("sha256").update(canonical(binding)).digest("hex")}`; }
 export function stagingProfileDigest(profile: SiteProfile = CLOUDFLARE_STAGING_PROFILE) { return `sha256:${createHash("sha256").update(JSON.stringify(profile)).digest("hex")}`; }
 function deepFreeze<T>(value: T): T { if (value && typeof value === "object") { Object.freeze(value); for (const child of Object.values(value as object)) deepFreeze(child); } return value; }

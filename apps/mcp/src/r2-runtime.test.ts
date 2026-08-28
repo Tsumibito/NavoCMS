@@ -4,7 +4,6 @@ import {
   assertR2RuntimeActivationGuard,
   createDotenvxR2SecretBroker,
   r2RuntimeBindingDigest,
-  safeR2RuntimeIdentifiers,
   selectR2Runtime
 } from "./r2-runtime.js";
 
@@ -46,13 +45,4 @@ describe("independent R2 runtime activation", () => {
     expect(() => selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding: colliding, expected: { ...expected, bindingDigest: r2RuntimeBindingDigest(colliding) }, secrets: createDotenvxR2SecretBroker({ DOTENVX_SECRET_R2_ACCESS_KEY: "access-key-test-value" }) })).toThrow("distinct");
   });
 
-  it("returns only safe readiness identifiers", () => {
-    const selected = selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding, expected, secrets: createDotenvxR2SecretBroker(environment) });
-    expect(selected).toBeDefined();
-    const safe = safeR2RuntimeIdentifiers(selected!);
-    expect(safe).toEqual({ provider: "r2", tenantId: binding.tenantId, siteId: binding.siteId, bucket: binding.bucket, namespace: "navocms/v1/", prefix: "navocms/v1/", bindingDigest: expected.bindingDigest });
-    expect(JSON.stringify(safe)).not.toContain(binding.endpoint);
-    expect(JSON.stringify(safe)).not.toContain(binding.accessKeySecretRef);
-    expect(JSON.stringify(safe)).not.toContain(binding.secretKeySecretRef);
-  });
 });

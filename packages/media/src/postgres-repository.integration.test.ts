@@ -7,8 +7,6 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import type { FinalizeUploadInput, GenerateMediaVariantInput, MediaScope, MediaVariantSummary, UploadIntentResult } from "./domain.js";
 import { PostgresMediaRepository } from "./postgres-repository.js";
-import { RemoteMediaIngestService, type RemoteFetchResponse, type RemoteFetchTransport } from "./remote-ingest.js";
-import { PostgresMediaUploadIntentSigner, S3CompatibleMediaStorage, type S3Transport } from "./s3-storage.js";
 import { LocalDeterministicMediaStorage, originalKey, type MediaStorage } from "./storage.js";
 
 const databaseUrl = process.env.NAVOCMS_INTEGRATION_DATABASE_URL;
@@ -47,55 +45,6 @@ integration("atomic media repository", () => {
     await expect(repository.listAssets(scope, 1, "invalid")).rejects.toThrow("CURSOR");
     const counts = await countsFor(intent.asset.id, [key, `${key}-finalize`]);
     expect(counts).toMatchObject({ assets: "1", originals: "1", finalized: "1", idempotency: "2", ledger: "3", outbox: "3" });
-  });
-
-  it("persists remote provenance through the existing intent/finalize Ledger and rejects remote drift", async () => {
-    const storage = new LocalDeterministicMediaStorage();
-    const repository = new PostgresMediaRepository(database!, storage);
-    const key = `media-remote-${randomUUID()}`;
-    const bytes = mediaBytes(key);
-    const responses = [remoteResponse(bytes), remoteResponse(bytes), remoteResponse(mediaBytes(`${key}-drift`))];
-    const transport: RemoteFetchTransport = { async get() {
-      const response = responses.shift(); if (!response) throw new Error("unexpected remote request"); return response;
-    } };
-    const remote = new RemoteMediaIngestService(repository, storage, {
-      resolver: { async lookup() { return [{ address: "8.8.8.8", family: 4 }]; } }, transport
-    });
-    const input = {
-      sourceUrl: "https://media.example/remote.png", idempotencyKey: `${key}-ingest`, receivedAt: new Date().toISOString(),
-      rights: { license: "test", restricted: false }
-    };
-    const first = await remote.ingestRemote(scope, input);
-    const replay = await remote.ingestRemote(scope, input);
-    expect(replay).toEqual(first);
-    expect(await repository.getAssetReview(scope, first.id, 10)).toMatchObject({
-      provenance: { kind: "remote-ingest", sourceUrl: input.sourceUrl, receivedBy: scope.principalId }, state: "verified"
-    });
-    await expect(remote.ingestRemote(scope, input)).rejects.toThrow("IDEMPOTENCY_KEY_REUSED");
-    expect(await countsFor(first.id, [input.idempotencyKey])).toMatchObject({ assets: "1", originals: "1", finalized: "1", idempotency: "2", ledger: "3", outbox: "3" });
-  });
-
-  it("issues direct-upload authority only for a current pending PostgreSQL intent in its site", async () => {
-    const storage = new S3CompatibleMediaStorage({
-      tenantId: scope.tenantId, siteId: scope.siteId, bucket: "navocms-media", transport: noTransport(),
-      directUploadSigning: { endpoint: "https://r2.example.test", region: "auto", accessKeyId: "AKIDEXAMPLE", secretAccessKey: "test-only" }
-    });
-    const signer = new PostgresMediaUploadIntentSigner(database!, storage);
-    const repository = new PostgresMediaRepository(database!, new LocalDeterministicMediaStorage());
-    const key = `media-presign-${randomUUID()}`;
-    const intent = uploadIntent(await repository.createUploadIntent(scope, createInput(key)));
-    await expect(signer.sign(scope, intent.intentId, 60)).resolves.toMatchObject({ key: intent.storageKey, method: "PUT" });
-    await expect(signer.sign({ ...scope, siteId: "22222222-2222-4222-8222-222222222222" }, intent.intentId, 60)).rejects.toThrow("INTENT");
-    // Marking the intent finalized is sufficient to verify signing authority;
-    // upload data itself is never passed through this issuer.
-    await database!.withScope(scope, (client) => client.query("UPDATE navocms.media_upload_intents SET finalized_at = now() WHERE id = $1", [intent.intentId]));
-    await expect(signer.sign(scope, intent.intentId, 60)).rejects.toThrow("INTENT");
-    const rejected = uploadIntent(await repository.createUploadIntent(scope, createInput(`${key}-rejected`)));
-    await repository.rejectAsset(scope, { assetId: rejected.asset.id, reason: "operator_rejected", idempotencyKey: `${key}-reject` });
-    await expect(signer.sign(scope, rejected.intentId, 60)).rejects.toThrow("INTENT");
-    const expired = uploadIntent(await repository.createUploadIntent(scope, createInput(`${key}-expired`)));
-    await database!.withScope(scope, (client) => client.query("UPDATE navocms.media_upload_intents SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second' WHERE id = $1", [expired.intentId]));
-    await expect(signer.sign(scope, expired.intentId, 60)).rejects.toThrow("INTENT");
   });
 
   it("rejects idempotency drift, expired intents, invalid finalized input, and a foreign site", async () => {
@@ -731,14 +680,6 @@ function mediaBytes(value: string, width = 2): Uint8Array {
   return bytes;
 }
 
-function remoteResponse(bytes: Uint8Array): RemoteFetchResponse {
-  const body = Object.freeze({
-    abort() { /* test transport has no socket */ },
-    async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> { yield bytes; }
-  });
-  return Object.freeze({ status: 200, headers: Object.freeze({ "content-type": "image/png", "content-length": String(bytes.byteLength) }), body, abort() { body.abort(); } });
-}
-
 async function countsFor(assetId: string, idempotencyKeys: readonly string[]) {
   return database!.withScope(scope, async (client) => {
     const result = await client.query<{ assets: string; originals: string; finalized: string; idempotency: string; ledger: string; outbox: string }>(
@@ -788,10 +729,6 @@ function mismatchingKeyStorage(storage: LocalDeterministicMediaStorage): MediaSt
     deleteRecoverable: storage.deleteRecoverable.bind(storage), restore: storage.restore.bind(storage),
     reclaim: storage.reclaim.bind(storage), inventory: storage.inventory.bind(storage)
   };
-}
-
-function noTransport(): S3Transport {
-  return { async request() { throw new Error("transport must not be called while presigning"); } };
 }
 
 function fakeStorage(overrides: Pick<MediaStorage, "head" | "read">): MediaStorage {

@@ -139,19 +139,6 @@ export function r2RuntimeExpectationFromEnvironment(environment: Readonly<Record
   return Object.freeze({ tenantId, siteId, bindingDigest });
 }
 
-/** Safe projection for `/readyz`; endpoint and secret references are deliberately absent. */
-export function safeR2RuntimeIdentifiers(selection: R2RuntimeSelectionResult): Readonly<{
-  provider: "r2";
-  tenantId: string;
-  siteId: string;
-  bucket: string;
-  namespace: typeof R2_PREFIX;
-  prefix: typeof R2_PREFIX;
-  bindingDigest: string;
-}> {
-  return Object.freeze({ provider: "r2", tenantId: selection.readiness.tenantId, siteId: selection.readiness.siteId, bucket: selection.readiness.bucket, namespace: R2_PREFIX, prefix: R2_PREFIX, bindingDigest: selection.readiness.bindingDigest });
-}
-
 function assertDistinctSecretReferences(binding: R2RuntimeBinding): void {
   const accessKey = dotenvxSecretEnvironmentKey(binding.accessKeySecretRef);
   const secretKey = dotenvxSecretEnvironmentKey(binding.secretKeySecretRef);

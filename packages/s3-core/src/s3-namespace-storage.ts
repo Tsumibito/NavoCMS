@@ -1,20 +1,12 @@
 import { createHash, createHmac } from "node:crypto";
 
 const MAX_INVENTORY = 100;
-const UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD";
 
 /** The only reviewed root for application-owned shared-bucket objects. */
 export const NAVOCMS_S3_NAMESPACE_ROOT = "navocms/v1/";
-export type ReviewedS3NamespaceChild = "media" | "artifacts";
-export type ReviewedS3Namespace = `${typeof NAVOCMS_S3_NAMESPACE_ROOT}${ReviewedS3NamespaceChild}/`;
+export type ReviewedS3Namespace = `${typeof NAVOCMS_S3_NAMESPACE_ROOT}${"media" | "artifacts"}/`;
 export const NAVOCMS_MEDIA_NAMESPACE: ReviewedS3Namespace = "navocms/v1/media/";
 export const NAVOCMS_ARTIFACTS_NAMESPACE: ReviewedS3Namespace = "navocms/v1/artifacts/";
-/** Select a reviewed child; callers never concatenate runtime namespace input. */
-export function reviewedS3Namespace(child: ReviewedS3NamespaceChild): ReviewedS3Namespace {
-  if (child === "media") return NAVOCMS_MEDIA_NAMESPACE;
-  if (child === "artifacts") return NAVOCMS_ARTIFACTS_NAMESPACE;
-  throw new Error("STORAGE_NAMESPACE_INVALID");
-}
 
 export interface S3TransportResponse {
   readonly status: number;
@@ -79,14 +71,6 @@ export interface S3ObjectMetadata {
 export interface S3InventoryPage {
   readonly objects: readonly Readonly<{ key: string; byteSize: number; sha256: string; mediaType: string }> [];
   readonly nextCursor?: string;
-}
-
-export interface S3PresigningOptions {
-  readonly endpoint: string;
-  readonly region?: string;
-  readonly accessKeyId: string;
-  readonly secretAccessKey: string;
-  readonly sessionToken?: string;
 }
 
 /**
@@ -177,11 +161,6 @@ export class S3NamespaceStorage {
     return Object.freeze({ objects: Object.freeze(objects), ...(truncated ? { nextCursor: objects.at(-1)!.key } : {}) });
   }
 
-  public presignPut(key: string, headers: Readonly<Record<string, string>>, ttl: number, signing: S3PresigningOptions, now: Date): string {
-    this.assertKey(key);
-    return presignPut(new URL(signing.endpoint), this.#bucket, this.physicalKey(key), headers, ttl, signing, now);
-  }
-
   private physicalKey(key: string): string { return `${this.#namespace}${key}`; }
   private physicalPrefix(prefix: string): string { return `${this.#namespace}${prefix}`; }
   private logicalKey(physicalKey: string): string {
@@ -250,12 +229,6 @@ function signHeaders(method: string, url: URL, original: Readonly<Record<string,
   const names = Object.keys(headers).sort(asciiCompare); const canonicalHeaders = names.map((name) => `${name}:${headers[name]!.trim().replace(/\s+/g, " ")}\n`).join(""); const signedHeaders = names.join(";"); const scope = `${date}/${region}/s3/aws4_request`;
   const canonical = `${method}\n${url.pathname}\n${url.search.slice(1)}\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`; const signature = signatureFor(hex(canonical), stamp, scope, credentials.secretAccessKey, date, region);
   return { ...headers, authorization: `AWS4-HMAC-SHA256 Credential=${credentials.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}` };
-}
-function presignPut(endpoint: URL, bucket: string, key: string, headers: Readonly<Record<string, string>>, ttl: number, signing: S3PresigningOptions, now: Date): string {
-  if (!isSafeEndpoint(endpoint) || !isCredentials(signing) || !isRegion(signing.region ?? "auto") || !Number.isSafeInteger(ttl) || ttl < 1 || ttl > 604800 || !Number.isFinite(now.getTime())) throw new Error("STORAGE_SIGNING_CONFIG_INVALID");
-  const region = signing.region ?? "auto"; const stamp = amzStamp(now); const date = stamp.slice(0, 8); const scope = `${date}/${region}/s3/aws4_request`; const hoisted = Object.entries(headers).filter(([name]) => name.toLowerCase().startsWith("x-amz-")); const headerNames = [...Object.keys(headers).filter((name) => !name.toLowerCase().startsWith("x-amz-")), "host"].sort(asciiCompare); const signedHeaders = headerNames.join(";");
-  const query: Record<string, string> = { "X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": `${signing.accessKeyId}/${scope}`, "X-Amz-Date": stamp, "X-Amz-Expires": String(ttl), "X-Amz-SignedHeaders": signedHeaders, ...Object.fromEntries(hoisted), ...(signing.sessionToken ? { "X-Amz-Security-Token": signing.sessionToken } : {}) };
-  const url = requestUrl(endpoint, bucket, key, query); const canonicalHeaders = headerNames.map((name) => `${name}:${name === "host" ? endpoint.host : headers[name]}\n`).join(""); const canonical = `PUT\n${url.pathname}\n${url.search.slice(1)}\n${canonicalHeaders}\n${signedHeaders}\n${UNSIGNED_PAYLOAD}`; query["X-Amz-Signature"] = signatureFor(hex(canonical), stamp, scope, signing.secretAccessKey, date, region); return requestUrl(endpoint, bucket, key, query).toString();
 }
 function amzStamp(now: Date): string { return now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z"); }
 function canonicalQuery(query: Readonly<Record<string, string>>): string { return Object.entries(query).sort(([left], [right]) => asciiCompare(left, right)).map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&"); }

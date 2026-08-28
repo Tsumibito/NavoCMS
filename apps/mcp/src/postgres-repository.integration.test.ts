@@ -207,7 +207,8 @@ integration("Neon production persistence", () => {
     })).rejects.toThrow("injected publish interruption");
     await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
       await client.query(
-        `UPDATE navocms.release_approvals SET expires_at = now() - interval '1 second'
+        `UPDATE navocms.release_approvals
+            SET approved_at = now() - interval '1 hour', expires_at = now() - interval '1 second'
           WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3`,
         [tenantId, siteId, release.releaseId]
       );

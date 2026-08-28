@@ -18,6 +18,8 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0011](0011-production-environment-topology.md) | Accepted | Persistent staging, scale-to-zero Neon branches, and separate release previews |
 | [0012](0012-provider-neutral-mcp-oauth.md) | Accepted | Provider-neutral MCP OAuth with deployment-bound tenant/site membership |
 | [0013](0013-media-persistence-boundary.md) | Accepted | Media domain facade with a constrained PostgreSQL transactional adapter |
+| [0014](0014-external-media-storage-boundary.md) | Superseded | External media storage and deferred direct-upload signing |
+| [0015](0015-safe-remote-media-ingest.md) | Superseded | Deferred safe remote media ingest |
 | [0016](0016-astro-renderer-artifact-boundary.md) | Proposed | Deterministic Astro source artifact and delivery-layout boundary |
 | [0017](0017-cloudflare-preview-delivery-provider.md) | Superseded | Immutable Cloudflare preview and exact-commit Coolify delivery boundary |
 | [0018](0018-trusted-astro-builder-registration.md) | Superseded | Trusted internal Astro build and durable reviewed-artifact registration |
@@ -26,6 +28,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0021](0021-pages-coolify-decoupling.md) | Proposed | Pages-only content publication and independent Coolify runtime releases |
 | [0022](0022-reviewed-astro-object-storage.md) | Proposed | Immutable object storage for reviewed Astro source and output |
 | [0023](0023-shared-s3-object-core.md) | Accepted | Shared S3/R2 core with reviewed physical namespaces |
+| [0024](0024-remove-dormant-runtime-surfaces.md) | Accepted | Remove dormant runtime surfaces until their first real caller |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

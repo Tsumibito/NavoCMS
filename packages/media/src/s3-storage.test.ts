@@ -1,19 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import type { PostgresDatabase, SqlClient } from "@navocms/persistence-postgres";
-
 import type { S3Transport, S3TransportResponse } from "@navocms/s3-core";
-import { PostgresMediaUploadIntentSigner, S3CompatibleMediaStorage } from "./s3-storage.js";
+import { S3CompatibleMediaStorage } from "./s3-storage.js";
 import { sha256 } from "./storage.js";
-import { MEDIA_LIMITS } from "./validation.js";
 
 const scope = { tenantId: "11111111-1111-4111-8111-111111111111", siteId: "22222222-2222-4222-8222-222222222222" };
 const now = new Date("2026-08-24T12:00:00.000Z");
 const pendingKey = `tenants/${scope.tenantId}/sites/${scope.siteId}/pending/33333333-3333-4333-8333-333333333333`;
 const originalOne = `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/${"a".repeat(64)}`;
 const originalTwo = `tenants/${scope.tenantId}/sites/${scope.siteId}/originals/${"b".repeat(64)}`;
-// Retained AWS SDK v3/Smithy SignatureV4 vector generated on 2026-08-24.
-const AWS_SDK_V3_SIGV4_VECTOR = "https://r2.example.test/navocms-media/navocms/v1/media/tenants/11111111-1111-4111-8111-111111111111/sites/22222222-2222-4222-8222-222222222222/pending/33333333-3333-4333-8333-333333333333?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIDEXAMPLE%2F20260824%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20260824T120000Z&X-Amz-Expires=120&x-amz-meta-expected-size=42&x-amz-meta-media-type=image%2Fpng&x-amz-meta-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&X-Amz-Signature=dea43c5de4d6481316d61fd586f8f08ed87dbd97eda9f2bf51428a47e12e1ec0&X-Amz-SignedHeaders=content-type%3Bhost%3Bif-none-match%3Bx-navocms-upload-intent%3Bx-navocms-upload-ttl";
 
 describe("S3-compatible media storage contract", () => {
   it("uses conditional immutable PUT and rejects a foreign key before transport", async () => {
@@ -98,24 +93,6 @@ describe("S3-compatible media storage contract", () => {
     await expect(storage.inventory(prefix, 1, pendingKey)).rejects.toThrow("CURSOR");
   });
 
-  it("signs immutable browser-safe upload headers only through the PostgreSQL issuer", async () => {
-    const storage = adapter(new RecordingTransport(), signing());
-    const issuer = new PostgresMediaUploadIntentSigner(databaseFor(binding()), storage);
-    const upload = await issuer.sign(fullScope(), binding().intentId, 600);
-    expect(upload).toMatchObject({ key: pendingKey, method: "PUT", headers: { "if-none-match": "*", "content-type": "image/png" } });
-    expect(upload.headers).not.toHaveProperty("content-length");
-    expect(upload.headers).not.toHaveProperty("x-amz-meta-expected-size");
-    expect(new URL(upload.url).searchParams.get("X-Amz-Expires")).toBe("120");
-    expect(new URL(upload.url).searchParams.get("x-amz-meta-expected-size")).toBe("42");
-    expect(new URL(upload.url).searchParams.get("X-Amz-Content-Sha256")).toBe("UNSIGNED-PAYLOAD");
-    expect(new URL(upload.url).searchParams.get("X-Amz-SignedHeaders")).toBe("content-type;host;if-none-match;x-navocms-upload-intent;x-navocms-upload-ttl");
-    expect(canonicalUrl(upload.url)).toBe(AWS_SDK_V3_SIGV4_VECTOR);
-    expect(() => storage.signDirectUploadWithCapability(binding(), 60, Symbol("forged"))).toThrow("FORBIDDEN");
-    await expect(new PostgresMediaUploadIntentSigner(databaseFor({ ...binding(), expiresAt: "not-a-date" }), storage).sign(fullScope(), binding().intentId, 60)).rejects.toThrow("INTENT");
-    await expect(new PostgresMediaUploadIntentSigner(databaseFor({ ...binding(), expectedSize: MEDIA_LIMITS.maxBytes + 1 }), storage).sign(fullScope(), binding().intentId, 60)).rejects.toThrow("INTENT");
-    await expect(issuer.sign(fullScope(), binding().intentId, 901)).rejects.toThrow("INTENT");
-  });
-
   it("rejects provider failures without provider headers, URLs, or credentials", async () => {
     const transport = new RecordingTransport(); const storage = adapter(transport);
     transport.responses.push(response(503, { "x-provider-secret": "must-not-leak" }));
@@ -128,18 +105,7 @@ class RecordingTransport implements S3Transport {
   readonly responses: S3TransportResponse[] = [];
   async request(input: Parameters<S3Transport["request"]>[0]): Promise<S3TransportResponse> { this.requests.push(input); return this.responses.shift() ?? response(200); }
 }
-function adapter(transport: S3Transport, directUploadSigning?: { endpoint: string; region: string; accessKeyId: string; secretAccessKey: string }) { return new S3CompatibleMediaStorage({ ...scope, bucket: "navocms-media", transport, clock: () => now, ...(directUploadSigning ? { directUploadSigning } : {}) }); }
-function signing() { return { endpoint: "https://r2.example.test", region: "auto", accessKeyId: "AKIDEXAMPLE", secretAccessKey: "secret-for-test-only" }; }
-function binding() { return { intentId: pendingKey.split("/").at(-1)!, storageKey: pendingKey, expectedSha256: "a".repeat(64), expectedSize: 42, expectedMediaType: "image/png" as const, expiresAt: "2026-08-24T12:02:00.000Z" }; }
-function fullScope() { return { ...scope, principalId: "44444444-4444-4444-8444-444444444444", principalKind: "human" as const }; }
-function databaseFor(intent: ReturnType<typeof binding>): PostgresDatabase {
-  return {
-    async withScope<T>(_scope: unknown, operation: (client: SqlClient) => Promise<T>): Promise<T> {
-      return operation({ query: async () => ({ rows: [{ id: intent.intentId, storage_key: intent.storageKey, expected_sha256: intent.expectedSha256, expected_size: intent.expectedSize, expected_media_type: intent.expectedMediaType, expires_at: intent.expiresAt, finalized_at: null }] }) } as SqlClient);
-    }
-  } as unknown as PostgresDatabase;
-}
-function canonicalUrl(value: string): string { const url = new URL(value); const query = [...url.searchParams.entries()].sort(([left], [right]) => left.localeCompare(right)); url.search = new URLSearchParams(query).toString(); return url.toString(); }
+function adapter(transport: S3Transport) { return new S3CompatibleMediaStorage({ ...scope, bucket: "navocms-media", transport, clock: () => now }); }
 function physical(key: string): string { return `navocms/v1/media/${key}`; }
 function recoveryKey(key: string): string { const [prefix] = key.split("/originals/"); return `${prefix}/__recoverable/${Buffer.from(key).toString("base64url")}`; }
 function bytes(value: string): Uint8Array { return new TextEncoder().encode(value); }

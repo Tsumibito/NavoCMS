@@ -178,7 +178,7 @@ export class PostgresReviewedAstroArtifactStore implements ReviewedAstroArtifact
            tenant_id, site_id, environment_id, environment_key, release_id, release_hash,
            artifact_hash, astro_artifact_hash, source_commit_sha, source_object_key, source_object_sha256,
            source_object_bytes, output_object_key, output_object_sha256, output_object_bytes, state, evidence_hash
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT DO NOTHING`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT DO NOTHING`,
         [this.#context.site.tenantId, this.#context.site.siteId, binding.environment_id, this.#environmentKey,
           input.releaseId, input.releaseHash, input.releaseArtifactHash, input.expectedAstroArtifactHash,
           input.sourceCommitSha, candidate.sourceObjectKey, candidate.sourceObjectSha256, candidate.sourceObjectBytes,

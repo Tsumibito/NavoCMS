@@ -2,7 +2,7 @@ import { sha256, type ReleaseArtifact } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, siteRoleAuthority } from "@navocms/security";
 import { describe, expect, it } from "vitest";
 
-import { assertCloudflareStagingBinding, assertStagingReadiness, cloudflareStagingManifest, CLOUDFLARE_STAGING_PROFILE, dryRunCloudflareStaging, stagingBindingDigest } from "./staging-profile.js";
+import { assertCloudflareStagingBinding, assertStagingReadiness, CLOUDFLARE_STAGING_PROFILE, dryRunCloudflareStaging, stagingBindingDigest } from "./staging-profile.js";
 import type { McpRequestContext } from "./model.js";
 import { EMBEDDED_PRODUCTION_PROFILE } from "./production-profile.js";
 
@@ -16,32 +16,17 @@ const releaseHash = "a".repeat(64); const artifact: ReleaseArtifact = Object.fre
 describe("Cloudflare staging activation boundary", () => {
   it("pins the reviewed external staging capability and never alters production", () => {
     const readiness = assertStagingReadiness(binding, expectation());
-    const manifest = cloudflareStagingManifest(binding);
     expect(readiness).toMatchObject({ profileId: "cloudflare-staging", bindingDigest: stagingBindingDigest(binding) });
     expect(CLOUDFLARE_STAGING_PROFILE).toMatchObject({ metadata: { version: "0.2.0" }, spec: { plugins: [{ id: "navocms.release.cloudflare-staging", version: "0.2.0" }] } });
-    expect(manifest).toMatchObject({ metadata: { version: "0.2.0", description: expect.stringContaining("external") } });
-    expect(manifest.spec.permissions).toEqual({
-      data: {
-        read: ["environments", "release_candidates", "reviewed_astro_artifact_object_bindings", "workflow_runs", "workflow_checkpoints"],
-        write: ["workflow_runs", "workflow_checkpoints", "event_ledger", "domain_outbox"]
-      },
-      network: ["*.staging-pages.pages.dev", "api.cloudflare.com", "staging.example.test"],
-      scopes: ["content:publish"]
-    });
-    expect(manifest.spec.permissions.network).not.toContain("*");
-    expect(manifest.spec.provides).toEqual([{ name: "release.provider", version: 1 }]);
     expect(EMBEDDED_PRODUCTION_PROFILE.spec).toMatchObject({ environment: "production", bindings: [{ provider: "navocms.release.embedded" }] });
   });
 
-  it("derives every dynamic network destination from the reviewed binding digest", () => {
+  it("binds every dynamic provider destination into the reviewed digest", () => {
     const changed = {
       ...binding,
       cloudflare: { ...binding.cloudflare, allowedHostname: "other-staging.example.test" }
     };
     expect(stagingBindingDigest(changed)).not.toBe(stagingBindingDigest(binding));
-    expect(cloudflareStagingManifest(changed).spec.permissions.network).toEqual([
-      "*.staging-pages.pages.dev", "api.cloudflare.com", "other-staging.example.test"
-    ]);
   });
 
   it("rejects production bindings and secret values before any resolver call", async () => {

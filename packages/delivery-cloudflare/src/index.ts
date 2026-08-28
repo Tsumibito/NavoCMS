@@ -1,8 +1,5 @@
 import {
-  DomainEventFactory,
   sha256,
-  type EventFactoryContext,
-  type EventStore,
   type ReleaseArtifact,
   type ReleaseProvider,
   type ReleaseProviderPublication,
@@ -15,8 +12,6 @@ import {
 } from "@navocms/design-astro";
 
 export * from "./cloudflare-pages-http.js";
-// Coolify HTTP remains an operator/runtime utility. It is intentionally not a
-// ReleaseProvider dependency and is not re-exported from this content package.
 
 /** Bounds remote provider input and operational telemetry; no credential is ever accepted here. */
 export const CLOUDFLARE_DELIVERY_LIMITS = Object.freeze({
@@ -312,50 +307,6 @@ export class InMemoryDeliveryPhaseStore implements DeliveryPhaseStore {
     this.#entries.set(key, Object.freeze({ ...current, notAppliedAttempts: Object.freeze([...current.notAppliedAttempts, 1 as const]) }));
   }
   public async attempt(input: Readonly<{ releaseId: string; referenceHash: string; phase: string }>): Promise<1 | 2> { return this.#entries.get(phaseKey(input))?.attempt ?? 1; }
-}
-
-export class InMemoryDeliveryTelemetry implements DeliveryTelemetry {
-  readonly records: DeliveryTelemetryRecord[] = [];
-
-  public async record(record: DeliveryTelemetryRecord): Promise<void> {
-    this.records.push(Object.freeze({ ...record }));
-  }
-}
-
-/** Optional bridge to the existing Event Ledger; it does not introduce a telemetry database. */
-export class EventLedgerDeliveryTelemetry implements DeliveryTelemetry {
-  readonly #events: EventStore;
-  readonly #factory: DomainEventFactory;
-
-  public constructor(events: EventStore, context: Readonly<{
-    source: string;
-    tenantId: string;
-    siteId: string;
-    correlationId: string;
-    actor: EventFactoryContext["actor"];
-  }>) {
-    this.#events = events;
-    this.#factory = new DomainEventFactory(context);
-  }
-
-  public async record(record: DeliveryTelemetryRecord): Promise<void> {
-    await this.#events.append(this.#factory.create({
-      type: "io.navocms.delivery.provider.attempt.v1",
-      subject: record.referenceHash,
-      consequence: "G0",
-      data: Object.freeze({
-        provider: record.provider,
-        operation: record.operation,
-        outcome: record.outcome,
-        attempt: record.attempt,
-        releaseHash: record.releaseHash,
-        artifactHash: record.artifactHash,
-        referenceHash: record.referenceHash,
-        ...(record.httpStatus !== undefined ? { httpStatus: record.httpStatus } : {}),
-        ...(record.errorCode ? { errorCode: record.errorCode } : {})
-      })
-    }));
-  }
 }
 
 export interface CloudflarePagesReleaseProviderOptions {
