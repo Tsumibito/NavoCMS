@@ -2,3 +2,18 @@ packages:
   - apps/*
   - packages/*
   - plugins/*
+
+# Delay newly published packages long enough for ecosystem detection and
+# reject unreviewed exotic transitive sources or trust-policy downgrades.
+minimumReleaseAge: 10080
+# This exact lockfile version was integrity-verified while still inside the
+# seven-day window. Future jose versions remain subject to the age gate.
+minimumReleaseAgeExclude:
+  - jose@6.2.10
+trustPolicy: no-downgrade
+# @astrojs/check@0.9.10 pins this integrity-verified release, which predates
+# consistent npm provenance. Keep the exception exact and remove it with that
+# toolchain dependency.
+trustPolicyExclude:
+  - chokidar@4.0.3
+blockExoticSubdeps: true

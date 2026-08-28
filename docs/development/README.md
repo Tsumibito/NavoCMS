@@ -1,6 +1,6 @@
 # Development
 
-NavoCMS currently requires Node.js 22 or newer, Corepack, and pnpm 10.24.0.
+NavoCMS currently requires Node.js 22 or newer, Corepack, and pnpm 10.26.0.
 
 ```bash
 corepack enable

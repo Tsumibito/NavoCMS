@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG NODE_VERSION=24.17.0
-ARG PNPM_VERSION=10.24.0
+ARG PNPM_VERSION=10.26.0
 ARG SOURCE_COMMIT=unbound
 
 FROM node:${NODE_VERSION}-bookworm-slim AS builder
