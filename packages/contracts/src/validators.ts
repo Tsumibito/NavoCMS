@@ -6,6 +6,7 @@ import type { FormatsPlugin } from "ajv-formats";
 
 import type {
   ContentTypeDefinition,
+  CompatibleCloudflareStagingBinding,
   CloudflareStagingBinding,
   DesignOverrideDefinition,
   DesignSystemDefinition,
@@ -25,17 +26,23 @@ const schemaFiles = {
   mediaAsset: "media-asset.schema.json",
   plugin: "plugin-manifest.schema.json",
   profile: "site-profile.schema.json",
-  cloudflareStagingBinding: "cloudflare-staging-binding-v2.schema.json"
+  cloudflareStagingBinding: "cloudflare-staging-binding-v3.schema.json",
+  cloudflareStagingBindingV1: "cloudflare-staging-binding.schema.json",
+  cloudflareStagingBindingV2: "cloudflare-staging-binding-v2.schema.json"
 } as const;
 
 /** Exact, versioned parser shared by every staging activation boundary. */
 export function parseCloudflareStagingBinding(value: unknown): CloudflareStagingBinding {
   return contracts.cloudflareStagingBinding.parse(value);
 }
+/** Validates legacy v1/v2 bindings for migration diagnostics; they never activate Pages delivery. */
+export function parseCompatibleCloudflareStagingBinding(value: unknown): CompatibleCloudflareStagingBinding {
+  const schema = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>).schema : undefined;
+  if (schema === "io.navocms.cloudflare-staging-binding.v1") return contracts.cloudflareStagingBindingV1.parse(value);
+  if (schema === "io.navocms.cloudflare-staging-binding.v2") return contracts.cloudflareStagingBindingV2.parse(value);
+  return parseCloudflareStagingBinding(value);
+}
 const MAX_VALIDATION_ISSUES = 20;
-// Must stay congruent with the provider transport: Coolify's Cloud application
-// identifiers are opaque safe tokens, not necessarily RFC UUIDs.
-const COOLIFY_APPLICATION_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 
 function readSchema(filename: string): object {
   const packagedUrl = new URL(`./schemas/${filename}`, import.meta.url);
@@ -238,14 +245,7 @@ function mediaAssetSemantics(asset: MediaAsset): string[] {
 
 function cloudflareStagingBindingSemantics(binding: CloudflareStagingBinding): string[] {
   const issues: string[] = [];
-  if (!COOLIFY_APPLICATION_IDENTIFIER.test(binding.coolify.applicationUuid)) {
-    issues.push("Coolify application identifier must be a bounded provider-native identifier");
-  }
   if (binding.cloudflare.productionBranch === binding.cloudflare.previewBranch) issues.push("production and preview branches must differ");
-  try {
-    const endpoint = new URL(binding.coolify.baseUrl);
-    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) issues.push("Coolify endpoint must be a credential-free HTTPS origin");
-  } catch { issues.push("Coolify endpoint must be a credential-free HTTPS origin"); }
   return issues;
 }
 
@@ -290,5 +290,7 @@ export const contracts = {
     ajv.compile<SiteProfile>(readSchema(schemaFiles.profile)),
     profileSemantics
   ),
-  cloudflareStagingBinding: new ContractValidator<CloudflareStagingBinding>("Cloudflare staging binding", ajv.compile<CloudflareStagingBinding>(readSchema(schemaFiles.cloudflareStagingBinding)), cloudflareStagingBindingSemantics)
+  cloudflareStagingBinding: new ContractValidator<CloudflareStagingBinding>("Cloudflare staging binding", ajv.compile<CloudflareStagingBinding>(readSchema(schemaFiles.cloudflareStagingBinding)), cloudflareStagingBindingSemantics),
+  cloudflareStagingBindingV1: new ContractValidator<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v1" }>>("legacy Cloudflare staging binding v1", ajv.compile<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v1" }>>(readSchema(schemaFiles.cloudflareStagingBindingV1))),
+  cloudflareStagingBindingV2: new ContractValidator<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>("legacy Cloudflare staging binding v2", ajv.compile<Extract<CompatibleCloudflareStagingBinding, { schema: "io.navocms.cloudflare-staging-binding.v2" }>>(readSchema(schemaFiles.cloudflareStagingBindingV2)))
 } as const;

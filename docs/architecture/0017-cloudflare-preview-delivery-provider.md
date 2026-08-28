@@ -1,6 +1,6 @@
 # ADR 0017 — Cloudflare preview delivery provider
 
-**Status:** Proposed
+**Status:** Superseded by ADR 0021
 
 **Date:** 2026-08-25
 

@@ -1,8 +1,41 @@
-import {
-  CloudflareDeliveryError,
-  type CoolifyCommitTransport,
-  type CoolifyPromotion
-} from "./index.js";
+import { CloudflareDeliveryError } from "./index.js";
+
+export interface CoolifyPromotion {
+  readonly id: string;
+  readonly applicationKey: string;
+  readonly sourceCommitSha: string;
+  readonly referenceHash: string;
+  readonly status: "queued" | "running" | "finished" | "failed";
+}
+
+export interface CoolifyCommitTransport {
+  findPromotion(input: Readonly<{
+    applicationKey: string;
+    sourceCommitSha: string;
+    referenceHash: string;
+  }>): Promise<CoolifyPromotion | undefined>;
+  promoteCommit(input: Readonly<{
+    applicationKey: string;
+    sourceCommitSha: string;
+    referenceHash: string;
+    operationKey: string;
+  }>): Promise<CoolifyPromotion>;
+  retryPromotion(input: Readonly<{
+    applicationKey: string;
+    sourceCommitSha: string;
+    referenceHash: string;
+    operationKey: string;
+  }>): Promise<CoolifyPromotion>;
+  inspectPromotion(input: Readonly<{ applicationKey: string; promotionId: string; referenceHash: string }>): Promise<CoolifyPromotion | undefined>;
+  rollback(input: Readonly<{
+    applicationKey: string;
+    currentPromotionId: string;
+    targetPromotionId: string;
+    targetCommitSha: string;
+    referenceHash: string;
+    operationKey: string;
+  }>): Promise<CoolifyPromotion>;
+}
 
 export interface FetchCoolifyCommitTransportOptions {
   readonly applicationKey: string;
@@ -14,8 +47,8 @@ export interface FetchCoolifyCommitTransportOptions {
 }
 
 /**
- * Coolify API adapter for an exact commit promotion. Coolify is intentionally not asked to rebuild
- * arbitrary branch heads: every update writes the full commit from the artifact reference first.
+ * Operator/runtime adapter for an exact commit promotion. It is not part of
+ * the content ReleaseProvider or a Cloudflare staging binding.
  */
 export class FetchCoolifyCommitTransport implements CoolifyCommitTransport {
   readonly #applicationKey: string;

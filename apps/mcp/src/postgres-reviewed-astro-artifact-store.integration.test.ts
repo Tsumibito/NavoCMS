@@ -36,10 +36,9 @@ const serviceRepositoryContext = Object.freeze({
   principalId: servicePrincipalId
 });
 const binding = Object.freeze({
-  schema: "io.navocms.cloudflare-staging-binding.v2" as const,
+  schema: "io.navocms.cloudflare-staging-binding.v3" as const,
   tenantId, siteId, environment: "staging" as const,
-  cloudflare: { accountId: "test-account", projectId: "test-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" },
-  coolify: { baseUrl: "https://coolify.example.test", applicationUuid: "33333333-3333-4333-8333-333333333333", tokenSecretRef: "secret:delivery/coolify-token" }
+  cloudflare: { accountId: "test-account", projectId: "test-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" }
 });
 
 afterAll(async () => { await database?.close(); await adminDatabase?.close(); });
@@ -61,7 +60,7 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
       reference: { releaseHash: release.releaseHash, releaseArtifactHash: release.artifact.hash }
     });
     const dryRun = await dryRunCloudflareStaging({ context: requestContext(), binding, resolver, release: { releaseId: release.id, releaseHash: release.releaseHash, artifact: release.artifact } });
-    expect(dryRun).toEqual({ referenceHash: expect.any(String), cloudflareProjectId: "test-pages", coolifyApplicationUuid: binding.coolify.applicationUuid });
+    expect(dryRun).toEqual({ referenceHash: expect.any(String), cloudflareProjectId: "test-pages" });
 
     await expect(store.register({ ...input, output: { ...input.output, "assets/drift.txt": "different" } }, authority())).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
     await expect(store.register({ ...input, idempotencyKey: `reviewed-second-${randomUUID()}`, output: { ...input.output, "assets/drift.txt": "different" } }, authority())).rejects.toMatchObject({ code: "REVIEWED_ASTRO_ARTIFACT_DRIFT" });

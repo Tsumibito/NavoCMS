@@ -7,6 +7,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./operator-coolify": {
+      "types": "./dist/coolify-http.d.ts",
+      "default": "./dist/coolify-http.js"
     }
   },
   "files": ["dist"],

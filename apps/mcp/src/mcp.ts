@@ -18,11 +18,6 @@ import type { McpRequestContext } from "./model.js";
 import { McpMediaService } from "./media-service.js";
 import { McpEditingService } from "./service.js";
 
-export interface DeliveryPhaseRecovery {
-  notApplied(context: McpRequestContext, input: Readonly<{ releaseId: string; referenceHash: string; phase: "publish.coolify" | "rollback.coolify"; evidenceHash: string; observedAt: string }>): Promise<void>;
-  resolve(context: McpRequestContext, input: Readonly<{ releaseId: string; referenceHash: string; phase: "publish.coolify" | "rollback.coolify"; externalId: string; evidenceHash: string; observedAt: string }>): Promise<void>;
-}
-
 const WIDGET_URI = "ui://navocms/editorial-review-v1.html";
 const SITE_RESOURCE_URI = "navocms://site/current/profile";
 const adjacentWidget = new URL("./widget.html", import.meta.url);
@@ -38,7 +33,7 @@ const operationSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("remove"), nodeId: z.string().min(1) })
 ]);
 
-export function createMcpServer(service: McpEditingService, context: McpRequestContext, media?: McpMediaService, deliveryRecovery?: DeliveryPhaseRecovery): McpServer {
+export function createMcpServer(service: McpEditingService, context: McpRequestContext, media?: McpMediaService): McpServer {
   const server = new McpServer({ name: "NavoCMS", version: "0.1.0" });
   const can = (permission: Permission) => effectivePermissions(context.authorization.layers).includes(permission)
     && (!context.authorization.expiresAt || new Date(context.authorization.expiresAt).getTime() > Date.now());
@@ -180,34 +175,6 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
       openWorldHint: false
     }
   }, safeTool(async (input) => result("Release rolled back to the previous verified publication", await service.rollbackRelease(context, input))));
-
-  if (canPublish && context.authorization.principal.kind === "human" && deliveryRecovery) {
-    const recoveryInput = {
-      releaseId: z.string().uuid(),
-      referenceHash: z.string().regex(/^[a-f0-9]{64}$/),
-      phase: z.enum(["publish.coolify", "rollback.coolify"]),
-      evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
-      observedAt: z.string().datetime()
-    };
-    server.registerTool("delivery_phase_not_applied", {
-      title: "Record a proven non-applied Coolify phase",
-      description: "Record independently collected evidence that an uncertain Coolify mutation did not apply. Human-only; permits at most one bounded retry.",
-      inputSchema: recoveryInput,
-      annotations: writeAnnotations()
-    }, safeTool(async (input) => {
-      await deliveryRecovery.notApplied(context, input);
-      return result("Non-applied provider phase recorded; one bounded retry may proceed", { recorded: true, phase: input.phase, referenceHash: input.referenceHash });
-    }));
-    server.registerTool("delivery_phase_resolve", {
-      title: "Record an applied Coolify phase candidate",
-      description: "Bind independently observed evidence and a deployment UUID to an uncertain Coolify mutation. Human-only; reconcile still verifies it against the provider.",
-      inputSchema: { ...recoveryInput, externalId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/) },
-      annotations: writeAnnotations()
-    }, safeTool(async (input) => {
-      await deliveryRecovery.resolve(context, input);
-      return result("Applied provider candidate recorded; reconcile must verify it", { recorded: true, phase: input.phase, referenceHash: input.referenceHash, externalId: input.externalId });
-    }));
-  }
 
   if (canMediaRead && media) registerMediaReadTools(server, media, context);
   if (canMediaWrite && media) registerMediaWriteTools(server, media, context);

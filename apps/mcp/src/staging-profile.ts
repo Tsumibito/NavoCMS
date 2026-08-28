@@ -8,7 +8,7 @@ import { parseCloudflareStagingBinding, type CloudflareStagingBinding, type Site
 import { McpEditingError } from "./errors.js";
 import type { McpRequestContext } from "./model.js";
 
-export const CLOUDFLARE_STAGING_BINDING_SCHEMA = "io.navocms.cloudflare-staging-binding.v2" as const;
+export const CLOUDFLARE_STAGING_BINDING_SCHEMA = "io.navocms.cloudflare-staging-binding.v3" as const;
 export const CLOUDFLARE_STAGING_PLUGIN_ID = "navocms.release.cloudflare-staging" as const;
 
 /** Non-secret deployment coordinates. Credential values remain operator-owned. */
@@ -35,7 +35,7 @@ export function assertCloudflareStagingBinding(value: unknown): asserts value is
 }
 
 /** A no-effect proof: validates human authority, exact release/artifact binding, and deployment coordinates. */
-export async function dryRunCloudflareStaging(input: Readonly<{ context: McpRequestContext; binding: unknown; resolver: ImmutableArtifactResolver; release: ReleaseProviderPublishInput }>): Promise<Readonly<{ referenceHash: string; cloudflareProjectId: string; coolifyApplicationUuid: string }>> {
+export async function dryRunCloudflareStaging(input: Readonly<{ context: McpRequestContext; binding: unknown; resolver: ImmutableArtifactResolver; release: ReleaseProviderPublishInput }>): Promise<Readonly<{ referenceHash: string; cloudflareProjectId: string }>> {
   requirePermission(input.context.authorization, "content:publish", { tenantId: input.context.authorization.tenantId, siteId: input.context.authorization.siteId });
   if (input.context.authorization.principal.kind !== "human") throw new McpEditingError("STAGING_HUMAN_REQUIRED", "Staging delivery dry run requires an authenticated WorkOS human");
   assertCloudflareStagingBinding(input.binding);
@@ -43,7 +43,7 @@ export async function dryRunCloudflareStaging(input: Readonly<{ context: McpRequ
   validateReleaseProviderInput(input.release);
   const deployable = await input.resolver.resolve({ releaseId: input.release.releaseId, releaseHash: input.release.releaseHash, releaseArtifact: input.release.artifact });
   verifyDeployableArtifact(deployable, input.release);
-  return Object.freeze({ referenceHash: immutableReferenceHash(deployable.reference), cloudflareProjectId: input.binding.cloudflare.projectId, coolifyApplicationUuid: input.binding.coolify.applicationUuid });
+  return Object.freeze({ referenceHash: immutableReferenceHash(deployable.reference), cloudflareProjectId: input.binding.cloudflare.projectId });
 }
 
 /** The profile pins the external staging capability; transports are composed separately and only in staging. */
@@ -68,7 +68,7 @@ export async function bootCloudflareStagingProfile(binding: unknown, expected: S
     pluginId: CLOUDFLARE_STAGING_PLUGIN_ID,
     health: async () => { try { assertStagingReadiness(parsedBinding, expected); return { ok: true, detail: `${readiness.profileId}:${readiness.bindingDigest}` }; } catch { return { ok: false, detail: "staging readiness pin mismatch" }; } },
     activate: async (context) => {
-      context.track(context.capabilities.registerDefinition({ name: "release.provider", version: 1, owner: CLOUDFLARE_STAGING_PLUGIN_ID, description: "Reviewed-artifact-gated Cloudflare/Coolify staging delivery provider" }));
+      context.track(context.capabilities.registerDefinition({ name: "release.provider", version: 1, owner: CLOUDFLARE_STAGING_PLUGIN_ID, description: "Reviewed-artifact-gated Cloudflare Pages staging delivery provider" }));
       context.track(context.capabilities.registerProvider({ name: "release.provider", version: 1, pluginId: CLOUDFLARE_STAGING_PLUGIN_ID, value: Object.freeze({ mode: "external-staging", resolver: "reviewed-astro-artifact.v1", bindingDigest: stagingBindingDigest(parsedBinding), permissions: manifest.spec.permissions }) }));
     }
   };
@@ -87,7 +87,7 @@ export function cloudflareStagingManifest(binding: CloudflareStagingBinding) {
       id: CLOUDFLARE_STAGING_PLUGIN_ID,
       version: "0.2.0",
       displayName: "Cloudflare staging delivery",
-      description: "Reviewed-artifact-gated external Cloudflare Pages and Coolify staging delivery provider"
+      description: "Reviewed-artifact-gated external Cloudflare Pages staging delivery provider"
     },
     spec: {
       runtime: "kernel" as const,
@@ -107,13 +107,10 @@ export function cloudflareStagingManifest(binding: CloudflareStagingBinding) {
 }
 
 function cloudflareStagingNetworkDestinations(binding: CloudflareStagingBinding): readonly string[] {
-  const coolify = new URL(binding.coolify.baseUrl);
-  const coolifyDestination = `${coolify.hostname}${coolify.port ? `:${coolify.port}` : ""}`;
   return Object.freeze([...new Set([
     "api.cloudflare.com",
     `*.${binding.cloudflare.projectId}${binding.cloudflare.previewHostnameSuffix}`,
-    binding.cloudflare.allowedHostname,
-    coolifyDestination
+    binding.cloudflare.allowedHostname
   ])].sort());
 }
 export function stagingBindingDigest(binding: CloudflareStagingBinding) { return `sha256:${createHash("sha256").update(canonical(binding)).digest("hex")}`; }

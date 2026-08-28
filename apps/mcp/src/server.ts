@@ -20,8 +20,7 @@ import { McpEditingService, type IdempotencyStore } from "./service.js";
 import { bootPinnedProductionPluginHost } from "./production-profile.js";
 import { bootCloudflareStagingProfile } from "./staging-profile.js";
 import { assertStagingActivationGuard, createDotenvxSecretBroker, safeStagingRuntimeIdentifiers, selectReleaseProvider, stagingBindingFromEnvironment, stagingExpectationFromEnvironment } from "./staging-runtime.js";
-import { deliveryPhaseAuthority, PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
-import type { DeliveryPhaseRecovery } from "./mcp.js";
+import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReviewedAstroArtifactStore } from "./postgres-reviewed-astro-artifact-store.js";
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
 import { composeCloudflareStagingReleaseProvider } from "./staging-composition.js";
@@ -79,7 +78,6 @@ const media = database ? new McpMediaService(new PostgresMediaRepository(databas
 let service: McpEditingService;
 let reviewedAstroResolver: ReviewedAstroArtifactResolver | undefined;
 let stagingOperations: StagingOperationalRuntime | undefined;
-let deliveryRecovery: DeliveryPhaseRecovery | undefined;
 if (database) {
   const deliveryRepositoryContext = {
     site: { ...deploymentScope, name: "staging-delivery", primaryLocale: "en", locales: ["en"] },
@@ -107,22 +105,6 @@ if (database) {
       toolchainDirectory: required("NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN"),
       readinessContext: deliveryRepositoryContext
     });
-    deliveryRecovery = Object.freeze({
-      async notApplied(context, input) {
-        const store = new PostgresDeliveryPhaseStore(database, {
-          site: { ...deploymentScope, name: "staging-delivery", primaryLocale: "en", locales: ["en"] },
-          principalId: context.authorization.principal.id
-        }, { authority: deliveryPhaseAuthority(context), events: new PostgresEventStore(database) });
-        await store.notApplied(input);
-      },
-      async resolve(context, input) {
-        const store = new PostgresDeliveryPhaseStore(database, {
-          site: { ...deploymentScope, name: "staging-delivery", primaryLocale: "en", locales: ["en"] },
-          principalId: context.authorization.principal.id
-        }, { authority: deliveryPhaseAuthority(context), events: new PostgresEventStore(database) });
-        await store.resolve(input);
-      }
-    } satisfies DeliveryPhaseRecovery);
   }
   reviewedAstroResolver = stagingComposition?.resolver;
   const releaseProvider = stagingComposition?.provider ?? new EmbeddedReleaseProvider();
@@ -176,7 +158,6 @@ const verifier = new OidcJwtVerifier({
 const server = createMcpHttpServer({
   service,
   ...(media ? { media } : {}),
-  ...(deliveryRecovery ? { deliveryRecovery } : {}),
   verifier,
   resource,
   authorizationServers: [issuer],

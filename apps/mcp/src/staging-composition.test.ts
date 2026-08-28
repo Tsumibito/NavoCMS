@@ -7,17 +7,13 @@ import { createDotenvxSecretBroker, selectReleaseProvider, type DotenvxSecretBro
 import { stagingBindingDigest } from "./staging-profile.js";
 
 const binding = Object.freeze({
-  schema: "io.navocms.cloudflare-staging-binding.v2" as const,
+  schema: "io.navocms.cloudflare-staging-binding.v3" as const,
   tenantId: "11111111-1111-4111-8111-111111111111",
   siteId: "22222222-2222-4222-8222-222222222222",
   environment: "staging" as const,
   cloudflare: {
     accountId: "account", projectId: "project", productionBranch: "staging", previewBranch: "preview",
     previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token"
-  },
-  coolify: {
-    baseUrl: "https://coolify.example.test", applicationUuid: "33333333-3333-4333-8333-333333333333",
-    tokenSecretRef: "secret:delivery/coolify-token"
   }
 });
 const expected = Object.freeze({ tenantId: binding.tenantId, siteId: binding.siteId, allowedHostname: binding.cloudflare.allowedHostname, bindingDigest: stagingBindingDigest(binding) });
@@ -32,8 +28,7 @@ describe("cloudflare-staging composition", () => {
     const selected = selectReleaseProvider({
       requested: "cloudflare-staging", environment: "staging", binding, expected,
       secrets: createDotenvxSecretBroker({
-        DOTENVX_SECRET_DELIVERY_CLOUDFLARE_TOKEN: "x".repeat(16),
-        DOTENVX_SECRET_DELIVERY_COOLIFY_TOKEN: "y".repeat(16)
+        DOTENVX_SECRET_DELIVERY_CLOUDFLARE_TOKEN: "x".repeat(16)
       })
     });
     if (selected.selection !== "cloudflare-staging") throw new Error("cloudflare staging was not selected");

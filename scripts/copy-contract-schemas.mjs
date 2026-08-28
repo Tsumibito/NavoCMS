@@ -11,7 +11,7 @@ const files = [
   "media-asset.schema.json",
   "plugin-manifest.schema.json",
   "site-profile.schema.json",
-  "cloudflare-staging-binding.schema.json", "cloudflare-staging-binding-v2.schema.json"
+  "cloudflare-staging-binding.schema.json", "cloudflare-staging-binding-v2.schema.json", "cloudflare-staging-binding-v3.schema.json"
 ];
 const destination = path.join(process.cwd(), "packages/contracts/dist/schemas");
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { FetchCoolifyCommitTransport } from "./index.js";
+import { FetchCoolifyCommitTransport } from "./coolify-http.js";
 
 const commit = "a".repeat(40);
 const referenceHash = "b".repeat(64);

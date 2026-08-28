@@ -7,10 +7,9 @@ import type { McpRequestContext } from "./model.js";
 import { EMBEDDED_PRODUCTION_PROFILE } from "./production-profile.js";
 
 const binding = Object.freeze({
-  schema: "io.navocms.cloudflare-staging-binding.v2" as const,
+  schema: "io.navocms.cloudflare-staging-binding.v3" as const,
   tenantId: "11111111-1111-4111-8111-111111111111", siteId: "22222222-2222-4222-8222-222222222222", environment: "staging" as const,
-  cloudflare: { accountId: "staging-account", projectId: "staging-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" },
-  coolify: { baseUrl: "https://coolify.staging.example.test", applicationUuid: "33333333-3333-4333-8333-333333333333", tokenSecretRef: "secret:delivery/coolify-token" }
+  cloudflare: { accountId: "staging-account", projectId: "staging-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" }
 });
 const releaseHash = "a".repeat(64); const artifact: ReleaseArtifact = Object.freeze({ mediaType: "text/html; charset=utf-8", body: "proof", hash: "b".repeat(64) });
 
@@ -26,7 +25,7 @@ describe("Cloudflare staging activation boundary", () => {
         read: ["environments", "release_candidates", "reviewed_astro_artifact_object_bindings", "workflow_runs", "workflow_checkpoints"],
         write: ["workflow_runs", "workflow_checkpoints", "event_ledger", "domain_outbox"]
       },
-      network: ["*.staging-pages.pages.dev", "api.cloudflare.com", "coolify.staging.example.test", "staging.example.test"],
+      network: ["*.staging-pages.pages.dev", "api.cloudflare.com", "staging.example.test"],
       scopes: ["content:publish"]
     });
     expect(manifest.spec.permissions.network).not.toContain("*");
@@ -42,12 +41,11 @@ describe("Cloudflare staging activation boundary", () => {
   it("derives every dynamic network destination from the reviewed binding digest", () => {
     const changed = {
       ...binding,
-      cloudflare: { ...binding.cloudflare, allowedHostname: "other-staging.example.test" },
-      coolify: { ...binding.coolify, baseUrl: "https://coolify.other.example.test:9443" }
+      cloudflare: { ...binding.cloudflare, allowedHostname: "other-staging.example.test" }
     };
     expect(stagingBindingDigest(changed)).not.toBe(stagingBindingDigest(binding));
     expect(cloudflareStagingManifest(changed).spec.permissions.network).toEqual([
-      "*.staging-pages.pages.dev", "api.cloudflare.com", "coolify.other.example.test:9443", "other-staging.example.test"
+      "*.staging-pages.pages.dev", "api.cloudflare.com", "other-staging.example.test"
     ]);
   });
 
@@ -61,15 +59,13 @@ describe("Cloudflare staging activation boundary", () => {
     for (const invalid of [
       { ...binding, unexpected: "plaintext-token" },
       { ...binding, cloudflare: { ...binding.cloudflare, unexpected: "plaintext-token" } },
-      { ...binding, coolify: { ...binding.coolify, unexpected: "plaintext-token" } },
-      { ...binding, coolify: { ...binding.coolify, baseUrl: `https://${"a".repeat(510)}.test` } }
+      { ...binding, coolify: { baseUrl: "https://coolify.example.test" } }
     ]) expect(() => assertCloudflareStagingBinding(invalid)).toThrow();
     expect(() => assertStagingReadiness(binding, { ...expectation(), tenantId: "44444444-4444-4444-8444-444444444444" })).toThrow("reviewed pin");
     expect(() => assertStagingReadiness(binding, { ...expectation(), bindingDigest: "sha256:wrong" })).toThrow("reviewed pin");
     expect(Object.isFrozen(CLOUDFLARE_STAGING_PROFILE.spec.urlPolicy)).toBe(true);
     expect(() => assertCloudflareStagingBinding({ ...binding, cloudflare: { ...binding.cloudflare, previewBranch: "staging" } })).toThrow();
-    expect(() => assertCloudflareStagingBinding({ ...binding, coolify: { ...binding.coolify, baseUrl: "https://user:pass@coolify.example.test" } })).toThrow();
-    expect(stagingBindingDigest(binding)).toBe(stagingBindingDigest({ coolify: binding.coolify, cloudflare: binding.cloudflare, environment: binding.environment, siteId: binding.siteId, tenantId: binding.tenantId, schema: binding.schema }));
+    expect(stagingBindingDigest(binding)).toBe(stagingBindingDigest({ cloudflare: binding.cloudflare, environment: binding.environment, siteId: binding.siteId, tenantId: binding.tenantId, schema: binding.schema }));
   });
 
   it("proves authorized resolver-to-artifact configuration without a transport effect", async () => {
@@ -79,7 +75,7 @@ describe("Cloudflare staging activation boundary", () => {
       const files = { "en/index.html": "<html>safe</html>" };
       return { files, reference: { schema: "io.navocms.cloudflare-artifact-reference.v1" as const, releaseHash, releaseArtifactHash: artifact.hash, astroArtifactHash: `sha256:${"c".repeat(64)}`, outputHash: sha256(JSON.stringify(files)), routeDigest: sha256('["en/index.html"]'), sourceCommitSha: "d".repeat(40), fileCount: 1, byteSize: 17, files: [{ path: "en/index.html", sha256: sha256(files["en/index.html"]), byteSize: 17 }] } };
     } } });
-    expect(resolves).toBe(1); expect(result).toMatchObject({ cloudflareProjectId: "staging-pages", coolifyApplicationUuid: binding.coolify.applicationUuid });
+    expect(resolves).toBe(1); expect(result).toMatchObject({ cloudflareProjectId: "staging-pages" });
   });
 
   it("uses the provider artifact verifier and rejects unsafe file/reference drift", async () => {
