@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertR2RuntimeActivationGuard,
-  createDotenvxR2SecretBroker,
   r2RuntimeBindingDigest,
   selectR2Runtime
 } from "./r2-runtime.js";
+import { createDotenvxSecretBroker } from "./secret-broker.js";
 
 const binding = Object.freeze({
   schema: "io.navocms.r2-runtime-binding.v1" as const,
@@ -39,10 +39,10 @@ describe("independent R2 runtime activation", () => {
   });
 
   it("fails closed for absent, short, and colliding dotenvx refs", () => {
-    expect(() => selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding, expected, secrets: createDotenvxR2SecretBroker({}) })).toThrow("unavailable");
-    expect(() => selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding, expected, secrets: createDotenvxR2SecretBroker({ ...environment, DOTENVX_SECRET_R2_ACCESS_KEY: "short" }) })).toThrow("unavailable");
+    expect(() => selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding, expected, secrets: createDotenvxSecretBroker({}) })).toThrow("unavailable");
+    expect(() => selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding, expected, secrets: createDotenvxSecretBroker({ ...environment, DOTENVX_SECRET_R2_ACCESS_KEY: "short" }) })).toThrow("unavailable");
     const colliding = { ...binding, secretKeySecretRef: "secret:r2.access_key" };
-    expect(() => selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding: colliding, expected: { ...expected, bindingDigest: r2RuntimeBindingDigest(colliding) }, secrets: createDotenvxR2SecretBroker({ DOTENVX_SECRET_R2_ACCESS_KEY: "access-key-test-value" }) })).toThrow("distinct");
+    expect(() => selectR2Runtime({ requested: "r2", runtimeMode: "production", environment: "staging", binding: colliding, expected: { ...expected, bindingDigest: r2RuntimeBindingDigest(colliding) }, secrets: createDotenvxSecretBroker({ DOTENVX_SECRET_R2_ACCESS_KEY: "access-key-test-value" }) })).toThrow("distinct");
   });
 
 });

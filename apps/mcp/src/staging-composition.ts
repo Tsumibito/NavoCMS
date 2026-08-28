@@ -7,7 +7,7 @@ import type { CloudflareStagingBinding } from "@navocms/contracts";
 
 import type { ReviewedAstroArtifactStore } from "./reviewed-astro-resolver.js";
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
-import type { DotenvxSecretBroker } from "./staging-runtime.js";
+import type { DotenvxSecretBroker } from "./secret-broker.js";
 
 /**
  * The only composition point for the activated staging provider. Resolver

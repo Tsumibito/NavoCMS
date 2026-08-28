@@ -98,23 +98,6 @@ export interface CloudflareStagingBinding {
   readonly cloudflare: { readonly accountId: string; readonly projectId: string; readonly productionBranch: string; readonly previewBranch: string; readonly previewHostnameSuffix: string; readonly allowedHostname: string; readonly tokenSecretRef: string };
 }
 
-/** Legacy, read-only staging bindings retained only so activation can give a precise migration error. */
-export interface LegacyCloudflareStagingBindingV1 {
-  readonly schema: "io.navocms.cloudflare-staging-binding.v1";
-  readonly tenantId: string; readonly siteId: string; readonly environment: "staging";
-  readonly cloudflare: { readonly accountId: string; readonly projectId: string; readonly productionBranch: string; readonly previewBranch: string; readonly allowedHostname: string; readonly tokenSecretRef: string };
-  readonly coolify: { readonly baseUrl: string; readonly applicationUuid: string; readonly tokenSecretRef: string };
-}
-
-export interface LegacyCloudflareStagingBindingV2 {
-  readonly schema: "io.navocms.cloudflare-staging-binding.v2";
-  readonly tenantId: string; readonly siteId: string; readonly environment: "staging";
-  readonly cloudflare: { readonly accountId: string; readonly projectId: string; readonly productionBranch: string; readonly previewBranch: string; readonly previewHostnameSuffix: string; readonly allowedHostname: string; readonly tokenSecretRef: string };
-  readonly coolify: { readonly baseUrl: string; readonly applicationUuid: string; readonly tokenSecretRef: string };
-}
-
-export type CompatibleCloudflareStagingBinding = CloudflareStagingBinding | LegacyCloudflareStagingBindingV1 | LegacyCloudflareStagingBindingV2;
-
 /** Reviewed, transport-neutral R2 coordinates. Secret refs are never values. */
 export interface R2RuntimeBinding {
   readonly schema: "io.navocms.r2-runtime-binding.v1";

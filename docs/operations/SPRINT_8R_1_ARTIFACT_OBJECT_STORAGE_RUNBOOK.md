@@ -1,13 +1,13 @@
 # Sprint 8R.1 — reviewed Astro artifact object-storage runbook
 
-**Status:** Review required / Pending CI
+**Status:** Active on staging; legacy read fallback retained
 
 ## Scope and non-goals
 
-This is an expand/backfill/cutover boundary. Migration `0012` adds only
+Migration `0012` adds only
 metadata bindings; `0010` and `0011` stay unchanged and no legacy JSON column
-is dropped. No R2 activation, credentials, provider API call, deployment,
-commit, or push is authorised by this sprint.
+is dropped. New reviewed source/output bundles use the scoped artifact object
+store; legacy JSON remains read-compatible until a separate retention decision.
 
 ## Required implementation shape
 
@@ -37,13 +37,9 @@ commit, or push is authorised by this sprint.
    must use a scoped checkpoint and the existing recoverable-GC pattern; never
    run a provider-wide delete or synchronous cleanup inside registration.
 
-## Gates before the next package
+## Remaining retention work
 
-1. Apply the ordered migration and prove registry checksum integrity.
-2. Run the PostgreSQL/RLS/failure suites and record the evidence.
-3. Reuse or extract the existing S3-compatible provider core for a real
-   adapter; review it separately. Inject credentials only through dotenvx.
-4. Backfill each legacy row with verified source/output objects and binding
+1. Backfill each legacy row with verified source/output objects and binding
    evidence. Keep read fallback until its report is accepted.
-5. Propose any legacy-column retention/drop only in a separate destructive
+2. Propose any legacy-column retention/drop only in a separate destructive
    migration and ADR after retention approval.

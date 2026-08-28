@@ -20,9 +20,9 @@ const designFixture = JSON.parse(
 );
 const compiledDesign = compileDesignSystem(designFixture);
 createAstroDesignAdapter(compiledDesign, [
-  { id: "signal-button", module: "./SignalButton.astro" },
-  { id: "story-card", module: "./StoryCard.astro" },
-  { id: "section-shell", module: "./SectionShell.astro" }
+  { id: "signal-button", module: "./SignalButton.astro", source: "<button><slot /></button>" },
+  { id: "story-card", module: "./StoryCard.astro", source: "<article><slot /></article>" },
+  { id: "section-shell", module: "./SectionShell.astro", source: "<section><slot /></section>" }
 ]);
 protectedResourceMetadata({
   resource: "https://api.navocms.com",

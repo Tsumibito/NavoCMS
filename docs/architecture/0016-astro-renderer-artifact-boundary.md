@@ -45,10 +45,9 @@ directory, so stale files and link traversal cannot enter the rendered project.
 
 Markdown rendering uses the content package's canonical parser and safe semantic
 HTML subset: headings, lists, links, and only declared directives become output;
-raw HTML and unrecognised directives fail closed. For backward compatibility,
-adapter callers may still pass
-legacy registrations without `source`; those sources are normalized deterministically
-for non-v1 consumers, while v1 rendering fails closed until an explicit pinned
-source is supplied. This capability has no credentials, Cloudflare binding,
+raw HTML and unrecognised directives fail closed. Every component registration
+must include its reviewed source; a missing source fails before rendering. The
+durable snapshot keeps its historical empty `legacyComponentIds` field only so
+existing content hashes remain stable. This capability has no credentials, Cloudflare binding,
 deployment side effect, release state, or idempotency mechanism. Building and
 deploying the exact verified source bundle remain later capabilities.

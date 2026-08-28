@@ -80,13 +80,10 @@ describe("Astro design adapter", () => {
     );
   });
 
-  it("normalizes legacy registrations deterministically but rejects them from the v1 artifact contract", async () => {
+  it("rejects registrations without explicit source", async () => {
     const legacy = registrations.map(({ source: _source, ...registration }) => registration);
-    const first = createAstroDesignAdapter(await design(), legacy); const second = createAstroDesignAdapter(await design(), legacy);
-    expect([...first.components.values()].map((registration) => registration.source)).toEqual([...second.components.values()].map((registration) => registration.source));
-    expect(first.legacyComponentIds).toEqual(["section-shell", "signal-button", "story-card"]);
-    const routes = ["en", "fr"].map((locale) => ({ id: "home", path: `/${locale}`, locale, revisionId: `${locale}-revision`, componentId: "section-shell", title: "Home", source: "A safe page", sourceHash: contentHash("A safe page"), media: [] }));
-    expect(() => renderAstroArtifact(renderInput(first, routes))).toThrow(/requires explicit/i);
+    const compiled = await design();
+    expect(() => createAstroDesignAdapter(compiled, legacy as never)).toThrow(/bounds invalid/i);
   });
 
   it("renders a deterministic Astro source artifact with pinned digests and tamper detection", async () => {

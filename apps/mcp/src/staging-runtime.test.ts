@@ -29,9 +29,9 @@ describe("staging provider selection", () => {
     await expect(selected.secrets.use(binding.cloudflare.tokenSecretRef, async () => "used")).resolves.toBe("used");
     expect(selected).not.toHaveProperty("token");
   });
-  it("recognizes legacy v1/v2 bindings but refuses activation until they are migrated", () => {
+  it("rejects staging bindings older than v3", () => {
     const legacy = { ...binding, schema: "io.navocms.cloudflare-staging-binding.v2" as const, coolify: { baseUrl: "https://coolify.example.test", applicationUuid: "legacy-app", tokenSecretRef: "secret:delivery/coolify-token" } };
-    expect(() => selectReleaseProvider({ requested: "cloudflare-staging", environment: "staging", binding: legacy, expected, secrets: createDotenvxSecretBroker({}) })).toThrow("must be migrated");
+    expect(() => selectReleaseProvider({ requested: "cloudflare-staging", environment: "staging", binding: legacy, expected, secrets: createDotenvxSecretBroker({}) })).toThrow("Invalid Cloudflare staging binding");
   });
   it("keeps embedded as the only default and production path", () => {
     expect(selectReleaseProvider({ requested: undefined, environment: "production", binding: {}, expected, secrets: createDotenvxSecretBroker({}) })).toEqual({ selection: "embedded" });
