@@ -13,7 +13,13 @@ async function readJson(relativePath) {
 }
 
 async function listJsonFiles(directory) {
-  const entries = await readdir(path.join(root, directory), { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(path.join(root, directory), { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
   const files = [];
   for (const entry of entries) {
     const relative = path.join(directory, entry.name);
