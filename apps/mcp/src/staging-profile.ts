@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { immutableReferenceHash, validateReleaseProviderInput, verifyDeployableArtifact, type ImmutableArtifactResolver } from "@navocms/delivery-cloudflare";
-import { PluginHost, type PluginRuntime, type ReleaseProviderPublishInput } from "@navocms/kernel";
+import type { ReleaseProviderPublishInput } from "@navocms/kernel";
 import { requirePermission } from "@navocms/security";
 import { parseCloudflareStagingBinding, type CloudflareStagingBinding, type SiteProfile } from "@navocms/contracts";
 
@@ -58,23 +58,6 @@ export function assertStagingReadiness(bindingValue: unknown, expected: StagingR
   const actualBindingDigest = stagingBindingDigest(binding);
   if (profileDigest !== CLOUDFLARE_STAGING_PROFILE_DIGEST || actualBindingDigest !== expected.bindingDigest || binding.tenantId !== expected.tenantId || binding.siteId !== expected.siteId || binding.environment !== "staging" || binding.cloudflare.allowedHostname !== expected.allowedHostname) throw new McpEditingError("STAGING_READINESS_FAILED", "Staging profile or binding readiness does not match its reviewed pin");
   return Object.freeze({ profileId: profile.metadata.name, profileDigest, bindingDigest: actualBindingDigest, tenantId: binding.tenantId, siteId: binding.siteId, allowedHostname: binding.cloudflare.allowedHostname });
-}
-
-export async function bootCloudflareStagingProfile(binding: unknown, expected: StagingReadinessExpectation): Promise<PluginHost> {
-  const readiness = assertStagingReadiness(binding, expected);
-  const parsedBinding = deepFreeze(structuredClone(parseCloudflareStagingBinding(binding)));
-  const manifest = cloudflareStagingManifest(parsedBinding);
-  const runtime: PluginRuntime = {
-    pluginId: CLOUDFLARE_STAGING_PLUGIN_ID,
-    health: async () => { try { assertStagingReadiness(parsedBinding, expected); return { ok: true, detail: `${readiness.profileId}:${readiness.bindingDigest}` }; } catch { return { ok: false, detail: "staging readiness pin mismatch" }; } },
-    activate: async (context) => {
-      context.track(context.capabilities.registerDefinition({ name: "release.provider", version: 1, owner: CLOUDFLARE_STAGING_PLUGIN_ID, description: "Reviewed-artifact-gated Cloudflare Pages staging delivery provider" }));
-      context.track(context.capabilities.registerProvider({ name: "release.provider", version: 1, pluginId: CLOUDFLARE_STAGING_PLUGIN_ID, value: Object.freeze({ mode: "external-staging", resolver: "reviewed-astro-artifact.v1", bindingDigest: stagingBindingDigest(parsedBinding), permissions: manifest.spec.permissions }) }));
-    }
-  };
-  const host = new PluginHost();
-  await host.boot(CLOUDFLARE_STAGING_PROFILE, [manifest], [runtime]);
-  return host;
 }
 
 /** The binding digest is checked before this derived manifest can be booted. */

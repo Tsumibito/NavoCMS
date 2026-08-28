@@ -17,8 +17,7 @@ import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository
 import { EmbeddedReleaseProvider, InMemoryReleaseWorkflowRepository } from "./release-repository.js";
 import { InMemoryEditingRepository } from "./repository.js";
 import { McpEditingService, type IdempotencyStore } from "./service.js";
-import { bootPinnedProductionPluginHost } from "./production-profile.js";
-import { bootCloudflareStagingProfile } from "./staging-profile.js";
+import { assertPinnedProductionProfile } from "./production-profile.js";
 import { assertStagingActivationGuard, createDotenvxSecretBroker, safeStagingRuntimeIdentifiers, selectReleaseProvider, stagingBindingFromEnvironment, stagingExpectationFromEnvironment } from "./staging-runtime.js";
 import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReviewedAstroArtifactStore } from "./postgres-reviewed-astro-artifact-store.js";
@@ -64,9 +63,7 @@ const stagingRuntime = requestedProvider === "cloudflare-staging"
   ? selectReleaseProvider({ requested: requestedProvider, environment: environmentKey, binding: stagingBindingFromEnvironment(), expected: stagingExpectation!, secrets: createDotenvxSecretBroker() })
   : selectReleaseProvider({ requested: requestedProvider, environment: environmentKey, binding: {}, expected: { tenantId: deploymentScope.tenantId, siteId: deploymentScope.siteId, allowedHostname: "unused.invalid", bindingDigest: "sha256:unused" }, secrets: createDotenvxSecretBroker() });
 if (stagingRuntime.selection === "cloudflare-staging" && !database) throw new Error("cloudflare-staging requires PostgreSQL");
-const pluginHost = stagingRuntime.selection === "cloudflare-staging"
-  ? await bootCloudflareStagingProfile(stagingRuntime.binding, stagingExpectation!)
-  : runtimeMode === "production" ? await bootPinnedProductionPluginHost() : undefined;
+if (runtimeMode === "production" && stagingRuntime.selection === "embedded") assertPinnedProductionProfile();
 const identityResolver = database ? new PostgresIdentityResolver(database, deploymentScope, {
   ...(issuerRolePermissions ? { issuerRolePermissions } : {})
 }) : undefined;
@@ -170,8 +167,7 @@ const server = createMcpHttpServer({
       const builderReady = stagingOperations ? await stagingOperations.ready() : true;
       const providerReady = stagingRuntime.selection !== "cloudflare-staging" || (resolverReady && builderReady);
       return {
-        ready: databaseReady && (pluginHost?.state === "healthy") && providerReady,
-        ...(pluginHost ? { pluginHost: pluginHost.status() } : {}),
+        ready: databaseReady && providerReady,
         ...(stagingRuntime.selection === "cloudflare-staging" ? {
           provider: { key: "cloudflare-staging" as const, ready: providerReady },
           resolver: { ready: resolverReady, environment: "staging" as const, environmentKey: deploymentEnvironmentKey },
@@ -191,9 +187,8 @@ server.listen(port, host, () => {
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
     server.close(() => {
-      void (pluginHost ? pluginHost.shutdown() : Promise.resolve())
-        .finally(() => database?.close())
-        .finally(() => process.exit(0));
+      database?.close();
+      process.exit(0);
     });
   });
 }

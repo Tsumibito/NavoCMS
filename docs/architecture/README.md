@@ -22,6 +22,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0017](0017-cloudflare-preview-delivery-provider.md) | Superseded | Immutable Cloudflare preview and exact-commit Coolify delivery boundary |
 | [0018](0018-trusted-astro-builder-registration.md) | Superseded | Trusted internal Astro build and durable reviewed-artifact registration |
 | [0019](0019-staging-astro-release-input-and-image-attestation.md) | Proposed | Preview-bound staging Astro input and image-attested build runner |
+| [0020](0020-pluginhost-runtime-simplification.md) | Accepted | Direct validation for embedded and staging runtime selection |
 | [0021](0021-pages-coolify-decoupling.md) | Proposed | Pages-only content publication and independent Coolify runtime releases |
 | [0022](0022-reviewed-astro-object-storage.md) | Proposed | Immutable object storage for reviewed Astro source and output |
 

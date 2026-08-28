@@ -1,33 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { PluginHost, type PluginRuntime } from "@navocms/kernel";
-
-interface SiteProfile {
-  readonly apiVersion: "navocms.io/v0alpha1";
-  readonly kind: "SiteProfile";
-  readonly metadata: { readonly name: string; readonly version: string; readonly displayName: string };
-  readonly spec: {
-    readonly environment: "development" | "preview" | "production";
-    readonly locales: { readonly default: string; readonly supported: readonly string[] };
-    readonly anchors: Record<string, { readonly ref: string; readonly version: string; readonly digest: string }>;
-    readonly plugins: readonly { readonly id: string; readonly version: string; readonly enabled: boolean }[];
-    readonly bindings: readonly { readonly capability: string; readonly version: number; readonly provider: string }[];
-    readonly urlPolicy: { readonly canonicalHost: string; readonly immutablePublicUrls: true };
-  };
-}
-
-interface PluginManifest {
-  readonly apiVersion: "navocms.io/v0alpha1";
-  readonly kind: "PluginManifest";
-  readonly metadata: { readonly id: string; readonly version: string; readonly displayName: string; readonly description: string };
-  readonly spec: {
-    readonly runtime: "kernel" | "module" | "service" | "ui" | "sandbox";
-    readonly provides: readonly { readonly name: string; readonly version: number }[];
-    readonly requires: readonly { readonly name: string; readonly version: number; readonly optional?: boolean }[];
-    readonly permissions: { readonly data: { readonly read: readonly string[]; readonly write: readonly string[] }; readonly network: readonly string[]; readonly scopes: readonly string[] };
-    readonly effects: readonly { readonly name: string; readonly consequence: "G0" | "G1" | "G2" | "G3" | "G4"; readonly idempotent: boolean }[];
-  };
-}
+import { contracts, type PluginManifest, type SiteProfile } from "@navocms/contracts";
 
 const EMBEDDED_RELEASE_PLUGIN_ID = "navocms.release.embedded";
 
@@ -81,34 +54,22 @@ export function profileDigest(profile: SiteProfile): string {
 }
 
 export function assertPinnedProfile(profile: SiteProfile, expectedDigest = EMBEDDED_PRODUCTION_PROFILE_DIGEST): void {
-  if (profileDigest(profile) !== expectedDigest) throw new Error("Embedded production profile digest does not match its reviewed pin");
+  const parsed = contracts.profile.parse(structuredClone(profile));
+  if (profileDigest(parsed) !== expectedDigest) throw new Error("Embedded production profile digest does not match its reviewed pin");
 }
 
-export function embeddedReleaseRuntime(healthy: () => Promise<boolean> = async () => true): PluginRuntime {
-  return {
-    pluginId: EMBEDDED_RELEASE_PLUGIN_ID,
-    health: async () => (await healthy() ? { ok: true } : { ok: false, detail: "embedded release provider unavailable" }),
-    activate: async (context) => {
-      context.track(context.capabilities.registerDefinition({
-        name: "release.provider", version: 1, owner: EMBEDDED_RELEASE_PLUGIN_ID,
-        description: "Reviewed embedded G2 release provider"
-      }));
-      context.track(context.capabilities.registerProvider({
-        name: "release.provider", version: 1, pluginId: EMBEDDED_RELEASE_PLUGIN_ID, value: { kind: "embedded" }
-      }));
-    }
-  };
-}
-
-export async function bootPinnedProductionPluginHost(options: {
-  readonly profile?: SiteProfile;
-  readonly manifest?: PluginManifest;
-  readonly runtimes?: readonly PluginRuntime[];
-  readonly expectedDigest?: string;
-} = {}): Promise<PluginHost> {
-  const profile = options.profile ?? EMBEDDED_PRODUCTION_PROFILE;
-  assertPinnedProfile(profile, options.expectedDigest);
-  const host = new PluginHost();
-  await host.boot(profile, [options.manifest ?? EMBEDDED_RELEASE_MANIFEST], options.runtimes ?? [embeddedReleaseRuntime()]);
-  return host;
+export function assertPinnedProductionProfile(
+  profile: SiteProfile = EMBEDDED_PRODUCTION_PROFILE,
+  manifest: PluginManifest = EMBEDDED_RELEASE_MANIFEST,
+  expectedDigest = EMBEDDED_PRODUCTION_PROFILE_DIGEST
+): void {
+  const parsedManifest = contracts.plugin.parse(structuredClone(manifest));
+  assertPinnedProfile(profile, expectedDigest);
+  const plugin = profile.spec.plugins.find(({ id }) => id === EMBEDDED_RELEASE_PLUGIN_ID);
+  if (!plugin?.enabled || plugin.version !== parsedManifest.metadata.version || parsedManifest.metadata.id !== EMBEDDED_RELEASE_PLUGIN_ID) {
+    throw new Error("Embedded release provider does not match its reviewed profile");
+  }
+  if (!parsedManifest.spec.provides.some(({ name, version }) => name === "release.provider" && version === 1)) {
+    throw new Error("Embedded release provider does not provide the reviewed capability");
+  }
 }

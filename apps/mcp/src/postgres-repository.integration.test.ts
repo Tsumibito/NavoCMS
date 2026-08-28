@@ -15,7 +15,7 @@ import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
 import { McpEditingService, type IdempotencyStore } from "./service.js";
-import { bootPinnedProductionPluginHost } from "./production-profile.js";
+import { assertPinnedProductionProfile } from "./production-profile.js";
 
 const databaseUrl = process.env.NAVOCMS_INTEGRATION_DATABASE_URL;
 const adminDatabaseUrl = process.env.NAVOCMS_INTEGRATION_ADMIN_DATABASE_URL;
@@ -297,64 +297,59 @@ integration("Neon production persistence", () => {
     ]);
   });
 
-  it("executes the production path with the pinned host and charges durable policy usage once", async () => {
+  it("executes the production path with the pinned provider and charges durable policy usage once", async () => {
     const suffix = randomUUID().replace(/-/g, "");
     const policy = new PostgresRuntimePolicyGuard(database!);
-    const host = await bootPinnedProductionPluginHost();
-    expect(host.status()).toMatchObject({ state: "healthy", activePlugins: ["navocms.release.embedded"] });
-    try {
-      await adminDatabase!.withScope({ tenantId, siteId, principalId }, async (client) => {
-        await client.query(
-          `DELETE FROM navocms.usage_events
-            WHERE tenant_id = $1 AND site_id = $2 AND operation_key LIKE 'draft_create:%'`,
-          [tenantId, siteId]
-        );
-        await client.query(
-          `DELETE FROM navocms.quota_limits
-            WHERE tenant_id = $1 AND site_id = $2 AND plugin_id IS NULL
-              AND operation_key = 'draft_create' AND period = 'lifetime'`,
-          [tenantId, siteId]
-        );
-        await client.query(
-          `INSERT INTO navocms.quota_limits (id, tenant_id, site_id, operation_key, period, limit_amount)
-           VALUES ($1, $2, $3, 'draft_create', 'lifetime', 1)`,
-          [randomUUID(), tenantId, siteId]
-        );
-      });
-      const productionService = service(new PostgresEventStore(database!), policy);
-      const input = {
-        typeName: "article", slug: `production-path-${suffix}`, locale: "en", title: "Production path",
-        markdown: "# Production path\n", idempotencyKey: `production-path-${suffix}`
-      } as const;
-      const draft = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
-      const retried = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
-      expect(retried.draft.revisionId).toBe(draft.draft.revisionId);
-      const preview = await productionService.preparePreview(context(), draft.draft.revisionId, `preview-${suffix}`);
-      await productionService.approveRelease(context(), {
-        releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `approve-${suffix}`
-      });
-      await productionService.publishRelease(context(), {
-        releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `publish-${suffix}`
-      });
-      const persisted = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
-        await client.query<{ usage: string; release: string; approvals: string; checkpoints: string; ledger: string; outbox: string }>(
-          `SELECT
-            (SELECT count(*) FROM navocms.usage_events WHERE operation_key = $1) AS usage,
-            (SELECT count(*) FROM navocms.release_candidates WHERE id = $2) AS release,
-            (SELECT count(*) FROM navocms.release_approvals WHERE release_id = $2) AS approvals,
-            (SELECT count(*) FROM navocms.workflow_checkpoints checkpoint JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id WHERE run.release_id = $2) AS checkpoints,
-            (SELECT count(*) FROM navocms.event_ledger WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS ledger,
-            (SELECT count(*) FROM navocms.domain_outbox WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS outbox`,
-          [`draft_create:${input.idempotencyKey}`, preview.releaseId]
-        )).rows[0]!
+    assertPinnedProductionProfile();
+    await adminDatabase!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `DELETE FROM navocms.usage_events
+          WHERE tenant_id = $1 AND site_id = $2 AND operation_key LIKE 'draft_create:%'`,
+        [tenantId, siteId]
       );
-      expect(persisted).toMatchObject({ usage: "1", release: "1", approvals: "1" });
-      expect(Number(persisted.checkpoints)).toBeGreaterThan(0);
-      expect(Number(persisted.ledger)).toBeGreaterThan(0);
-      expect(Number(persisted.outbox)).toBeGreaterThan(0);
-    } finally {
-      await host.shutdown();
-    }
+      await client.query(
+        `DELETE FROM navocms.quota_limits
+          WHERE tenant_id = $1 AND site_id = $2 AND plugin_id IS NULL
+            AND operation_key = 'draft_create' AND period = 'lifetime'`,
+        [tenantId, siteId]
+      );
+      await client.query(
+        `INSERT INTO navocms.quota_limits (id, tenant_id, site_id, operation_key, period, limit_amount)
+         VALUES ($1, $2, $3, 'draft_create', 'lifetime', 1)`,
+        [randomUUID(), tenantId, siteId]
+      );
+    });
+    const productionService = service(new PostgresEventStore(database!), policy);
+    const input = {
+      typeName: "article", slug: `production-path-${suffix}`, locale: "en", title: "Production path",
+      markdown: "# Production path\n", idempotencyKey: `production-path-${suffix}`
+    } as const;
+    const draft = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
+    const retried = await productionService.createDraft(context(), input) as { draft: { revisionId: string } };
+    expect(retried.draft.revisionId).toBe(draft.draft.revisionId);
+    const preview = await productionService.preparePreview(context(), draft.draft.revisionId, `preview-${suffix}`);
+    await productionService.approveRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `approve-${suffix}`
+    });
+    await productionService.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `publish-${suffix}`
+    });
+    const persisted = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ usage: string; release: string; approvals: string; checkpoints: string; ledger: string; outbox: string }>(
+        `SELECT
+          (SELECT count(*) FROM navocms.usage_events WHERE operation_key = $1) AS usage,
+          (SELECT count(*) FROM navocms.release_candidates WHERE id = $2) AS release,
+          (SELECT count(*) FROM navocms.release_approvals WHERE release_id = $2) AS approvals,
+          (SELECT count(*) FROM navocms.workflow_checkpoints checkpoint JOIN navocms.workflow_runs run ON run.id = checkpoint.run_id WHERE run.release_id = $2) AS checkpoints,
+          (SELECT count(*) FROM navocms.event_ledger WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS ledger,
+          (SELECT count(*) FROM navocms.domain_outbox WHERE correlation_id = (SELECT correlation_id FROM navocms.release_candidates WHERE id = $2)) AS outbox`,
+        [`draft_create:${input.idempotencyKey}`, preview.releaseId]
+      )).rows[0]!
+    );
+    expect(persisted).toMatchObject({ usage: "1", release: "1", approvals: "1" });
+    expect(Number(persisted.checkpoints)).toBeGreaterThan(0);
+    expect(Number(persisted.ledger)).toBeGreaterThan(0);
+    expect(Number(persisted.outbox)).toBeGreaterThan(0);
   });
 });
 

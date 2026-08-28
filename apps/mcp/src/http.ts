@@ -36,7 +36,6 @@ export interface McpHttpOptions {
 
 export interface ReadinessResult {
   readonly ready: boolean;
-  readonly pluginHost?: Readonly<Record<string, unknown>>;
   readonly provider?: Readonly<{ key: "embedded" | "cloudflare-staging"; ready: boolean }>;
   readonly resolver?: Readonly<{ ready: boolean; environment: "staging"; environmentKey: string }>;
   readonly builder?: Readonly<{ ready: boolean; environment: "staging"; environmentKey: string; policyDigest: string }>;
@@ -64,7 +63,6 @@ export function createMcpHttpServer(options: McpHttpOptions) {
         const readiness = typeof result === "boolean" ? { ready: result } : result;
         return sendJson(response, readiness.ready ? 200 : 503, {
           status: readiness.ready ? "ready" : "not-ready",
-          ...(readiness.pluginHost ? { pluginHost: readiness.pluginHost } : {}),
           ...(readiness.provider ? { provider: readiness.provider } : {}),
           ...(readiness.resolver ? { resolver: readiness.resolver } : {}),
           ...(readiness.builder ? { builder: readiness.builder } : {}),
