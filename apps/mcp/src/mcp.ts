@@ -252,6 +252,24 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
     description: "Verify the bounded storage object and persist its immutable original. Requires media:write. No binary payload is accepted.",
     inputSchema: { intentId: z.string().uuid(), uploadedStorageKey: z.string().min(1).max(512), idempotencyKey: z.string().min(16).max(128) }, annotations: writeAnnotations()
   }, safeTool(async (input) => result("Media upload finalized", await media.finalize(context, input))));
+  server.registerTool("media_variant_generate", {
+    title: "Generate a verified responsive media variant",
+    description: "Generate one deterministic variant of an existing verified original. Requires media:write; bytes stay in the injected object store.",
+    inputSchema: {
+      assetId: z.string().uuid(),
+      presetId: z.enum(["responsive", "hero-lcp", "og", "thumbnail"]),
+      presetVersion: z.literal("v1"),
+      width: z.number().int().min(1).max(16_384),
+      format: z.enum(["image/avif", "image/webp", "image/jpeg"]),
+      crop: z.enum(["center", "focal"]).optional(),
+      focalPoint: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }).strict().optional(),
+      idempotencyKey: z.string().min(16).max(128)
+    }, annotations: writeAnnotations()
+  }, safeTool(async ({ crop, focalPoint, ...input }) => result("Media variant generated", await media.generateVariant(context, {
+    ...input,
+    ...(crop ? { crop } : {}),
+    ...(focalPoint ? { focalPoint } : {})
+  }))));
   server.registerTool("media_reject", {
     title: "Reject a pending media asset",
     description: "Record a bounded rejection reason. Requires media:write.",

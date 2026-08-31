@@ -18,10 +18,19 @@ private `StagingAstroOperations` composition. Before it creates a previewed
 release, `StagingAstroPreviewPreparer` derives a bounded single-revision Astro
 render input from the durable revision and a reviewed static staging policy.
 The policy contains only code-pinned component registrations, CSS, delivery
-layout, and governance rules; it rejects unsupported locale/slug and has
-explicit empty media/directive bindings. Its content, design, delivery,
-governance, and media digests are computed and copied into the exact release
-manifest before the release hash is calculated.
+layout, and governance rules; it rejects unsupported locale/slug and accepts
+only media references owned by that exact immutable revision. A bound staging
+media selection requires verified `responsive@v1` WebP 320/640 variants plus a
+JPEG 640 fallback. It re-reads every selected R2 object under the reviewed
+site scope, checks size, type, and SHA-256 against PostgreSQL, and embeds the
+bounded variants as `data:image/*` sources in the generated static Astro
+artifact. This preserves the text-only Pages artifact transport while binding
+real R2-derived responsive bytes into the reviewed input; caller-supplied
+asset IDs, URLs, or raw bytes remain impossible. Its content, design,
+delivery, governance, and media digests are computed in the deterministic
+reviewed input; the first four anchors are copied into the exact release
+manifest before the release hash is calculated, while the media digest is
+retained in the release-bound reviewed input and Astro artifact evidence.
 
 The private runtime persists that snapshot in `reviewed_astro_build_inputs`
 inside the existing preview transaction. The table is site-scoped, append-only,
@@ -52,10 +61,12 @@ staging readiness false. `/readyz` exposes only the non-secret policy digest.
 ## Consequences
 
 The first staging vertical is intentionally a reviewed one-revision page
-policy; expanding it to catalogue-wide routes, media, or directives requires a
-new reviewed input policy rather than arbitrary input JSON. Default and
-production profiles remain embedded and do not load this composition. Git
-checkout attestation remains a local review runner only.
+policy; it permits only its exact `content.revision` media references and the
+fixed responsive trio above. Expanding it to catalogue-wide routes, additional
+media policy, or directives requires a new reviewed input policy rather than
+arbitrary input JSON. Default and production profiles remain embedded and do
+not load this composition. Git checkout attestation remains a local review
+runner only.
 
 ## Validation
 

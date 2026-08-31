@@ -177,7 +177,7 @@ describe("durable release workflow", () => {
 class CapturingStagingOperations implements StagingAstroOperations {
   public readonly persisted: string[] = [];
   public readonly built: string[] = [];
-  public prepare(): AstroRenderInput { return { anchors: { content: `sha256:${"a".repeat(64)}`, design: `sha256:${"b".repeat(64)}`, delivery: `sha256:${"c".repeat(64)}`, governance: `sha256:${"d".repeat(64)}` } } as AstroRenderInput; }
+  public async prepare(): Promise<AstroRenderInput> { return { anchors: { content: `sha256:${"a".repeat(64)}`, design: `sha256:${"b".repeat(64)}`, delivery: `sha256:${"c".repeat(64)}`, governance: `sha256:${"d".repeat(64)}` } } as AstroRenderInput; }
   public async persistPreviewInput(_: Parameters<StagingAstroOperations["persistPreviewInput"]>[0], __: Parameters<StagingAstroOperations["persistPreviewInput"]>[1], release: Parameters<StagingAstroOperations["persistPreviewInput"]>[2]): Promise<void> { this.persisted.push(release.id); }
   public async ensureArtifact(_: Parameters<StagingAstroOperations["ensureArtifact"]>[0], __: Parameters<StagingAstroOperations["ensureArtifact"]>[1], release: Parameters<StagingAstroOperations["ensureArtifact"]>[2]): Promise<void> { this.built.push(release.id); }
 }

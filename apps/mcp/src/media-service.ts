@@ -1,6 +1,7 @@
 import type {
   CreateUploadIntentInput,
   FinalizeUploadInput,
+  GenerateMediaVariantInput,
   MediaReferenceInput,
   MediaRepository,
   RejectMediaAssetInput
@@ -48,6 +49,10 @@ export class McpMediaService {
 
   public async finalize(context: McpRequestContext, input: FinalizeUploadInput): Promise<object> {
     return project(await this.#repository.finalizeUpload(this.writeScope(context), input));
+  }
+
+  public async generateVariant(context: McpRequestContext, input: GenerateMediaVariantInput): Promise<object> {
+    return project(await this.#repository.generateVariant(this.writeScope(context), input));
   }
 
   public async reject(context: McpRequestContext, input: RejectMediaAssetInput): Promise<object> {
