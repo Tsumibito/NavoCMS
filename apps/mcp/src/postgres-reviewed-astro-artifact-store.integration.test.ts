@@ -237,7 +237,7 @@ integration("reviewed Astro build-input PostgreSQL boundary", () => {
     const preparer = new StagingAstroPreviewPreparer();
     let attemptedRelease: Parameters<StagingAstroOperations["persistPreviewInput"]>[2] | undefined;
     const operations: StagingAstroOperations = {
-      prepare: (site, revision) => preparer.prepare(site, revision),
+      prepare: async (_context, site, revision) => preparer.prepare(site, revision),
       persistPreviewInput: async (context, repositoryContext, release, render) => {
         attemptedRelease = release;
         await new PostgresReviewedAstroBuildInputStore(database!, repositoryContext, "default").register(context, {

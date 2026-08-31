@@ -9,7 +9,7 @@ import { compileDesignSystem } from "@navocms/design";
 import { contentHash } from "@navocms/content";
 import { describe, expect, it } from "vitest";
 
-import { AstroDesignAdapterError, astroArtifactHash, astroContentDigest, astroMediaDigest, astroRegistrationDigest, createAstroDesignAdapter, materializeAstroArtifact, renderAstroArtifact, verifyAstroArtifact, verifyBuiltAstroOutput } from "./index.js";
+import { AstroDesignAdapterError, astroArtifactHash, astroContentDigest, astroMediaDigest, astroRegistrationDigest, createAstroDesignAdapter, materializeAstroArtifact, renderAstroArtifact, verifyAstroArtifact, verifyBuiltAstroOutput, type AstroMediaBinding } from "./index.js";
 const exec = promisify(execFile);
 
 async function design() {
@@ -40,7 +40,7 @@ const { title, locale } = Astro.props;
 <!doctype html><html lang={locale}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1"><title>{title}</title><script is:inline src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"></script></head><body><slot /></body></html>
 `;
 const deliveryLayout = { schema: "io.navocms.delivery-layout.v1" as const, source: deliveryLayoutSource, digest: `sha256:${contentHash(deliveryLayoutSource)}` };
-function renderInput(adapter: Awaited<ReturnType<typeof createAstroDesignAdapter>>, routes: readonly { readonly id: string; readonly path: string; readonly locale: string; readonly revisionId: string; readonly componentId: string; readonly title: string; readonly source: string; readonly sourceHash: string; readonly directives?: typeof directives; readonly media: readonly { readonly assetId: string; readonly variantIdentity: string; readonly url: string; readonly alt: string }[] }[], layout = deliveryLayout) {
+function renderInput(adapter: Awaited<ReturnType<typeof createAstroDesignAdapter>>, routes: readonly { readonly id: string; readonly path: string; readonly locale: string; readonly revisionId: string; readonly componentId: string; readonly title: string; readonly source: string; readonly sourceHash: string; readonly directives?: typeof directives; readonly media: readonly AstroMediaBinding[] }[], layout = deliveryLayout) {
   return { tenantId: "tenant", siteId: "site", locales: { default: "en", supported: ["en", "fr"] }, anchors: { content: astroContentDigest(routes), design: adapter.digest, delivery: layout.digest, governance: `sha256:${"e".repeat(64)}` }, deliveryLayout: layout, expectedMediaDigest: astroMediaDigest(routes), design: adapter, routes };
 }
 
@@ -101,6 +101,25 @@ describe("Astro design adapter", () => {
     expect(() => renderAstroArtifact({ ...input, routes: [...routes, { ...routes[0]!, locale: "fr" }] })).toThrow(/route input invalid/i);
     expect(() => verifyAstroArtifact({ ...first, files: { ...first.files, "src/pages/en/index.astro": "tampered" } }, first.hash)).toThrow(/tampered/i);
     expect(() => verifyAstroArtifact({ ...first, hash: `sha256:${"0".repeat(64)}` }, first.hash)).toThrow(/expected hash/i);
+  });
+
+  it("binds bounded inline responsive media to the immutable Astro source", async () => {
+    const adapter = createAstroDesignAdapter(await design(), registrations);
+    const media = Object.freeze([Object.freeze({
+      assetId: "asset-1", variantIdentity: "c".repeat(64), alt: "Hero",
+      url: "data:image/jpeg;base64,AA==",
+      sources: Object.freeze([
+        Object.freeze({ variantIdentity: "d".repeat(64), url: "data:image/webp;base64,AA==", mediaType: "image/webp" as const, media: "(max-width: 480px)" })
+      ])
+    })]);
+    const routes = ["en", "fr"].map((locale) => ({ id: "home", path: `/${locale}`, locale, revisionId: `${locale}-revision`, componentId: "section-shell", title: "Home", source: "A safe page", sourceHash: contentHash("A safe page"), media }));
+    const artifact = renderAstroArtifact(renderInput(adapter, routes));
+    const source = artifact.files["src/pages/en/index.astro"]!;
+    expect(source).toContain("<picture>");
+    expect(source).toContain("data:image/webp;base64,AA==");
+    expect(source).toContain("data-navocms-variant");
+    const invalidRoutes = routes.map((route) => ({ ...route, media: [{ ...media[0]!, url: "data:text/html;base64,AA==" }] }));
+    expect(() => renderAstroArtifact(renderInput(adapter, invalidRoutes))).toThrow(/media input invalid/i);
   });
 
   it("materializes clean pinned projects and produces byte-identical full dist output", async () => {

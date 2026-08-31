@@ -15,12 +15,12 @@ describe("MCP media discovery", () => {
   it("scopes read and write tools by media permission and storage capability", async () => {
     const viewer = await toolNames("viewer", true);
     expect(viewer).toEqual(expect.arrayContaining(["media_list", "media_get", "media_references_list", "media_review"]));
-    expect(viewer).not.toEqual(expect.arrayContaining(["media_upload_prepare", "media_upload_finalize", "media_reject", "media_reference_create", "media_reference_remove"]));
+    expect(viewer).not.toEqual(expect.arrayContaining(["media_upload_prepare", "media_upload_finalize", "media_variant_generate", "media_reject", "media_reference_create", "media_reference_remove"]));
     const editorWithoutStorage = await toolNames("editor", false);
     expect(editorWithoutStorage).toContain("media_list");
     expect(editorWithoutStorage).not.toContain("media_upload_prepare");
     const editor = await toolNames("editor", true);
-    expect(editor).toEqual(expect.arrayContaining(["media_upload_prepare", "media_upload_finalize", "media_reject", "media_reference_create", "media_reference_remove"]));
+    expect(editor).toEqual(expect.arrayContaining(["media_upload_prepare", "media_upload_finalize", "media_variant_generate", "media_reject", "media_reference_create", "media_reference_remove"]));
   });
 
   it("denies direct write calls without media:write", async () => {

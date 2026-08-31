@@ -116,7 +116,8 @@ if (database) {
       reviewedSourceCommit: required("NAVOCMS_REVIEWED_SOURCE_COMMIT"),
       toolchainDirectory: required("NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN"),
       readinessContext: deliveryRepositoryContext,
-      objectStorage: r2Storage!.artifacts
+      objectStorage: r2Storage!.artifacts,
+      mediaStorage: r2Storage!.media
     });
   }
   reviewedAstroResolver = stagingComposition?.resolver;

@@ -58,7 +58,7 @@ export interface RuntimePolicyGuard {
 
 /** Internal runtime boundary; it is never registered in MCP tool discovery. */
 export interface StagingAstroOperations {
-  prepare(site: RepositoryContext["site"], revision: ContentRevision): AstroRenderInput;
+  prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision): Promise<AstroRenderInput>;
   persistPreviewInput(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease, render: AstroRenderInput): Promise<void>;
   ensureArtifact(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease): Promise<void>;
 }
@@ -287,7 +287,7 @@ export class McpEditingService {
       const revision = await this.#repository.getRevision(repositoryContext, revisionId);
       const workflow = await this.#repository.workflowFor(repositoryContext, revision.id);
       const environmentId = await this.#releases.environmentId(repositoryContext, this.#releaseConfig.environmentKey);
-      const stagingRender = this.#stagingAstro?.prepare(repositoryContext.site, revision);
+      const stagingRender = this.#stagingAstro ? await this.#stagingAstro.prepare(context, repositoryContext.site, revision) : undefined;
       const { manifest, releaseHash } = createReleaseManifest({
         tenantId: repositoryContext.site.tenantId,
         siteId: repositoryContext.site.siteId,

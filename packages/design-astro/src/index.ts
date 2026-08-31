@@ -76,7 +76,24 @@ export interface AstroRenderRoute {
   readonly sourceHash: string;
   /** Content-type-declared directives permitted for this immutable revision. */
   readonly directives?: readonly DirectiveDefinition[];
-  readonly media: readonly { readonly assetId: string; readonly variantIdentity: string; readonly url: string; readonly alt: string }[];
+  readonly media: readonly AstroMediaBinding[];
+}
+
+/** Immutable responsive sources attached to a verified variant selection. */
+export interface AstroMediaSource {
+  readonly variantIdentity: string;
+  readonly url: string;
+  readonly mediaType: "image/avif" | "image/webp" | "image/jpeg";
+  /** A bounded CSS media condition, used only to select a smaller source. */
+  readonly media?: string;
+}
+
+export interface AstroMediaBinding {
+  readonly assetId: string;
+  readonly variantIdentity: string;
+  readonly url: string;
+  readonly alt: string;
+  readonly sources?: readonly AstroMediaSource[];
 }
 
 export interface AstroRenderInput {
@@ -214,7 +231,11 @@ function assertInput(input: AstroRenderInput): void {
     const outputPath = `src/pages${pagePath(route.path)}.astro`;
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(route.id) || !/^[A-Za-z0-9_-]{1,128}$/.test(route.revisionId) || byteLength(route.path) > 512 || byteLength(route.title) < 1 || byteLength(route.title) > ASTRO_RENDER_LIMITS.titleBytes || byteLength(route.source) > ASTRO_RENDER_LIMITS.sourceBytes || route.media.length > ASTRO_RENDER_LIMITS.mediaPerRoute || !/^\/[a-z0-9/_-]*$/.test(route.path) || route.path.includes("//") || paths.has(outputPath) || !input.locales.supported.includes(route.locale) || !input.design.components.has(route.componentId) || route.sourceHash !== contentHash(route.source)) throw new AstroDesignAdapterError("Renderer route input invalid");
     paths.add(outputPath); const seen = localized.get(route.id) ?? new Set<string>(); seen.add(route.locale); localized.set(route.id, seen);
-    for (const item of route.media) if (!/^[A-Za-z0-9_-]{1,128}$/.test(item.assetId) || byteLength(item.alt) < 1 || byteLength(item.alt) > ASTRO_RENDER_LIMITS.altBytes || !/^[a-f0-9]{64}$/.test(item.variantIdentity) || byteLength(item.url) > 2048 || !item.url.startsWith("/") || item.url.startsWith("//") || !item.alt) throw new AstroDesignAdapterError("Renderer media input invalid");
+    for (const item of route.media) {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(item.assetId) || byteLength(item.alt) < 1 || byteLength(item.alt) > ASTRO_RENDER_LIMITS.altBytes || !/^[a-f0-9]{64}$/.test(item.variantIdentity) || !validMediaUrl(item.url) || !item.alt) throw new AstroDesignAdapterError("Renderer media input invalid");
+      const sources = item.sources ?? [];
+      if (sources.length > 8 || new Set(sources.map((source) => source.variantIdentity)).size !== sources.length || sources.some((source) => !/^[a-f0-9]{64}$/.test(source.variantIdentity) || !validMediaUrl(source.url) || !["image/avif", "image/webp", "image/jpeg"].includes(source.mediaType) || (source.media !== undefined && !/^\(max-width: [1-9][0-9]{0,4}px\)$/.test(source.media)))) throw new AstroDesignAdapterError("Renderer media source input invalid");
+    }
     if (!validDirectives(route.directives)) throw new AstroDesignAdapterError("Renderer directive input invalid");
     try { renderSemanticMarkdownHtml(route.source, route.directives); } catch (error) { throw new AstroDesignAdapterError(`Renderer content unsupported: ${error instanceof Error ? error.message : "invalid markdown"}`); }
   }
@@ -222,12 +243,17 @@ function assertInput(input: AstroRenderInput): void {
 }
 function pagePath(path: string): string { return path === "/" ? "/index" : `${path.replace(/\/$/, "")}/index`; }
 function builtRoutePath(pagePath: string): string { return pagePath === "src/pages/index.astro" ? "index.html" : `${pagePath.slice("src/pages/".length, -".astro".length)}.html`; }
-function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string): string { const depth = route.path.split("/").filter(Boolean).length; return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\nconst title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media)};\n---\n<SiteLayout title={title} locale=${JSON.stringify(route.locale)}><RouteComponent><main data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}><Fragment set:html={contentHtml} />{media.map((item) => <img src={item.url} alt={item.alt} data-navocms-variant={item.variantIdentity} />)}</main></RouteComponent></SiteLayout>\n`; }
+function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string): string { const depth = route.path.split("/").filter(Boolean).length; return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\nconst title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media)};\n---\n<SiteLayout title={title} locale=${JSON.stringify(route.locale)}><RouteComponent><main data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}><Fragment set:html={contentHtml} />{media.map((item) => <picture>{(item.sources ?? []).map((source) => <source srcset={source.url} type={source.mediaType} media={source.media} data-navocms-variant={source.variantIdentity} />)}<img src={item.url} alt={item.alt} data-navocms-variant={item.variantIdentity} /></picture>)}</main></RouteComponent></SiteLayout>\n`; }
 function canonical(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`; return JSON.stringify(value); }
 function digest(value: unknown): `sha256:${string}` { return `sha256:${createHash("sha256").update(typeof value === "string" ? value : canonical(value)).digest("hex")}`; }
 function byteLength(value: string): number { return Buffer.byteLength(value, "utf8"); }
 function safeIdentifier(value: unknown, limit: number): value is string { return typeof value === "string" && new RegExp(`^[A-Za-z0-9_-]{1,${limit}}$`).test(value); }
 function safeArtifactPath(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= 512 && !value.startsWith("/") && !value.endsWith("/") && !value.includes("//") && !value.includes("\\") && posix.normalize(value) === value && !value.split("/").some((part) => part === "." || part === ".."); }
+function validMediaUrl(value: unknown): value is string {
+  if (typeof value !== "string" || byteLength(value) > 512 * 1024) return false;
+  if (value.startsWith("/")) return !value.startsWith("//");
+  return /^data:image\/(?:avif|webp|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
 function hasExactKeys(value: unknown, expected: readonly string[]): boolean { return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).sort().join(",") === [...expected].sort().join(","); }
 function validManifestDigests(value: AstroArtifactManifest["digests"]): boolean { return hasExactKeys(value, ["content", "design", "delivery", "governance", "registrations", "media"]) && Object.values(value).every((digestValue) => /^sha256:[a-f0-9]{64}$/.test(digestValue)); }
 function sortedMedia(media: AstroRenderRoute["media"]): AstroRenderRoute["media"][number][] { return [...media].sort(mediaOrder); }

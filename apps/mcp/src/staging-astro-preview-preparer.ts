@@ -1,4 +1,4 @@
-import { astroContentDigest, astroMediaDigest, renderAstroArtifact, type AstroRenderInput } from "@navocms/design-astro";
+import { astroContentDigest, astroMediaDigest, renderAstroArtifact, type AstroMediaBinding, type AstroRenderInput } from "@navocms/design-astro";
 import { contentHash, type ContentRevision } from "@navocms/content";
 import { createHash } from "node:crypto";
 
@@ -24,12 +24,13 @@ export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-
 
 /**
  * Reviewed kernel policy for the first staging site. It accepts only one
- * durable revision and emits a deterministic, bounded Astro input before the
- * release hash exists. No request ever provides component, layout, or anchor
- * source; later releases can replace this policy with a reviewed profile.
+ * durable revision and its verified staging media bindings, then emits a
+ * deterministic, bounded Astro input before the release hash exists. No
+ * request ever provides component, layout, anchor, or media URL source;
+ * later releases can replace this policy with a reviewed profile.
  */
 export class StagingAstroPreviewPreparer {
-  public prepare(site: SiteDescriptor, revision: ContentRevision): AstroRenderInput {
+  public prepare(site: SiteDescriptor, revision: ContentRevision, media: readonly AstroMediaBinding[] = []): AstroRenderInput {
     if (revision.tenantId !== site.tenantId || revision.siteId !== site.siteId) throw new McpEditingError("STAGING_ASTRO_SCOPE_DENIED", "Staging Astro preview input is outside the authorized site");
     const locale = typeof revision.metadata.locale === "string" && /^[A-Za-z0-9-]{2,20}$/.test(revision.metadata.locale)
       ? revision.metadata.locale : site.primaryLocale;
@@ -39,7 +40,7 @@ export class StagingAstroPreviewPreparer {
       ? revision.metadata.title : "Untitled";
     if (!slug || !site.locales.includes(locale)) throw new McpEditingError("STAGING_ASTRO_REVISION_INVALID", "Staging Astro preview requires a supported locale and canonical slug");
     const route = Object.freeze({ id: revision.documentId, path: slug === "home" ? "/" : `/${slug}`, locale, revisionId: revision.id,
-      componentId: "section-shell", title, source: revision.source, sourceHash: revision.sourceHash, directives: [], media: [] });
+      componentId: "section-shell", title, source: revision.source, sourceHash: revision.sourceHash, directives: [], media: [...media] });
     const render: AstroRenderInput = Object.freeze({ tenantId: site.tenantId, siteId: site.siteId,
       locales: Object.freeze({ default: locale, supported: Object.freeze([locale]) }),
       anchors: Object.freeze({ content: astroContentDigest([route]), design: designDigest, delivery: deliveryDigest, governance: governanceDigest }),
