@@ -15,6 +15,6 @@
   "dependencies": {
     "@navocms/content": "workspace:*",
     "@navocms/design": "workspace:*",
-    "parse5": "7.2.1"
+    "parse5": "8.0.1"
   }
 }
