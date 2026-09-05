@@ -1,5 +1,10 @@
 # Delivery roadmap
 
+**Execution update, 2026-09-05:** the next work is governed by
+[Agent workflow sprints](AGENT_WORKFLOW_SPRINTS.md): 8.1–8.3 and 9.1–9.3 establish a usable
+real-site editing workflow before the previously planned importer. The programme below retains
+historical acceptance and the longer-term backlog; it does not authorize skipping the new gates.
+
 **Planning unit:** two-week sprint
 
 **Capacity baseline:** one primary engineer using agent-assisted development, with product review

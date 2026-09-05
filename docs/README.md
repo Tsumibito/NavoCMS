@@ -12,6 +12,8 @@ contracts.
 | [Security](security/THREAT_MODEL.md) | Assets, threats, controls, and open security work |
 | [Secrets](security/SECRETS.md) | Public-core, private-deployment, dotenvx, and rotation policy |
 | [Roadmap](roadmap/SPRINTS.md) | Sequenced delivery gates and scope control |
+| [Active sprint plan](roadmap/AGENT_WORKFLOW_SPRINTS.md) | Next six sprints, acceptance ownership, and deployment gates |
+| [Sprint 8.1 handoff](development/SPRINT_8_1_HANDOFF.md) | Bounded implementation assignment for the next executor |
 | [Development](development/README.md) | Workspace boundaries, local commands, and safety warnings |
 
 Machine-readable counterparts live under [`schemas/`](../schemas/README.md). If prose and schema
