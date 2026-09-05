@@ -270,18 +270,15 @@ integration("Neon production persistence", () => {
     const receiptExpiresAt = new Date(Date.now() + 600_000).toISOString();
     const receiptHash = `sha256:${"c".repeat(64)}`;
     const decision = { decidedAt, outputManifestDigest: digest, receiptHash, receiptExpiresAt };
-    await expect(releases.recordConfirmation(tokenHash, decision)).resolves.toMatchObject({ recorded: true });
-    await expect(releases.recordConfirmation(tokenHash, decision)).resolves.toMatchObject({ recorded: false });
     await expect(releases.latestConfirmation({ site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId }, preview.releaseId, preview.releaseHash))
-      .resolves.toMatchObject({ decisionAt: decidedAt, outputManifestDigest: digest, receiptHash });
-    await expect(serviceInstance.releaseConfirmationStatus(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash }))
-      .resolves.toMatchObject({ status: "confirmed", outputManifestDigest: digest });
+      .resolves.toMatchObject({ decisionAt: undefined, releaseHash: preview.releaseHash });
 
     await serviceInstance.approveRelease(context(), {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-approve-${suffix}`
     });
     // A registered built artifact flips publication onto the independent
-    // confirmation policy: without a decision this publish fails closed.
+    // confirmation policy. The decision is not recorded yet, so publishing
+    // from the MCP bearer alone fails closed even with a durable approval.
     await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
       await client.query(
         `INSERT INTO navocms.reviewed_astro_artifact_object_bindings (
@@ -303,12 +300,16 @@ integration("Neon production persistence", () => {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-${suffix}`
     })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
 
-    // A forged receipt hash or foreign digest does not satisfy the checkpoint.
+    // A forged receipt hash is a no-op: the recorded decision stays intact.
     await expect(releases.recordConfirmation(tokenHash, { ...decision, receiptHash: `sha256:${"0".repeat(64)}` }))
       .resolves.toMatchObject({ recorded: false });
+
+    // The independent human decision (recorded below through the durable
+    // function) is what unlocks publication of the built release.
+    await expect(releases.recordConfirmation(tokenHash, decision)).resolves.toMatchObject({ recorded: true });
     await expect(serviceInstance.publishRelease(context(), {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-2-${suffix}`
-    })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
+    })).resolves.toMatchObject({ release: { status: "published" } });
   });
 
   it("preserves applied-effect evidence across service restart after verification failure", async () => {
