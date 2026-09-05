@@ -58,22 +58,23 @@ confirmation receipt, изменения дизайна, импортёр, CRM, 
 
 ## Локальные проверки и CI
 
-Окружение: локальная изолированная test-база PostgreSQL 17.9 (отдельный кластер на нестандартном
-порту, создан под этот спринт, staging/production и соседние проекты не использовались), Node 22,
-pnpm 10.26.0, точный HEAD `06ab6b8` + submission-коммит.
+Окружение (корректирующий цикл): выделенная Neon-ветка `agent-tests` (PostgreSQL 18, 0.25 CU,
+auto-suspend) через предоставленный помощник `scripts/test-neon.mjs` — чистая временная БД на
+запуск, миграции + provision + синтетический bootstrap внутри запуска, удаление базы в finally;
+staging/production и соседние проекты не использовались. Node 22, pnpm 10.26.0. Исходный спринт
+проверялся на локальном PostgreSQL 17.9-кластере (изолированном, вне репозитория).
 
 | Проверка | Команда | Результат |
 | --- | --- | --- |
-| Полный гейт | `pnpm check` | PASS (exit 0): contracts, boundaries, secrets, docs (markdownlint), links, typecheck, build smoke, catalogue, vitest, playwright |
-| Unit + integration vitest | входит в `pnpm check` с `NAVOCMS_INTEGRATION_DATABASE_URL`/`NAVOCMS_INTEGRATION_ADMIN_DATABASE_URL` | **222/222 passed, 39 files, 0 skipped, 0 failed** (включая все 4 PostgreSQL integration suite файла и новые тесты 1–3, 5 критериев) |
-| Visual/a11y (playwright + axe) | `pnpm test:visual` | **6/6 passed** (включая новый handoff-тест) |
-| Tenant isolation | `psql -f packages/persistence-postgres/tests/{rls,content,runtime,release-workflow,media}-isolation.sql` | 5/5 «checks passed» |
-| CI GitHub Actions | run [33989004141](https://github.com/Tsumibito/NavoCMS/actions/runs/33989004141) на `c0b5a567a6d93f7a20bb49d7a1eea9db1dedc169` (job `check`): **success**, ~2 мин | PASS; финальный head ветки добавляет только этот документ — принимающий подтверждает CI на фактическом merge/head SHA |
+| Полный гейт | `dotenvx run -f .env.test -- node scripts/test-neon.mjs` (два последовательных чистых запуска) | PASS ×2 (exit 0): build, `pnpm check` (contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright) + 5 isolation suites, временная БД удалена после каждого запуска |
+| Unit + integration vitest | входит в оба Neon-прогона (`NAVOCMS_NEON_TEST_RUN=true`, test-only timeout 180 с для удалённых round trips) | **226/226 passed, 39 files, 0 skipped, 0 failed** (счётчики сняты с первого прогона с полным логом; второй прогон — тот же набор, exit 0 без сбоев) |
+| Visual/a11y (playwright + axe) | входит в `pnpm check` | **6/6 passed** в обоих прогонах |
+| Tenant isolation | 5 SQL suites внутри помощника | 5/5 «Isolation passed» в обоих прогонах |
+| CI GitHub Actions | автоматически перезапускается на каждый push ветки (service postgres:17-alpine) | итоговый зелёный run фиксируется на финальном SHA и приводится в финальном ответе исполнителя; принимающий подтверждает CI на merge/head SHA |
 
-Замечание о повторных прогонах: интеграционные тесты рассчитаны на чистую БД (как в CI);
-на персистентной локальной базе второй прогон подряд даёт ожидаемые конфликты фиксированных
-фикстурных ключей — база пересоздаётся (`dropdb`/`createdb` + `pnpm db:migrate` + provision +
-bootstrap) перед каждым полным прогоном.
+Повторные прогоны не конфликтуют: помощник создаёт чистую временную БД на каждый запуск, поэтому
+фиксированные fixture-ключи не встречают записей предыдущего прогона (два последовательных чистых
+запуска выполнены без пересборки локального кластера).
 
 ## Воспроизведение исправленных ошибок (до/после)
 
@@ -111,6 +112,31 @@ bootstrap) перед каждым полным прогоном.
   формулирует это явно.
 - CI на PR: принимающий должен убедиться, что зелёный прогон принадлежит точному merge/head SHA.
 
+## Корректирующий цикл (changes requested → resubmitted)
+
+Приёмка PR #53 (head `58d105af3c6f7e94fbd1855b91671423d3f1f86c`) вернула два дефекта и одно
+уточнение; исправления продолжены в этой же ветке (корректирующие коммиты после implementation
+и submission коммитов), регрессии сначала добавлены красными на проверенном head.
+
+| # | Дефект приёмки | Корень | Исправление | Evidence |
+| --- | --- | --- | --- | --- |
+| P1 | Повтор `release_publish` тем же ключом после applied + verification failure возвращал `IDEMPOTENCY_INCOMPLETE` с `effectState: none` и текстом «No content was published» — ложное обещание при возможном внешнем эффекте первой попытки | Ветка `pending/failed` в `idempotentInTransaction` не различала transactional и provider-crossing операции | Сообщение incomplete reservation теперь строится из типа операции: для transactional — доказанный `none`; для provider-crossing (`release_publish/reconcile/rollback`) — `effectState: unknown`, recorded error code, указание `release_status`/`release_reconcile` (без повторного provider-эффекта) и запрет переиспользовать ключ. `safeTool` отдаёт это сообщение и `nextAction` в structuredContent | mcp.test.ts `keeps applied-effect evidence when a retry meets an incomplete reservation` (MCP transport: retry → `IDEMPOTENCY_INCOMPLETE`/`unknown`, без «No content was published», `publishCalls === 1`; reconcile → `published`, `publishCalls === 1`), `reports an unknown effect state while a non-transactional reservation is pending` (pending-ветка); postgres integration `preserves applied-effect evidence across service restart after verification failure` (перезапуск сервиса на том же durable store, reconcile после восстановления верификации) |
+| P2 | `metadata: { contact: { description: "x".repeat(180000) } }` на organization проходил схему, и `content_get` отдавал ~180 КБ при коротком Markdown | Проекция удаляла только `metadata.body` и не имела собственного бюджета | Бюджет метаданных 4 000 сериализованных JSON-символов на ответ (UTF-16 code units, ключи отсортированы): поля включаются целиком, негабаритные — исключаются целиком и перечисляются в `metadataTruncated`/`metadataTotalCharacters`/`metadataOmittedKeys` (без разрезания значения и без изменения сохранённого документа). Новый режим `content_read { metadataKey }` отдаёт omitted значение ограниченными окнами в рамках immutable revision и site scope | mcp.test.ts `bounds the read response budget across metadata and offers a bounded metadata continuation` (180 КБ fixture: ответ < 60 КБ, без гигантской строки; полная сборка значения из окон; unicode-значение с 500 эмодзи и ключ 300+ символов через выровненное окно; `METADATA_KEY_NOT_FOUND` для отсутствующего ключа) |
+| P3 | Текстовый fallback `review_preview_handoff` не пояснял, что capability URL рендерит proof-артефакт, а не настоящий design preview | Fallback дублировал только ready/expiry | Fallback дополнен той же формулировкой, что и виджет: «It renders a Markdown proof artifact, not the final site design.» | mcp.test.ts `reports a valid previewed handoff as ready…` проверяет текст через MCP client |
+
+Дополнительно обновлены: спецификация `mcp-editing-v0alpha1.md` (metadata budget, `metadataKey`
+continuation, retry-семантика incomplete reservation, proof-формулировка fallback, compatibility
+note) и ADR 0025 (два новых пункта Decision + Consequences). Принятые ранее решения — current-head
+CAS, keyset pagination, диапазон ключей 16–128 — не менялись. Новая миграция не потребовалась:
+для исправления P1 достаточно существующих `idempotency_records.status/error_code` и release
+checkpoints.
+
+Инфраструктура принимающего (Neon test-помощник `scripts/test-neon.mjs`, remote-timeout в
+`vitest.config.ts`, corrective handoff, Neon runbook, статус roadmap) включена в корректирующий
+PR без изменений; `.env.test`/`.env.keys` остаются локальными и в Git не попадают. Финальные
+прогоны выполнены на Neon `agent-tests` (чистая временная БД на запуск): результаты — в разделе
+«Локальные проверки и CI» ниже.
+
 ## Staging runbook (для принимающего)
 
 1. **Миграции:** новых нет. После деплоя выполнить штатную проверку `pnpm db:migrate` — ожидается
@@ -135,7 +161,13 @@ bootstrap) перед каждым полным прогоном.
 4. **Ошибочные сценарии:** не-uuid `cursor` → `PAGE_CURSOR_INVALID`; ключ 15 символов →
    отклонение tool-валидации; patch со случайным хэшем → `REVISION_CONFLICT`; patch от старой
    базы → `REVISION_NOT_CURRENT`; `release_publish` с неверным hash → `STALE_RELEASE_APPROVAL` +
-   «No content was published».
+   «No content was published»; после verification failure повтор `release_publish` тем же ключом →
+   `IDEMPOTENCY_INCOMPLETE` с `effectState: "unknown"`, записанным кодом ошибки и подсказкой
+   `release_status`/`release_reconcile` (текст НЕ утверждает «No content was published»);
+   `content_get` черновика с крупными метаданными → ответ в бюджете,
+   `metadataOmittedKeys` перечисляет негабаритные поля; `content_read { metadataKey }` дочитывает
+   их окнами; текст `review_preview_handoff` содержит «Markdown proof artifact, not the final
+   site design».
 5. **Restart/reconcile/rollback:** перезапустить MCP-контейнер между approve и publish →
    `release_reconcile {releaseId, releaseHash}` доводит до `published` без второго вызова
    провайдера (провайдер идемпотентен по release hash); для verification-failed сценария

@@ -62,11 +62,19 @@ calling the underlying data tool and presenting its result.
   unknown-but-well-formed cursor yields an empty page.
 - Markdown windows return at most 20,000 characters and report truncation and total size.
 - `content_read` returns the remaining source through repeated bounded Markdown windows, one
-  AST node's full text (at most 20,000 characters), or a page of AST nodes. Revisions are
-  immutable, so window offsets and node pages are stable across calls.
+  AST node's full text (at most 20,000 characters), a page of AST nodes, or the JSON value of
+  one metadata key (`metadataKey` with the same window parameters). Revisions are immutable, so
+  window offsets and node pages are stable across calls; windows are UTF-16 code-unit slices.
 - AST node listings return at most 100 nodes per response with 280-character text excerpts and
   report truncation and the total node count. Larger ASTs never bypass the budget through
   multiple excerpted pages plus full-node reads; each response stays inside its own bound.
+- Metadata projections exclude the `metadata.body` mirror and are capped at 4,000 serialized
+  JSON characters per response (UTF-16 code units, keys sorted for determinism). Fields that
+  no longer fit are omitted whole — never cut mid-value — and reported through
+  `metadataTruncated`, `metadataTotalCharacters`, and `metadataOmittedKeys`; each omitted value
+  remains readable through bounded `content_read` windows bound to the same immutable revision
+  and site scope. The combined read response therefore stays bounded across Markdown, AST, and
+  metadata regardless of how large an individual stored field is.
 - Structured content projections omit the `metadata.body` mirror so the full source is never
   duplicated behind a bounded field.
 - Diffs return at most 400 lines and report truncation and total size.
@@ -78,7 +86,10 @@ calling the underlying data tool and presenting its result.
   include stack traces, tokens, hidden reasoning, or unrestricted input payloads. An error after
   the provider applied an effect is never reported as "no content was published"; it names the
   applied effect and the `release_reconcile` recovery path, or honestly reports the outcome as
-  unknown.
+  unknown. Retrying with the same idempotency key after an incomplete reservation reports the
+  recorded state the same way: `none` only where the operation's transactional rollback proves
+  no effect, `unknown` with `release_status`/`release_reconcile` guidance for operations that
+  cross the provider boundary. A retry never repeats the provider effect.
 
 ## Mutation semantics
 
@@ -109,7 +120,9 @@ lock inside the same transaction as the insert.
 ## Preview and release boundary
 
 `preview_prepare` assembles a canonical release manifest, renders one immutable proof artifact, and
-returns an expiring 256-bit capability URL. The response contains revision, source, release, and
+returns an expiring 256-bit capability URL. The tool's text fallback states the same readiness and
+the same limitation as the widget: the URL renders a Markdown proof artifact, not the final site
+design; a rendered-design preview arrives with the Sprint 8.2 release boundary. The response contains revision, source, release, and
 artifact hashes. Preview responses set `X-Robots-Tag: noindex, nofollow, noarchive`, a matching HTML
 robots directive, `Cache-Control: private, no-store`, a restrictive CSP, and no referrer policy.
 
@@ -146,3 +159,11 @@ handoff renders `previewed` (and the legacy `ready-for-workflow`) payloads as re
 honest limitation that the capability URL renders a Markdown proof artifact, not a rendered design
 preview. No released JSON Schema changes; the v0alpha1 tool descriptions and this note document the
 new bounds.
+
+Post-acceptance corrections to the same sprint: `content_get` additionally bounds its metadata
+projection to 4,000 serialized characters (reporting omissions instead of truncating values
+mid-field), and `content_read` gains a `metadataKey` mode so omitted metadata stays reachable
+through bounded windows. Retrying an incomplete idempotency reservation now reports `effectState`
+of `unknown` with reconcile guidance for provider-crossing operations instead of a false
+"nothing was published" statement; the previously accepted current-head patch gate, keyset
+pagination, and the 16–128 key bound are unchanged.

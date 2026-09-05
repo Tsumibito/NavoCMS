@@ -57,16 +57,31 @@ everyday operations could lose work or report false outcomes:
   pre-effect failures. The review widget renders `previewed` handoffs as ready, links the
   expiring capability URL, and states that it renders a Markdown proof artifact rather than the
   future rendered-design preview.
+- **Bounded metadata projection.** Content reads never trust stored metadata to be small. The
+  projection drops the `body` mirror and packs the remaining fields into a 4,000 serialized
+  JSON-character budget per response; fields that do not fit are omitted whole and reported by
+  name (`metadataTruncated`, `metadataTotalCharacters`, `metadataOmittedKeys`), never cut
+  mid-value, and remain reachable through bounded `content_read` windows (`metadataKey` mode)
+  on the same immutable revision. Independent acceptance proved that a 180 KB allowed metadata
+  field otherwise bypassed the read budget, so the budget covers serialized keys and values,
+  not just AST node counts.
+- **Incomplete reservations keep effect evidence.** Retrying an operation whose idempotency
+  reservation is `pending` or `failed` reports what the durable record can prove: `none` only
+  when the operation is transactional and its rollback provably included the effect, `unknown`
+  (with `release_status`/`release_reconcile` guidance and the recorded error code) when the
+  operation crossed the provider boundary. The presence of a reservation alone is never treated
+  as evidence that nothing was published.
 
 ## Consequences
 
 - Concurrent edits conflict loudly and rebase explicitly; no everyday path silently drops a
   saved change. Callers rebasing after a conflict must use a new idempotency key.
 - Large sites are enumerable through supported tools, and large documents are fully readable
-  without unbounded responses or duplicated bodies.
+  without unbounded responses or duplicated bodies. Stored metadata values above the response
+  budget cost one extra bounded window per 20,000 characters to read back.
 - The 8–15 character key range is a compatibility break for clients that used short keys;
   `mcp-editing-v0alpha1.md` documents the tightened bound.
-- No database migration is required: cursors, head checks, and read bounds use existing columns
-  and indexes.
-- The proof-artifact wording keeps the widget honest until Sprint 8.2 delivers the real
-  rendered-design preview; it does not promise that capability early.
+- No database migration is required: cursors, head checks, read bounds, and reservation state
+  (`status`, `error_code`) use existing columns and indexes.
+- The proof-artifact wording keeps the widget and the text fallback honest until Sprint 8.2
+  delivers the real rendered-design preview; it does not promise that capability early.
