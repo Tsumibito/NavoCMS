@@ -12,6 +12,7 @@
 | База | свежий `origin/main` = `5fab3c0` (`docs: accept Sprint 8.1 and hand off real preview work (#56)`), содержит merge PR #53 (`9317092`), CI-правки PR #54 (`c10a231`) и исправление metadata continuation на границе MCP |
 | Ветка / worktree | `codex/sprint-8-2-real-preview`, отдельный worktree `tmp/navocms-sprint-8-2-preview` |
 | Implementation commit | `69768a2` (`feat(release): real pre-review preview, independent human confirmation, no-rebuild publication`) |
+| Verification commits | `de298a3` (resolver columns + resume polling), `30d8898` (plpgsql column qualification), `352c26f` (exact release binding in test fixture), `b15a3c4`/`bda627e`/`2792d0c` (confirmation gate test ordering) |
 | Submission commit | последний коммит ветки (этот файл); фактический head фиксирует принимающий |
 | PR | [Tsumibito/NavoCMS#57](https://github.com/Tsumibito/NavoCMS/pull/57) (Draft → Ready по готовности) |
 | Архитектурное решение | ADR [0026](../architecture/0026-real-preview-and-independent-human-confirmation.md) — оформлен **до** реализации; индекс ADR обновлён |
@@ -70,11 +71,19 @@ secrets/roles/WorkOS/Coolify/Pages/R2 — у принимающего.
 
 | Проверка | Команда / место | Результат |
 | --- | --- | --- |
-| Полный гейт ×2 | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` | PASS ×2 (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удаляется после каждого запуска |
-| Vitest unit+integration | входит в Neon-прогоны (`NAVOCMS_NEON_TEST_RUN=true`) | **231/231 passed, 0 skipped, 0 failed** — включая новые MCP-transport, HTTP browser-flow, confirmation persistence, build-resume тесты |
-| Playwright + axe | входит в `pnpm check` | **7/7 passed** (включая новый browser-flow confirmation спек) |
+| Полный гейт ×2 | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` — два последовательных чистых запуска на head `2792d0c`+ | PASS ×2 (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удаляется после каждого запуска |
+| Vitest unit+integration | входит в Neon-прогоны (`NAVOCMS_NEON_TEST_RUN=true`) | **232/232 passed, 39 files, 0 skipped, 0 failed** в обоих прогонах — включая новые MCP-transport, HTTP browser-flow, confirmation persistence и build-resume тесты |
+| Playwright + axe | входит в `pnpm check` | **7/7 passed** в обоих прогонах (включая новый browser-flow confirmation спек) |
 | SQL isolation | 5 suites внутри помощника | 5/5 «Isolation passed» в каждом прогоне |
 | CI GitHub Actions | автоматически на PR; итоговый зелёный run на финальном SHA приводится в финальном ответе исполнителя | принимающий подтверждает CI на merge/head SHA |
+
+Итерации Neon-прогонов до зелёной пары зафиксированы честно: прогон 1 — `42P13` (CREATE OR
+REPLACE не может изменить тип возврата `resolve_release_preview`; в 0013 добавлен DROP IF EXISTS
+перед пересозданием), прогоны 2–8 — дефекты самих новых тестов (отсутствовавшая колонка
+`receipt_expires_at` в resolver-функции, гонка асинхронного resume-executor без опроса, FK
+составного биндинга синтетического артефакта, порядок записи решения относительно проверки гейта).
+Каждый такой коммит перепроверялся полным прогоном; prod-код этих итераций не менялся после
+`de298a3`/`30d8898` (миграция) и `69768a2` (реализация).
 
 ## Воспроизведение закрытых дефектов исходного head
 
