@@ -2,6 +2,8 @@ name: Quality checks
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -14,8 +16,10 @@ concurrency:
 
 jobs:
   check:
+    # Iterate locally while a PR is a draft; prove every review-ready head and main merge.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 8
     services:
       postgres:
         image: postgres:17-alpine
@@ -70,9 +74,10 @@ jobs:
           NAVOCMS_BOOTSTRAP_PRINCIPAL_KIND: human
           NAVOCMS_BOOTSTRAP_SITE_ROLE: owner
         run: |
-          pnpm db:migrate
-          pnpm db:provision-runtime
-          pnpm db:bootstrap-site
+          pnpm build
+          node packages/persistence-postgres/dist/migrate.js
+          node packages/persistence-postgres/dist/provision-runtime-role.js
+          node packages/persistence-postgres/dist/bootstrap-site.js
 
       - name: Validate contracts, production wiring, and all test suites
         env:
