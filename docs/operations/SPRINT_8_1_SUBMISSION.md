@@ -13,7 +13,7 @@ staging-деплой и обновление статуса остаются з�
 | Ветка | `codex/sprint-8-1-editing-integrity` (создана от базового коммита, не от старого `main`) |
 | Implementation commit | `06ab6b8` (`feat(editing): reliable everyday edits with current-head patches and bounded reads`) |
 | Submission commit | этот документ идёт последним коммитом ветки; принимающий фиксирует фактический HEAD (`git rev-parse HEAD`) |
-| PR | https://github.com/Tsumibito/NavoCMS/pull/53 |
+| PR | [Tsumibito/NavoCMS#53](https://github.com/Tsumibito/NavoCMS/pull/53) |
 | Изменённые контракты | `docs/specs/mcp-editing-v0alpha1.md` (bounds, mutation semantics, compatibility note); ADR `docs/architecture/0025-current-head-patch-gate-and-bounded-reads.md`; индекс ADR |
 
 Конечное изменение поведения: правка текста больше не может молча потерять параллельную правку —
