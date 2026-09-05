@@ -50,15 +50,25 @@ export interface PatchDraftInput {
   readonly actorId: string;
 }
 
+/**
+ * A keyset page over a site-scoped listing. `nextCursor` is the opaque
+ * identifier of the last returned row (the content variant id); a missing
+ * `nextCursor` means the enumeration reached the end of the current set.
+ */
+export interface RepositoryPage<T> {
+  readonly items: readonly T[];
+  readonly nextCursor?: string;
+}
+
 export interface EditingRepository {
   getSite(scope: RepositoryScope): Awaitable<SiteDescriptor | undefined>;
-  search(context: RepositoryContext, query: string, limit: number): Awaitable<readonly ContentHit[]>;
+  search(context: RepositoryContext, query: string, limit: number, cursor?: string): Awaitable<RepositoryPage<ContentHit>>;
   findDocument(context: RepositoryContext, documentId: string): Awaitable<ContentHit | undefined>;
   getRevision(context: RepositoryContext, revisionId: string): Awaitable<ContentRevision>;
   createDraft(input: CreateDraftInput): Awaitable<DraftSummary>;
   patchDraft(input: PatchDraftInput): Awaitable<{ readonly draft: DraftSummary; readonly diff: RevisionDiff }>;
   compare(context: RepositoryContext, fromRevisionId: string, toRevisionId: string): Awaitable<RevisionDiff>;
-  listDrafts(context: RepositoryContext, limit: number): Awaitable<readonly DraftSummary[]>;
+  listDrafts(context: RepositoryContext, limit: number, cursor?: string): Awaitable<RepositoryPage<DraftSummary>>;
   workflowFor(context: RepositoryContext, revisionId: string): Awaitable<string>;
 }
 
@@ -83,27 +93,39 @@ export class InMemoryEditingRepository implements EditingRepository {
     return this.#sites.get(scopeKey(scope.tenantId, scope.siteId));
   }
 
-  public search({ site }: RepositoryContext, query: string, limit: number): readonly ContentHit[] {
+  /**
+   * Keyset page over document/variant rows ordered by (slug, locale, variantId).
+   * The cursor is the previous page's last variant id; an unknown cursor yields
+   * an empty page. Slugs and locales are immutable, so concurrent revision
+   * patches never reorder rows; documents created mid-enumeration sort ahead of
+   * an in-flight cursor and appear on the next pass.
+   */
+  public search({ site }: RepositoryContext, query: string, limit: number, cursor?: string): RepositoryPage<ContentHit> {
     const needle = query.trim().toLocaleLowerCase();
-    const hits = this.#engine.listDocuments(site).flatMap((document) => {
-      const indexed = [...this.#variants.entries()]
+    const rows = this.#engine.listDocuments(site).flatMap((document) =>
+      [...this.#variants.entries()]
         .filter(([key, variant]) => key.startsWith(`${scopeKey(site.tenantId, site.siteId)}:`) && variant.documentId === document.id)
-        .map(([, variant]) => variant);
-      return indexed.map((variant) => {
-        const revisions = this.#engine.listRevisions(site, variant.variantId);
-        const latest = revisions.at(-1)!;
-        return toHit(variant, latest);
-      });
-    });
-    return Object.freeze(
-      hits
-        .filter((hit) => {
-          if (!needle) return true;
-          return `${hit.title} ${hit.slug} ${hit.typeName} ${hit.excerpt}`.toLocaleLowerCase().includes(needle);
+        .map(([, variant]) => {
+          const revision = this.#engine.listRevisions(site, variant.variantId).at(-1)!;
+          return {
+            variant,
+            revision,
+            hit: toHit(variant, revision),
+            key: [variant.slug, variant.locale, variant.variantId] as const
+          };
         })
-        .sort((left, right) => left.slug.localeCompare(right.slug))
-        .slice(0, limit)
     );
+    const cursorRow = cursor === undefined ? undefined : rows.find((row) => row.variant.variantId === cursor);
+    if (cursor !== undefined && !cursorRow) return Object.freeze({ items: Object.freeze([]) });
+    const ordered = rows
+      .filter((row) => !needle || `${row.hit.title} ${row.hit.slug} ${row.hit.typeName} ${row.hit.excerpt}`.toLocaleLowerCase().includes(needle))
+      .filter((row) => !cursorRow || compareTuples(row.key, cursorRow.key) > 0)
+      .sort((left, right) => compareTuples(left.key, right.key));
+    const page = ordered.slice(0, limit);
+    return Object.freeze({
+      items: Object.freeze(page.map((row) => row.hit)),
+      ...(ordered.length > limit ? { nextCursor: page.at(-1)!.variant.variantId } : {})
+    });
   }
 
   public findDocument({ site }: RepositoryContext, documentId: string): ContentHit | undefined {
@@ -163,19 +185,31 @@ export class InMemoryEditingRepository implements EditingRepository {
     return this.#engine.compare(site, fromRevisionId, toRevisionId);
   }
 
-  public listDrafts({ site }: RepositoryContext, limit: number): readonly DraftSummary[] {
-    return Object.freeze(
-      [...this.#drafts.entries()]
-        .filter(([key]) => key.startsWith(`${scopeKey(site.tenantId, site.siteId)}:`))
-        .map(([, revisionId]) => {
-          const revision = this.#engine.getRevision(site, revisionId);
-          const indexed = this.#variants.get(variantKey(site, revision.variantId));
-          if (!indexed) throw new Error("Draft index is inconsistent");
-          return toDraft(indexed, revision);
-        })
-        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-        .slice(0, limit)
-    );
+  /**
+   * Keyset page over the draft queue ordered by (updatedAt, variantId)
+   * descending. A patch moves a draft's position forward, so an in-flight pass
+   * may shift it into a later page or surface it again; a full pass over an
+   * unchanged queue yields every draft exactly once.
+   */
+  public listDrafts({ site }: RepositoryContext, limit: number, cursor?: string): RepositoryPage<DraftSummary> {
+    const rows = [...this.#drafts.entries()]
+      .filter(([key]) => key.startsWith(`${scopeKey(site.tenantId, site.siteId)}:`))
+      .map(([, revisionId]) => {
+        const revision = this.#engine.getRevision(site, revisionId);
+        const indexed = this.#variants.get(variantKey(site, revision.variantId));
+        if (!indexed) throw new Error("Draft index is inconsistent");
+        return { indexed, revision, key: [revision.createdAt, revision.variantId] as const };
+      });
+    const cursorRow = cursor === undefined ? undefined : rows.find((row) => row.revision.variantId === cursor);
+    if (cursor !== undefined && !cursorRow) return Object.freeze({ items: Object.freeze([]) });
+    const ordered = rows
+      .filter((row) => !cursorRow || compareTuples(row.key, cursorRow.key) < 0)
+      .sort((left, right) => compareTuples(right.key, left.key));
+    const page = ordered.slice(0, limit);
+    return Object.freeze({
+      items: Object.freeze(page.map((row) => toDraft(row.indexed, row.revision))),
+      ...(ordered.length > limit ? { nextCursor: page.at(-1)!.revision.variantId } : {})
+    });
   }
 
   public workflowFor({ site }: RepositoryContext, revisionId: string): string {
@@ -244,6 +278,13 @@ function draftKey(site: Pick<SiteDescriptor, "tenantId" | "siteId">, documentId:
 
 export function inputFingerprint(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function compareTuples(left: readonly string[], right: readonly string[]): number {
+  for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
+    if (left[index] !== right[index]) return left[index]! < right[index]! ? -1 : 1;
+  }
+  return left.length - right.length;
 }
 
 function canonicalJson(value: unknown): string {

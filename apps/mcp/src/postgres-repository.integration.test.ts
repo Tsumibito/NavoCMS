@@ -298,6 +298,144 @@ integration("Neon production persistence", () => {
     ]);
   });
 
+  it("rejects a concurrent patch from a stale base with the current head and preserves both edits after rebase", async () => {
+    const editing = new PostgresEditingRepository(database!);
+    const suffix = randomUUID().replace(/-/g, "").slice(0, 8);
+    const created = await editing.createDraft({
+      site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] },
+      typeName: "article",
+      slug: `concurrent-${suffix}`,
+      locale: "en",
+      title: `Concurrent ${suffix}`,
+      source: `# Concurrent ${suffix}\n\nFirst paragraph.\n\nSecond paragraph.\n`,
+      actorId: principalId
+    });
+    const baseRevision = await editing.getRevision({ site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId }, created.revisionId);
+    const paragraphs = baseRevision.ast.nodes.filter((node) => node.type === "text");
+    expect(paragraphs.length).toBeGreaterThanOrEqual(2);
+    const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
+    const patch = (nodeId: string, value: string) => editing.patchDraft({
+      site: repositoryContext.site,
+      revisionId: created.revisionId,
+      baseSourceHash: created.sourceHash,
+      operations: [{ op: "replaceText", nodeId, value }],
+      actorId: principalId
+    });
+    const attempts = await Promise.allSettled([
+      patch(paragraphs[0]!.id, `First concurrent edit ${suffix}.`),
+      patch(paragraphs[1]!.id, `Second concurrent edit ${suffix}.`)
+    ]);
+    const fulfilled = attempts.filter((attempt) => attempt.status === "fulfilled");
+    const rejected = attempts.filter((attempt) => attempt.status === "rejected") as PromiseRejectedResult[];
+    if (rejected.length !== 1) throw new Error("expected exactly one rejected attempt");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    const winner = (fulfilled[0] as PromiseFulfilledResult<{ draft: { revisionId: string; revisionNumber: number; sourceHash: string; excerpt: string } }>).value;
+    expect(winner.draft.revisionNumber).toBe(2);
+    const loser = rejected[0]!.reason as { code?: string; details?: Record<string, unknown> };
+    expect(loser.code).toBe("REVISION_NOT_CURRENT");
+    expect(loser.details).toMatchObject({
+      currentRevisionId: winner.draft.revisionId,
+      currentRevisionNumber: 2
+    });
+
+    // The winner applied one edit; the rebased patch applies the other on top
+    // of the current head so both edits survive.
+    const winnerValue = winner.draft.excerpt
+      .includes(`First concurrent edit ${suffix}`) ? `First concurrent edit ${suffix}.` : `Second concurrent edit ${suffix}.`;
+    const loserValue = winnerValue.startsWith("First") ? `Second concurrent edit ${suffix}.` : `First concurrent edit ${suffix}.`;
+    const loserOriginal = loserValue.startsWith("First") ? "First paragraph." : "Second paragraph.";
+    const head = await editing.getRevision(repositoryContext, winner.draft.revisionId);
+    const staleNode = head.ast.nodes.find((node) => node.type === "text" && node.text === loserOriginal);
+    expect(staleNode).toBeDefined();
+    const rebased = await editing.patchDraft({
+      site: repositoryContext.site,
+      revisionId: winner.draft.revisionId,
+      baseSourceHash: winner.draft.sourceHash,
+      operations: [{ op: "replaceText", nodeId: staleNode!.id, value: loserValue }],
+      actorId: principalId
+    });
+    expect(rebased.draft.revisionNumber).toBe(3);
+    const finalRevision = await editing.getRevision(repositoryContext, rebased.draft.revisionId);
+    expect(finalRevision.source).toContain(`First concurrent edit ${suffix}.`);
+    expect(finalRevision.source).toContain(`Second concurrent edit ${suffix}.`);
+  });
+
+  it("replays a completed patch by idempotency key after the head advanced and rejects key reuse with different input", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article",
+      slug: `replay-${suffix}`,
+      locale: "en",
+      title: `Replay ${suffix}`,
+      markdown: "# Replay\n\nOriginal text.\n",
+      idempotencyKey: `replay-draft-${suffix}`
+    }) as { draft: { revisionId: string; sourceHash: string } };
+    const content = await serviceInstance.getContent(context(), created.draft.revisionId) as { astNodes: { id: string; type: string; text: string }[] };
+    const paragraph = content.astNodes.find((node) => node.type === "text")!;
+    const patchInput = {
+      revisionId: created.draft.revisionId,
+      baseSourceHash: created.draft.sourceHash,
+      operations: [{ op: "replaceText" as const, nodeId: paragraph.id, value: "Replayed edit." }],
+      idempotencyKey: `replay-patch-${suffix}`
+    };
+    const first = await serviceInstance.patchRevision(context(), patchInput) as { draft: { revisionId: string; sourceHash: string } };
+    const replayed = await serviceInstance.patchRevision(context(), patchInput) as { draft: { revisionId: string } };
+    expect(replayed.draft.revisionId).toBe(first.draft.revisionId);
+    await expect(serviceInstance.patchRevision(context(), {
+      ...patchInput,
+      operations: [{ op: "replaceText" as const, nodeId: paragraph.id, value: "Different edit." }]
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+  });
+
+  it("enumerates 45 documents through search and draft cursors without gaps or duplicates", async () => {
+    const suffix = randomUUID().replace(/-/g, "").slice(0, 6);
+    const serviceInstance = service();
+    for (let index = 1; index <= 45; index += 1) {
+      await serviceInstance.createDraft(context(), {
+        typeName: "article",
+        slug: `cursor-${suffix}-${String(index).padStart(3, "0")}`,
+        locale: "en",
+        title: `Cursor ${index}`,
+        markdown: `# Cursor ${index}\n`,
+        idempotencyKey: `cursor-${suffix}-${String(index).padStart(3, "0")}`
+      });
+    }
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = await serviceInstance.search(context(), `cursor-${suffix}`, { limit: 7, ...(cursor !== undefined ? { cursor } : {}) }) as { results: { id: string }[]; nextCursor?: string };
+      for (const hit of page.results) {
+        expect(seen.has(hit.id)).toBe(false);
+        seen.add(hit.id);
+      }
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 20);
+    expect(seen.size).toBe(45);
+
+    const drafts = new Set<string>();
+    let draftCursor: string | undefined;
+    let draftPages = 0;
+    do {
+      const page = await serviceInstance.listDrafts(context(), { limit: 7, ...(draftCursor !== undefined ? { cursor: draftCursor } : {}) }) as { drafts: { revisionId: string }[]; nextCursor?: string };
+      for (const draft of page.drafts) {
+        expect(drafts.has(draft.revisionId)).toBe(false);
+        drafts.add(draft.revisionId);
+      }
+      draftCursor = page.nextCursor;
+      draftPages += 1;
+    } while (draftCursor && draftPages < 20);
+    expect(drafts.size).toBeGreaterThanOrEqual(45);
+
+    await expect(serviceInstance.search(context(), "", { cursor: "not-a-uuid" }))
+      .rejects.toMatchObject({ code: "PAGE_CURSOR_INVALID" });
+    const unknownCursorPage = await serviceInstance.search(context(), "", { cursor: randomUUID() }) as { results: unknown[] };
+    expect(unknownCursorPage.results).toEqual([]);
+  });
+
   it("executes the production path with the pinned provider and charges durable policy usage once", async () => {
     const suffix = randomUUID().replace(/-/g, "");
     const policy = new PostgresRuntimePolicyGuard(database!);

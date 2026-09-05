@@ -43,6 +43,66 @@ describe("content revisions, relations, variants, and portability", () => {
     expect(engine.listRevisions(scope, created.variant.id)).toHaveLength(2);
   });
 
+  it("fails closed when a patch is based on a revision that is no longer the variant head", () => {
+    const engine = deterministicEngine();
+    engine.registerPack(scope, editorialPack);
+    const created = engine.createDocument({
+      ...scope,
+      typeName: "article",
+      slug: "concurrent-edits",
+      locale: "en",
+      source: "# Concurrent edits\n\nFirst paragraph.\n\nSecond paragraph.\n",
+      metadata: { title: "Concurrent edits" },
+      provenance: { kind: "human", actorId: "editor-1" }
+    });
+    const textNodes = created.revision.ast.nodes.filter((node) => node.type === "text");
+    const firstEdit = engine.patchRevision({
+      ...scope,
+      revisionId: created.revision.id,
+      baseSourceHash: created.revision.sourceHash,
+      operations: [{ op: "replaceText", nodeId: textNodes[0]!.id, value: "First edit." }],
+      provenance: { kind: "agent", actorId: "agent-1" }
+    });
+    expect(firstEdit.revision.number).toBe(2);
+
+    // A second edit that still targets the stale r1 base must not silently make
+    // a r1-based revision the current head; it fails with the actual head.
+    const staleError = (() => {
+      try {
+        engine.patchRevision({
+          ...scope,
+          revisionId: created.revision.id,
+          baseSourceHash: created.revision.sourceHash,
+          operations: [{ op: "replaceText", nodeId: textNodes[1]!.id, value: "Second edit." }],
+          provenance: { kind: "agent", actorId: "agent-2" }
+        });
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    })();
+    expect((staleError as { code?: string }).code).toBe("REVISION_NOT_CURRENT");
+    expect((staleError as { details?: Record<string, unknown> }).details).toMatchObject({
+      currentRevisionId: firstEdit.revision.id,
+      currentRevisionNumber: 2,
+      currentSourceHash: firstEdit.revision.sourceHash
+    });
+    expect(engine.listRevisions(scope, created.variant.id)).toHaveLength(2);
+
+    // A rebased patch carries both edits forward in one head lineage.
+    const rebased = engine.patchRevision({
+      ...scope,
+      revisionId: firstEdit.revision.id,
+      baseSourceHash: firstEdit.revision.sourceHash,
+      operations: [{ op: "replaceText", nodeId: textNodes[1]!.id, value: "Second edit." }],
+      provenance: { kind: "agent", actorId: "agent-2" }
+    });
+    expect(rebased.revision.number).toBe(3);
+    expect(rebased.revision.source).toContain("First edit.");
+    expect(rebased.revision.source).toContain("Second edit.");
+    expect(engine.listRevisions(scope, created.variant.id)).toHaveLength(3);
+  });
+
   it("validates relations and round-trips a redacted portable bundle", () => {
     const engine = deterministicEngine();
     engine.registerPack(scope, editorialPack);

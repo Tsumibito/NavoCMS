@@ -1,5 +1,7 @@
 import { App } from "@modelcontextprotocol/ext-apps";
 
+import { workflowHandoffMarkup, workflowReady, type WorkflowViewData } from "./widget-view.js";
+
 type ViewData = Record<string, unknown> & { view?: string };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -99,13 +101,14 @@ function renderDrafts(data: ViewData): void {
 }
 
 function renderWorkflow(data: ViewData): void {
-  const ready = data.status === "ready-for-workflow";
+  const view = data as WorkflowViewData;
+  const ready = workflowReady(view.status);
   root.innerHTML = shell(
     "Preview handoff",
     ready ? "Ready" : "Blocked",
-    shortHash(data.sourceHash),
-    `<div class="handoff"><div class="pulse" aria-hidden="true"></div><div><h1>${ready ? "Revision is bound" : "Preview is blocked"}</h1><p>${escapeHtml(value(data.note, "No workflow detail was returned."))}</p><dl><dt>Workflow</dt><dd>${escapeHtml(value(data.workflow, "—"))}</dd><dt>Next step</dt><dd>${escapeHtml(value(data.nextStep, "—"))}</dd><dt>Public URL</dt><dd>Not created</dd></dl></div></div>`,
-    "No public or indexable preview is created in this step"
+    shortHash(view.sourceHash),
+    workflowHandoffMarkup(view),
+    "An expiring capability URL is created; no public or indexable preview is published in this step"
   );
 }
 

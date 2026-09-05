@@ -60,27 +60,61 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
 
   if (canRead) server.registerTool("content_search", {
     title: "Search site content",
-    description: "Search titles, slugs, types, and Markdown excerpts inside the authorized site. Returns bounded summaries, revision IDs, and source hashes.",
+    description: "Search titles, slugs, types, and Markdown excerpts inside the authorized site. Returns bounded summaries, revision IDs, source hashes, and an opaque cursor for the next page.",
     inputSchema: {
       query: z.string().max(500).default(""),
-      limit: z.number().int().min(1).max(20).optional()
+      limit: z.number().int().min(1).max(20).optional(),
+      cursor: cursorSchema()
     },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ query, limit }) => result("Content search completed", await service.search(context, query, limit))));
+  }, safeTool(async ({ query, limit, cursor }) => result("Content search completed", await service.search(context, query, {
+    ...(limit !== undefined ? { limit } : {}),
+    ...(cursor !== undefined ? { cursor } : {})
+  }))));
 
   if (canRead) server.registerTool("content_get", {
     title: "Read a content revision",
-    description: "Read portable Markdown, safe metadata, stable AST node IDs, and the source hash for one authorized revision. Use before proposing a patch.",
+    description: "Read the first bounded Markdown window, safe metadata, bounded AST node IDs, and the source hash for one authorized revision. Use content_read for the remainder or for one full node.",
     inputSchema: { revisionId: z.string().min(1) },
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ revisionId }) => result("Content revision loaded", await service.getContent(context, revisionId))));
 
+  if (canRead) server.registerTool("content_read", {
+    title: "Read bounded content windows",
+    description: "Continue reading a revision in bounded pieces: a Markdown window (markdownOffset), one AST node's full text (nodeId), or a page of AST nodes (nodeOffset). Revisions are immutable, so windows are stable.",
+    inputSchema: {
+      revisionId: z.string().min(1),
+      markdownOffset: z.number().int().min(0).max(10_000_000).optional(),
+      markdownLength: z.number().int().min(1).max(20_000).optional(),
+      nodeId: z.string().min(1).optional(),
+      nodeOffset: z.number().int().min(0).max(10_000_000).optional(),
+      nodeLimit: z.number().int().min(1).max(100).optional()
+    },
+    annotations: readOnlyAnnotations()
+  }, safeTool(async ({ revisionId, markdownOffset, markdownLength, nodeId, nodeOffset, nodeLimit }) => result(
+    "Content window loaded",
+    await service.readContent(context, {
+      revisionId,
+      ...(markdownOffset !== undefined ? { markdownOffset } : {}),
+      ...(markdownLength !== undefined ? { markdownLength } : {}),
+      ...(nodeId !== undefined ? { nodeId } : {}),
+      ...(nodeOffset !== undefined ? { nodeOffset } : {}),
+      ...(nodeLimit !== undefined ? { nodeLimit } : {})
+    })
+  )));
+
   if (canRead) server.registerTool("drafts_list", {
     title: "List drafts",
-    description: "List the newest bounded draft queue for the authorized site.",
-    inputSchema: { limit: z.number().int().min(1).max(20).optional() },
+    description: "List the newest bounded draft queue for the authorized site. Pass nextCursor from the previous page to continue.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(20).optional(),
+      cursor: cursorSchema()
+    },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ limit }) => result("Draft queue loaded", await service.listDrafts(context, limit))));
+  }, safeTool(async ({ limit, cursor }) => result("Draft queue loaded", await service.listDrafts(context, {
+    ...(limit !== undefined ? { limit } : {}),
+    ...(cursor !== undefined ? { cursor } : {})
+  }))));
 
   if (canDraft) server.registerTool("draft_create", {
     title: "Create a Markdown draft",
@@ -92,7 +126,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
       title: z.string().min(1).max(180),
       markdown: z.string().min(1).max(200_000),
       metadata: z.record(z.string(), z.unknown()).optional(),
-      idempotencyKey: z.string().min(8).max(128)
+      idempotencyKey: idempotencyKeySchema()
     },
     annotations: {
       readOnlyHint: false,
@@ -109,7 +143,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
       revisionId: z.string().min(1),
       baseSourceHash: z.string().regex(/^[a-f0-9]{64}$/),
       operations: z.array(operationSchema).min(1).max(50),
-      idempotencyKey: z.string().min(8).max(128)
+      idempotencyKey: idempotencyKeySchema()
     },
     annotations: {
       readOnlyHint: false,
@@ -132,7 +166,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
   if (canDraft) server.registerTool("preview_prepare", {
     title: "Create a protected immutable preview",
     description: "Build an expiring noindex capability URL and bind it to the exact release and artifact hashes. This does not publish.",
-    inputSchema: { revisionId: z.string().min(1), idempotencyKey: z.string().min(8).max(128) },
+    inputSchema: { revisionId: z.string().min(1), idempotencyKey: idempotencyKeySchema() },
     annotations: writeAnnotations()
   }, safeTool(async ({ revisionId, idempotencyKey }) => result("Protected preview created; nothing was published", await service.preparePreview(context, revisionId, idempotencyKey))));
 
@@ -155,14 +189,14 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     description: "Publish the identical previewed artifact, verify its hash, and checkpoint the durable workflow. Requires content:publish.",
     inputSchema: exactReleaseInput(),
     annotations: writeAnnotations()
-  }, safeTool(async (input) => result("Approved release published and verified", await service.publishRelease(context, input))));
+  }, safeTool(async (input) => result("Approved release published and verified", await service.publishRelease(context, input)), { effectful: true }));
 
   if (canPublish) server.registerTool("release_reconcile", {
     title: "Reconcile an incomplete publication",
     description: "Resume or verify a partially completed publication without duplicating an already checkpointed effect.",
     inputSchema: exactReleaseInput(),
     annotations: writeAnnotations()
-  }, safeTool(async (input) => result("Release workflow reconciled", await service.reconcileRelease(context, input))));
+  }, safeTool(async (input) => result("Release workflow reconciled", await service.reconcileRelease(context, input)), { effectful: true }));
 
   if (canPublish) server.registerTool("release_rollback", {
     title: "Roll back to the previous verified publication",
@@ -174,7 +208,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
       idempotentHint: true,
       openWorldHint: false
     }
-  }, safeTool(async (input) => result("Release rolled back to the previous verified publication", await service.rollbackRelease(context, input))));
+  }, safeTool(async (input) => result("Release rolled back to the previous verified publication", await service.rollbackRelease(context, input)), { effectful: true }));
 
   if (canMediaRead && media) registerMediaReadTools(server, media, context);
   if (canMediaWrite && media) registerMediaWriteTools(server, media, context);
@@ -354,20 +388,25 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     annotations: readOnlyAnnotations(),
     _meta: appMeta
   }, safeTool(async ({ limit }) => {
-    const queue = await service.listDrafts(context, limit) as Record<string, unknown>;
+    const queue = await service.listDrafts(context, limit !== undefined ? { limit } : {}) as Record<string, unknown>;
     return result("Draft queue opened", { view: "drafts", ...queue });
   }));
 
   if (canDraft) registerAppTool(server, "review_preview_handoff", {
     title: "Show preview handoff",
     description: "Render whether an immutable revision is safely bound and ready for the protected preview workflow.",
-    inputSchema: { revisionId: z.string().min(1), idempotencyKey: z.string().min(8).max(128) },
+    inputSchema: { revisionId: z.string().min(1), idempotencyKey: idempotencyKeySchema() },
     annotations: writeAnnotations(),
     _meta: appMeta
-  }, safeTool(async ({ revisionId, idempotencyKey }) => result("Protected preview opened", {
-    view: "workflow",
-    ...await service.preparePreview(context, revisionId, idempotencyKey)
-  })));
+  }, safeTool(async ({ revisionId, idempotencyKey }) => {
+    const preview = await service.preparePreview(context, revisionId, idempotencyKey) as unknown as Record<string, unknown>;
+    const ready = preview.status === "previewed" || preview.status === "ready-for-workflow";
+    // The text fallback must report the same result the widget renders.
+    const message = ready
+      ? `Protected preview is bound and ready; the capability URL expires at ${String(preview.expiresAt)}. Nothing was published.`
+      : `Protected preview is blocked (${String(preview.status)}); nothing was published.`;
+    return result(message, { view: "workflow", ...preview });
+  }));
 }
 
 function readOnlyAnnotations() {
@@ -386,8 +425,22 @@ function exactReleaseInput() {
   return {
     releaseId: z.string().uuid(),
     releaseHash: z.string().regex(/^[a-f0-9]{64}$/),
-    idempotencyKey: z.string().min(8).max(128)
+    idempotencyKey: idempotencyKeySchema()
   };
+}
+
+/**
+ * 16–128 characters everywhere: the floor matches the event envelope's
+ * `navoidempotencykey` minLength so a key accepted by a tool can never fail
+ * only at event validation after the mutation was prepared.
+ */
+function idempotencyKeySchema() {
+  return z.string().min(16).max(128);
+}
+
+/** Opaque keyset cursor: the previous page's last content variant id. */
+function cursorSchema() {
+  return z.string().uuid().optional();
 }
 
 function result(message: string, structuredContent: object) {
@@ -398,8 +451,25 @@ function jsonOnly(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 
+/** Error codes that are proven to fire before any external effect was started. */
+const PRE_EFFECT_ERROR_CODES = new Set([
+  "STALE_RELEASE_APPROVAL",
+  "IDEMPOTENCY_KEY_INVALID",
+  "IDEMPOTENCY_KEY_REUSED",
+  "IDEMPOTENCY_INCOMPLETE",
+  "HUMAN_APPROVAL_REQUIRED",
+  "SITE_NOT_REGISTERED",
+  "CONTENT_NOT_FOUND",
+  "RELEASE_APPROVAL_CHECKPOINT_INVALID"
+]);
+
+const APPLIED_EFFECT_TEXT = "The provider effect was applied, but live verification did not succeed and the workflow is not complete. Run release_reconcile with the same release hash to verify it again; the provider effect is not repeated.";
+const UNKNOWN_EFFECT_TEXT = "The outcome of the provider call is unknown. Read release_status, then run release_reconcile with the same release hash; the provider treats the release hash as its idempotency key, so reconciliation does not duplicate the effect.";
+const NO_EFFECT_TEXT = "No content was published.";
+
 function safeTool<TArgs extends Record<string, unknown>>(
-  handler: (args: TArgs) => Promise<ReturnType<typeof result> | ReturnType<typeof jsonOnly>>
+  handler: (args: TArgs) => Promise<ReturnType<typeof result> | ReturnType<typeof jsonOnly>>,
+  options: { readonly effectful?: boolean } = {}
 ) {
   return async (args: TArgs) => {
     try {
@@ -408,12 +478,27 @@ function safeTool<TArgs extends Record<string, unknown>>(
       const code = error instanceof SecurityError || error instanceof ContentError || error instanceof KernelError || error instanceof McpEditingError
         ? error.code
         : publicCloudflareDeliveryErrorCode(error) ?? "REQUEST_REJECTED";
-      return {
-        isError: true as const,
-        content: [{ type: "text" as const, text: `NavoCMS rejected the request (${code}). No content was published.` }]
-      };
+      const { text, effectState } = effectAwareMessage(error, code, options.effectful === true);
+      const structured: Record<string, unknown> = { code, effectState };
+      if (error instanceof ContentError) {
+        for (const key of ["currentRevisionId", "currentSourceHash", "currentRevisionNumber"] as const) {
+          const value = error.details[key];
+          if (typeof value === "string" || typeof value === "number") structured[key] = value;
+        }
+      }
+      return { isError: true as const, content: [{ type: "text" as const, text }], structuredContent: structured };
     }
   };
+}
+
+function effectAwareMessage(error: unknown, code: string, effectful: boolean): { readonly text: string; readonly effectState: "none" | "applied" | "unknown" } {
+  if (error instanceof McpEditingError && error.effectState === "applied") {
+    return { text: `NavoCMS rejected the request (${code}). ${APPLIED_EFFECT_TEXT}`, effectState: "applied" };
+  }
+  if (effectful && !PRE_EFFECT_ERROR_CODES.has(code) && !(error instanceof SecurityError)) {
+    return { text: `NavoCMS rejected the request (${code}). ${UNKNOWN_EFFECT_TEXT}`, effectState: "unknown" };
+  }
+  return { text: `NavoCMS rejected the request (${code}). ${NO_EFFECT_TEXT}`, effectState: "none" };
 }
 
 function extractResults(value: object): readonly Record<string, unknown>[] {

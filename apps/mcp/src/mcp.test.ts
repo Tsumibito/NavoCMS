@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CloudflareDeliveryError } from "@navocms/delivery-cloudflare";
-import { InMemoryEventStore, type ReleaseProvider } from "@navocms/kernel";
+import { InMemoryEventStore, type ReleaseProvider, type ReleaseProviderPublication, type ReleaseProviderPublishInput } from "@navocms/kernel";
 import {
   NAVOCMS_PERMISSIONS,
   SecurityError,
@@ -130,7 +130,7 @@ describe("MCP editing service", () => {
     const content = await service.getContent(context, created.draft.revisionId) as ContentResult;
     expect(content.markdown).toHaveLength(20_000);
     expect(content.truncated).toBe(true);
-    expect((await service.search(context, "", 999) as { limit: number }).limit).toBe(20);
+    expect((await service.search(context, "", { limit: 999 }) as { limit: number }).limit).toBe(20);
     await expect(service.createDraft(context, {
       ...base,
       slug: "different-input",
@@ -156,7 +156,337 @@ describe("MCP editing service", () => {
     }) as DraftResult;
     expect(created.draft.revisionNumber).toBe(1);
   });
+
+  it("fails closed with the current head when two edits start from the same base revision", async () => {
+    const { service, context } = fixture("editor");
+    const created = await service.createDraft(context, {
+      typeName: "article",
+      slug: "two-edits-one-base",
+      locale: "en",
+      title: "Two edits one base",
+      markdown: "# Two edits\n\nFirst paragraph.\n\nSecond paragraph.\n",
+      idempotencyKey: "two-edits-draft-0001"
+    }) as DraftResult;
+    const content = await service.getContent(context, created.draft.revisionId) as ContentResult;
+    const paragraphs = content.astNodes.filter((node) => node.type === "text");
+    const firstEdit = await service.patchRevision(context, {
+      revisionId: created.draft.revisionId,
+      baseSourceHash: created.draft.sourceHash,
+      operations: [{ op: "replaceText", nodeId: paragraphs[0]!.id, value: "First edit." }],
+      idempotencyKey: "two-edits-patch-0001"
+    }) as PatchResult;
+    expect(firstEdit.draft.revisionNumber).toBe(2);
+
+    // The second edit still targets r1 and must fail with the actual current head.
+    await expect(service.patchRevision(context, {
+      revisionId: created.draft.revisionId,
+      baseSourceHash: created.draft.sourceHash,
+      operations: [{ op: "replaceText", nodeId: paragraphs[1]!.id, value: "Second edit." }],
+      idempotencyKey: "two-edits-patch-0002"
+    })).rejects.toMatchObject({
+      code: "REVISION_NOT_CURRENT",
+      details: {
+        currentRevisionId: firstEdit.draft.revisionId,
+        currentRevisionNumber: 2,
+        currentSourceHash: firstEdit.draft.sourceHash
+      }
+    });
+
+    // Replaying the first key after the head advanced returns the same result.
+    const replayed = await service.patchRevision(context, {
+      revisionId: created.draft.revisionId,
+      baseSourceHash: created.draft.sourceHash,
+      operations: [{ op: "replaceText", nodeId: paragraphs[0]!.id, value: "First edit." }],
+      idempotencyKey: "two-edits-patch-0001"
+    }) as PatchResult;
+    expect(replayed.draft.revisionId).toBe(firstEdit.draft.revisionId);
+
+    // Different input with the same key still fails closed.
+    await expect(service.patchRevision(context, {
+      revisionId: created.draft.revisionId,
+      baseSourceHash: created.draft.sourceHash,
+      operations: [{ op: "replaceText", nodeId: paragraphs[0]!.id, value: "Different edit." }],
+      idempotencyKey: "two-edits-patch-0001"
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+
+    // The rebased application carries both edits; the stale base stays gated.
+    const rebased = await service.patchRevision(context, {
+      revisionId: firstEdit.draft.revisionId,
+      baseSourceHash: firstEdit.draft.sourceHash,
+      operations: [{ op: "replaceText", nodeId: paragraphs[1]!.id, value: "Second edit." }],
+      idempotencyKey: "two-edits-patch-0003"
+    }) as PatchResult;
+    expect(rebased.draft.revisionNumber).toBe(3);
+    const rebasedContent = await service.getContent(context, rebased.draft.revisionId) as ContentResult;
+    expect(rebasedContent.markdown).toContain("First edit.");
+    expect(rebasedContent.markdown).toContain("Second edit.");
+    await expect(service.patchRevision(context, {
+      revisionId: created.draft.revisionId,
+      baseSourceHash: created.draft.sourceHash,
+      operations: [{ op: "replaceText", nodeId: paragraphs[1]!.id, value: "Late edit." }],
+      idempotencyKey: "two-edits-patch-0004"
+    })).rejects.toMatchObject({ code: "REVISION_NOT_CURRENT" });
+  });
+
+  it("enumerates 45 documents through cursors without gaps or duplicates", async () => {
+    const { service, context } = fixture("editor");
+    const secondSite = { ...site, siteId: "33333333-3333-4333-8333-333333333333", name: "Other site" };
+    const otherRepository = new InMemoryEditingRepository();
+    otherRepository.registerSite(secondSite);
+    const otherService = new McpEditingService(otherRepository, new InMemoryEventStore());
+    for (let index = 1; index <= 45; index += 1) {
+      const slug = `cursor-doc-${String(index).padStart(3, "0")}`;
+      const input = {
+        typeName: "article" as const,
+        slug,
+        locale: "en",
+        title: `Cursor doc ${index}`,
+        markdown: `# Cursor doc ${index}\n`,
+        idempotencyKey: `cursor-draft-${String(index).padStart(4, "0")}`
+      };
+      await service.createDraft(context, input);
+      await otherService.createDraft(requestContext("editor", secondSite.siteId), input);
+    }
+
+    const collected = new Map<string, number>();
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = await service.search(context, "", { limit: 7, ...(cursor !== undefined ? { cursor } : {}) }) as { results: { id: string }[]; nextCursor?: string };
+      pages += 1;
+      for (const hit of page.results) {
+        expect(collected.has(hit.id)).toBe(false);
+        collected.set(hit.id, page.results.indexOf(hit));
+      }
+      cursor = page.nextCursor;
+    } while (cursor && pages < 20);
+    expect(collected.size).toBe(45);
+    expect(collected.size).toBeLessThanOrEqual(pages * 7);
+
+    const draftQueue = new Set<string>();
+    let draftCursor: string | undefined;
+    let draftPages = 0;
+    do {
+      const page = await service.listDrafts(context, { limit: 7, ...(draftCursor !== undefined ? { cursor: draftCursor } : {}) }) as { drafts: { revisionId: string }[]; nextCursor?: string };
+      draftPages += 1;
+      for (const draft of page.drafts) {
+        expect(draftQueue.has(draft.revisionId)).toBe(false);
+        draftQueue.add(draft.revisionId);
+      }
+      draftCursor = page.nextCursor;
+    } while (draftCursor && draftPages < 20);
+    expect(draftQueue.size).toBe(45);
+
+    // An unknown-but-well-formed cursor yields an empty page instead of crossing scope.
+    const foreignCursor = await otherService.search(
+      requestContext("editor", secondSite.siteId), "", { limit: 5 }
+    ) as { nextCursor?: string };
+    expect(foreignCursor.nextCursor).toBeDefined();
+    const foreignPage = await service.search(context, "", { limit: 7, cursor: foreignCursor.nextCursor! }) as { results: unknown[] };
+    expect(foreignPage.results).toEqual([]);
+  });
+
+  it("reads a 25k-character document fully through bounded windows without duplicating body", async () => {
+    const { service, context } = fixture("editor");
+    const paragraphs = Array.from({ length: 130 }, (_, index) => `Paragraph ${index + 1} ${"y".repeat(60)}`).join("\n\n");
+    const body = `# Long document\n\n${"x".repeat(12_000)}\n\n${paragraphs}\n`;
+    const created = await service.createDraft(context, {
+      typeName: "article",
+      slug: "long-document",
+      locale: "en",
+      title: "Long document",
+      markdown: body,
+      idempotencyKey: "long-document-draft-01"
+    }) as DraftResult;
+
+    const content = await service.getContent(context, created.draft.revisionId) as ContentResult & {
+      metadata: Record<string, unknown>;
+      totalCharacters: number;
+      totalNodes: number;
+      truncatedNodes: boolean;
+    };
+    expect(content.markdown).toHaveLength(20_000);
+    expect(content.truncated).toBe(true);
+    expect(content.totalCharacters).toBe(body.length);
+    expect(content.metadata).not.toHaveProperty("body");
+    expect(JSON.stringify(content.metadata.length ?? 0)).toBeDefined();
+    expect(JSON.stringify(content).length).toBeLessThan(60_000);
+    expect(content.astNodes.length).toBe(100);
+    expect(content.truncatedNodes).toBe(true);
+    expect(content.totalNodes).toBeGreaterThan(100);
+
+    let offset = 0;
+    let assembled = "";
+    let windows = 0;
+    while (windows < 10) {
+      const window = await service.readContent(context, { revisionId: created.draft.revisionId, markdownOffset: offset }) as {
+        markdown: string;
+        nextOffset?: number;
+        truncated: boolean;
+      };
+      windows += 1;
+      expect(window.markdown.length).toBeLessThanOrEqual(20_000);
+      assembled += window.markdown;
+      if (!window.truncated) break;
+      offset = window.nextOffset!;
+    }
+    expect(assembled).toBe(body);
+    expect(windows).toBe(2);
+
+    const nodePage = await service.readContent(context, {
+      revisionId: created.draft.revisionId,
+      nodeOffset: 0,
+      nodeLimit: 5
+    }) as { nodes: { id: string; type: string }[]; totalNodes: number };
+    expect(nodePage.nodes).toHaveLength(5);
+    const detail = await service.readContent(context, {
+      revisionId: created.draft.revisionId,
+      nodeId: nodePage.nodes.find((node) => node.type === "heading")?.id ?? nodePage.nodes[0]!.id
+    }) as { node: { id: string; text: string }; truncated: boolean };
+    expect(detail.node.id).toBeDefined();
+    expect(detail.truncated).toBe(false);
+  });
+
+  it("aligns idempotency key bounds across tools, service, and the event ledger", async () => {
+    const { service, context, events } = fixture("editor");
+    const base = {
+      typeName: "article",
+      slug: "key-bounds",
+      locale: "en",
+      title: "Key bounds",
+      markdown: "# Key bounds\n"
+    } as const;
+    await expect(service.createDraft(context, { ...base, idempotencyKey: "short-key-15x" }))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_INVALID" });
+
+    const server = createMcpServer(service, context);
+    const client = new Client({ name: "navocms-key-bound-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const rejected = await client.callTool({ name: "draft_create", arguments: {
+        ...base, idempotencyKey: "short-key-15x"
+      } });
+      expect(rejected.isError).toBe(true);
+
+      const accepted = await client.callTool({ name: "draft_create", arguments: {
+        ...base, slug: "key-bounds-accepted", idempotencyKey: "exactly-16-chars"
+      } });
+      expect(accepted.isError).not.toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    const records = await events.query({
+      tenantId: site.tenantId,
+      siteId: site.siteId,
+      type: "io.navocms.content.draft.created.v1"
+    });
+    expect(records.some(({ event }) => event.navoidempotencykey === "exactly-16-chars")).toBe(true);
+  });
+
+  it("reports a valid previewed handoff as ready in text and structured results", async () => {
+    const { service, context } = fixture("editor");
+    const created = await service.createDraft(context, {
+      typeName: "article",
+      slug: "handoff-ready",
+      locale: "en",
+      title: "Handoff ready",
+      markdown: "# Handoff ready\n",
+      idempotencyKey: "handoff-draft-00001"
+    }) as DraftResult;
+    const server = createMcpServer(service, context);
+    const client = new Client({ name: "navocms-handoff-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const handoff = await client.callTool({ name: "review_preview_handoff", arguments: {
+        revisionId: created.draft.revisionId,
+        idempotencyKey: "handoff-preview-0001"
+      } });
+      expect(handoff.isError).not.toBe(true);
+      const text = (handoff.content as { type: string; text?: string }[])[0]?.text ?? "";
+      expect(text).toContain("ready");
+      expect(text).not.toContain("Blocked");
+      expect(handoff.structuredContent).toMatchObject({
+        view: "workflow",
+        status: "previewed",
+        nextStep: "approve-exact-release"
+      });
+      const structured = handoff.structuredContent as Record<string, unknown> | undefined;
+      expect(String(structured?.previewUrl)).toMatch(/^https:\/\/preview\.example\.test\/previews\//);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("reports provider effect state instead of claiming nothing was published", async () => {
+    const failingVerification = await releasePublishWithProvider(new ThrowingVerifyProvider());
+    expect(failingVerification.isError).toBe(true);
+    const verificationText = (failingVerification.content as { type: string; text?: string }[])[0]?.text ?? "";
+    expect(verificationText).toContain("LIVE_VERIFICATION_FAILED");
+    expect(verificationText).toContain("applied");
+    expect(verificationText).toContain("release_reconcile");
+    expect(verificationText).not.toContain("No content was published");
+
+    const unknownOutcome = await releasePublishError(new Error("provider connection reset"));
+    expect(unknownOutcome.isError).toBe(true);
+    const unknownText = (unknownOutcome.content as { type: string; text?: string }[])[0]?.text ?? "";
+    expect(unknownText).toContain("unknown");
+    expect(unknownText).toContain("release_reconcile");
+    expect(unknownText).not.toContain("No content was published");
+
+    const stale = await releasePublishStaleHash();
+    const staleText = (stale.content as { type: string; text?: string }[])[0]?.text ?? "";
+    expect(staleText).toContain("STALE_RELEASE_APPROVAL");
+    expect(staleText).toContain("No content was published");
+  });
+
 });
+
+class ThrowingVerifyProvider implements ReleaseProvider {
+  readonly key = "test-verify-failure-provider";
+  async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
+    return {
+      providerKey: this.key,
+      providerReference: `ref-${input.releaseHash.slice(0, 12)}`,
+      artifactHash: input.artifact.hash
+    };
+  }
+  async verify() { return false; }
+  async rollback() {}
+}
+
+async function releasePublishStaleHash() {
+  const repository = new InMemoryEditingRepository();
+  repository.registerSite(site);
+  const service = new McpEditingService(repository, new InMemoryEventStore());
+  const context = requestContext("publisher");
+  const draft = await service.createDraft(context, {
+    typeName: "article",
+    slug: "stale-publish-surface",
+    locale: "en",
+    title: "Stale publish surface",
+    markdown: "# Stale publish surface\n",
+    idempotencyKey: "stale-publish-draft-001"
+  }) as DraftResult;
+  const preview = await service.preparePreview(context, draft.draft.revisionId, "stale-publish-preview-001") as { releaseId: string };
+  const server = createMcpServer(service, context);
+  const client = new Client({ name: "navocms-stale-publish-client", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    return await client.callTool({ name: "release_publish", arguments: {
+      releaseId: preview.releaseId,
+      releaseHash: "0".repeat(64),
+      idempotencyKey: "stale-publish-publish-01"
+    } });
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
 
 describe("MCP protocol and agent evaluations", () => {
   it("publishes OAuth resource metadata and rejects an unauthenticated MCP request", async () => {
@@ -306,26 +636,28 @@ describe("MCP protocol and agent evaluations", () => {
   it("exposes only the statically validated Cloudflare recovery code", async () => {
     const known = await releasePublishError(new CloudflareDeliveryError("CLOUDFLARE_HTTP_403", "token=must-not-leak", 403));
     expect(known.isError).toBe(true);
-    expect(known.content).toEqual([{ type: "text", text: "NavoCMS rejected the request (CLOUDFLARE_HTTP_403). No content was published." }]);
+    const knownText = (known.content as { type: string; text?: string }[])[0]?.text ?? "";
+    expect(knownText).toContain("CLOUDFLARE_HTTP_403");
+    expect(knownText).not.toContain("token=must-not-leak");
+    expect(knownText).not.toContain("No content was published");
 
     const unknown = await releasePublishError(new Error("provider body: token=must-not-leak"));
     expect(unknown.isError).toBe(true);
-    expect(unknown.content).toEqual([{ type: "text", text: "NavoCMS rejected the request (REQUEST_REJECTED). No content was published." }]);
+    const unknownText = (unknown.content as { type: string; text?: string }[])[0]?.text ?? "";
+    expect(unknownText).toContain("REQUEST_REJECTED");
+    expect(unknownText).not.toContain("token=must-not-leak");
+    expect(unknownText).not.toContain("No content was published");
 
     const unsafeProviderCode = await releasePublishError(new CloudflareDeliveryError("CLOUDFLARE_HTTP_403_SECRET", "token=must-not-leak"));
     expect(unsafeProviderCode.isError).toBe(true);
-    expect(unsafeProviderCode.content).toEqual([{ type: "text", text: "NavoCMS rejected the request (REQUEST_REJECTED). No content was published." }]);
+    const unsafeText = (unsafeProviderCode.content as { type: string; text?: string }[])[0]?.text ?? "";
+    expect(unsafeText).toContain("REQUEST_REJECTED");
+    expect(unsafeText).not.toContain("No content was published");
   });
 
 });
 
-async function releasePublishError(error: Error) {
-  const provider: ReleaseProvider = {
-    key: "test-throwing-provider",
-    async publish() { throw error; },
-    async verify() { return false; },
-    async rollback() {}
-  };
+async function releasePublishWithProvider(provider: ReleaseProvider) {
   const repository = new InMemoryEditingRepository();
   repository.registerSite(site);
   const service = new McpEditingService(repository, new InMemoryEventStore(), undefined, undefined, provider);
@@ -360,10 +692,20 @@ async function releasePublishError(error: Error) {
   }
 }
 
+function releasePublishError(error: Error) {
+  return releasePublishWithProvider({
+    key: "test-throwing-provider",
+    async publish() { throw error; },
+    async verify() { return false; },
+    async rollback() {}
+  });
+}
+
 function fixture(role: SiteRole) {
   const repository = new InMemoryEditingRepository();
   repository.registerSite(site);
-  return { service: new McpEditingService(repository, new InMemoryEventStore()), context: requestContext(role) };
+  const events = new InMemoryEventStore();
+  return { service: new McpEditingService(repository, events), context: requestContext(role), events };
 }
 
 function requestContext(role: SiteRole, siteId: string = site.siteId): { authorization: AuthorizationContext } {

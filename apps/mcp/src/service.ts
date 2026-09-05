@@ -154,11 +154,18 @@ export class McpEditingService {
     })]);
   }
 
-  public async search(context: McpRequestContext, query: string, requestedLimit?: number): Promise<object> {
+  public async search(context: McpRequestContext, query: string, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<object> {
     const repositoryContext = await this.requireSite(context, "content:read");
-    const limit = boundedLimit(requestedLimit);
-    const results = await this.#repository.search(repositoryContext, query, limit);
-    return safe({ query, results, count: results.length, limit });
+    const limit = boundedLimit(options.limit);
+    assertPageCursor(options.cursor);
+    const page = await this.#repository.search(repositoryContext, query, limit, options.cursor);
+    return safe({
+      query,
+      results: page.items,
+      count: page.items.length,
+      limit,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+    });
   }
 
   public async fetch(context: McpRequestContext, id: string): Promise<object> {
@@ -189,30 +196,109 @@ export class McpEditingService {
     const repositoryContext = await this.requireSite(context, "content:read");
     const revision = await this.#repository.getRevision(repositoryContext, revisionId);
     const truncated = revision.source.length > MCP_LIMITS.maxMarkdownCharacters;
+    const astTotalNodes = revision.ast.nodes.length;
+    const astTruncated = astTotalNodes > MCP_LIMITS.maxAstNodes;
     return safe({
       revisionId: revision.id,
       documentId: revision.documentId,
       variantId: revision.variantId,
       revisionNumber: revision.number,
       sourceHash: revision.sourceHash,
-      metadata: revision.metadata,
+      // `metadata.body` mirrors the full Markdown source; it is projected out so
+      // the response never duplicates unbounded content behind a bounded field.
+      metadata: metadataWithoutBody(revision.metadata),
       markdown: truncated ? revision.source.slice(0, MCP_LIMITS.maxMarkdownCharacters) : revision.source,
       truncated,
       totalCharacters: revision.source.length,
-      astNodes: revision.ast.nodes.map(({ id, type, parentId, text }) => ({
+      ...(truncated ? { nextOffset: MCP_LIMITS.maxMarkdownCharacters } : {}),
+      astNodes: revision.ast.nodes.slice(0, MCP_LIMITS.maxAstNodes).map(({ id, type, parentId, text }) => ({
         id,
         type,
         ...(parentId ? { parentId } : {}),
         text: text.slice(0, MCP_LIMITS.maxExcerptCharacters)
-      }))
+      })),
+      truncatedNodes: astTruncated,
+      totalNodes: astTotalNodes
     });
   }
 
-  public async listDrafts(context: McpRequestContext, requestedLimit?: number): Promise<object> {
+  /**
+   * Bounded continuation read for content that does not fit into one response.
+   * Revisions are immutable, so offset windows and node pages are stable; the
+   * full source can always be assembled from consecutive bounded windows.
+   */
+  public async readContent(context: McpRequestContext, input: {
+    readonly revisionId: string;
+    readonly markdownOffset?: number;
+    readonly markdownLength?: number;
+    readonly nodeId?: string;
+    readonly nodeOffset?: number;
+    readonly nodeLimit?: number;
+  }): Promise<object> {
     const repositoryContext = await this.requireSite(context, "content:read");
-    const limit = boundedLimit(requestedLimit);
-    const drafts = await this.#repository.listDrafts(repositoryContext, limit);
-    return safe({ drafts, count: drafts.length, limit });
+    const revision = await this.#repository.getRevision(repositoryContext, input.revisionId);
+    if (input.nodeId !== undefined) {
+      const node = revision.ast.nodes.find((candidate) => candidate.id === input.nodeId);
+      if (!node) throw new McpEditingError("CONTENT_NODE_NOT_FOUND", "The requested AST node does not exist in this revision");
+      const truncated = node.text.length > MCP_LIMITS.maxMarkdownCharacters;
+      return safe({
+        revisionId: revision.id,
+        node: {
+          id: node.id,
+          type: node.type,
+          ...(node.parentId ? { parentId: node.parentId } : {}),
+          text: node.text.slice(0, MCP_LIMITS.maxMarkdownCharacters)
+        },
+        truncated,
+        totalCharacters: node.text.length
+      });
+    }
+    if (input.nodeOffset !== undefined || input.nodeLimit !== undefined) {
+      const offset = Math.max(0, Math.floor(input.nodeOffset ?? 0));
+      const limit = Math.min(Math.max(1, Math.floor(input.nodeLimit ?? MCP_LIMITS.maxAstNodes)), MCP_LIMITS.maxAstNodes);
+      const totalNodes = revision.ast.nodes.length;
+      const nodes = revision.ast.nodes.slice(offset, offset + limit).map(({ id, type, parentId, text }) => ({
+        id,
+        type,
+        ...(parentId ? { parentId } : {}),
+        text: text.slice(0, MCP_LIMITS.maxExcerptCharacters)
+      }));
+      const nextOffset = offset + nodes.length;
+      return safe({
+        revisionId: revision.id,
+        nodes,
+        offset,
+        totalNodes,
+        ...(nextOffset < totalNodes ? { nextOffset, truncatedNodes: true } : {})
+      });
+    }
+    const offset = Math.max(0, Math.floor(input.markdownOffset ?? 0));
+    const length = Math.min(
+      Math.max(1, Math.floor(input.markdownLength ?? MCP_LIMITS.maxMarkdownCharacters)),
+      MCP_LIMITS.maxMarkdownCharacters
+    );
+    const markdown = revision.source.slice(offset, offset + length);
+    const nextOffset = offset + markdown.length;
+    return safe({
+      revisionId: revision.id,
+      totalCharacters: revision.source.length,
+      offset,
+      markdown,
+      ...(nextOffset < revision.source.length ? { nextOffset, truncated: true } : { truncated: false })
+    });
+  }
+
+  public async listDrafts(context: McpRequestContext, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    const limit = boundedLimit(options.limit);
+    assertPageCursor(options.cursor);
+    const page = await this.#repository.listDrafts(repositoryContext, limit, options.cursor);
+    return safe({
+      drafts: page.items,
+      count: page.items.length,
+      limit,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+    });
   }
 
   public async createDraft(context: McpRequestContext, input: {
@@ -401,7 +487,10 @@ export class McpEditingService {
         state.release.status === "verification_failed" || publication.status === "verification_failed"
       )) {
         const valid = await this.#releaseProvider.verify(publication);
-        if (!valid) throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider still does not expose the previewed artifact");
+        if (!valid) throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider still does not expose the previewed artifact", {
+          effectState: "applied",
+          nextAction: "release_reconcile"
+        });
         await this.#releases.markVerified(repositoryContext, input.releaseId, publication.id);
       }
       const release = await this.#releases.getRelease(repositoryContext, input.releaseId);
@@ -453,7 +542,12 @@ export class McpEditingService {
     const valid = await this.#releaseProvider.verify(publication);
     if (!valid) {
       await this.#releases.markVerificationFailed(repositoryContext, releaseId, publication.id);
-      throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider did not expose the previewed artifact hash");
+      // The provider already applied the artifact; the durable state is
+      // verification-failed. Clients must reconcile, not repeat the effect.
+      throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider did not expose the previewed artifact hash", {
+        effectState: "applied",
+        nextAction: "release_reconcile"
+      });
     }
     await this.#releases.markVerified(repositoryContext, releaseId, publication.id);
     return publication;
@@ -481,6 +575,9 @@ export class McpEditingService {
     create: () => Promise<T>,
     transactional = true
   ): Promise<T> {
+    // Validate the key before any reservation or policy charge so a key that
+    // would later fail event-schema validation never reaches an effect.
+    assertIdempotencyKey(key);
     await this.#policyGuard?.consume({ ...scope, operation, idempotencyKey: key });
     // Provider calls cross an external trust boundary. Their durable prepare
     // state must commit before an effect, so they cannot share an outer SQL
@@ -568,6 +665,30 @@ export class McpEditingService {
 function boundedLimit(limit?: number): number {
   if (limit === undefined) return MCP_LIMITS.defaultSearchResults;
   return Math.max(1, Math.min(Math.floor(limit), MCP_LIMITS.maxSearchResults));
+}
+
+function assertPageCursor(cursor: string | undefined): void {
+  if (cursor !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cursor)) {
+    throw new McpEditingError("PAGE_CURSOR_INVALID", "The page cursor is not a valid content variant identifier");
+  }
+}
+
+function assertIdempotencyKey(key: string): void {
+  if (
+    typeof key !== "string" ||
+    key.length < MCP_LIMITS.idempotencyKeyMinLength ||
+    key.length > MCP_LIMITS.idempotencyKeyMaxLength
+  ) {
+    throw new McpEditingError(
+      "IDEMPOTENCY_KEY_INVALID",
+      `Idempotency key must be ${MCP_LIMITS.idempotencyKeyMinLength}-${MCP_LIMITS.idempotencyKeyMaxLength} characters`
+    );
+  }
+}
+
+function metadataWithoutBody(metadata: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const { body: _body, ...projection } = metadata;
+  return projection;
 }
 
 function boundDiff(diff: { readonly fromHash: string; readonly toHash: string; readonly lines: readonly object[] }) {

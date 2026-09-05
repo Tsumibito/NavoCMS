@@ -29,6 +29,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0022](0022-reviewed-astro-object-storage.md) | Proposed | Immutable object storage for reviewed Astro source and output |
 | [0023](0023-shared-s3-object-core.md) | Accepted | Shared S3/R2 core with reviewed physical namespaces |
 | [0024](0024-remove-dormant-runtime-surfaces.md) | Accepted | Remove dormant runtime surfaces until their first real caller |
+| [0025](0025-current-head-patch-gate-and-bounded-reads.md) | Accepted | Current-head patch gate, keyset cursors, bounded reads, and honest effect-state errors |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

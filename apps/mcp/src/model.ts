@@ -46,6 +46,9 @@ export const MCP_LIMITS = Object.freeze({
   defaultSearchResults: 8,
   maxMarkdownCharacters: 20_000,
   maxExcerptCharacters: 280,
+  maxAstNodes: 100,
   maxDiffLines: 400,
-  maxRequestBytes: 256 * 1024
+  maxRequestBytes: 256 * 1024,
+  idempotencyKeyMinLength: 16,
+  idempotencyKeyMaxLength: 128
 });
