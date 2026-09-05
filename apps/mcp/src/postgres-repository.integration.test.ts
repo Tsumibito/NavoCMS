@@ -351,8 +351,9 @@ integration("Neon production persistence", () => {
       actorId: principalId
     });
     const baseRevision = await editing.getRevision({ site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId }, created.revisionId);
-    const paragraphs = baseRevision.ast.nodes.filter((node) => node.type === "text");
-    expect(paragraphs.length).toBeGreaterThanOrEqual(2);
+    const paragraphs = baseRevision.ast.nodes.filter((node) => node.type === "text"
+      && (node.text === "First paragraph." || node.text === "Second paragraph."));
+    expect(paragraphs).toHaveLength(2);
     const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
     const patch = (nodeId: string, value: string) => editing.patchDraft({
       site: repositoryContext.site,
@@ -379,15 +380,16 @@ integration("Neon production persistence", () => {
       currentRevisionNumber: 2
     });
 
-    // The winner applied one edit; the rebased patch applies the other on top
-    // of the current head so both edits survive.
-    const winnerValue = winner.draft.excerpt
-      .includes(`First concurrent edit ${suffix}`) ? `First concurrent edit ${suffix}.` : `Second concurrent edit ${suffix}.`;
-    const loserValue = winnerValue.startsWith("First") ? `Second concurrent edit ${suffix}.` : `First concurrent edit ${suffix}.`;
-    const loserOriginal = loserValue.startsWith("First") ? "First paragraph." : "Second paragraph.";
+    // The winner applied one paragraph edit; the rebased patch applies the
+    // other on top of the current head so both edits survive. The loser's
+    // target is whichever original paragraph text the head still contains.
     const head = await editing.getRevision(repositoryContext, winner.draft.revisionId);
-    const staleNode = head.ast.nodes.find((node) => node.type === "text" && node.text === loserOriginal);
+    const staleNode = head.ast.nodes.find((node) => node.type === "text"
+      && (node.text === "First paragraph." || node.text === "Second paragraph."));
     expect(staleNode).toBeDefined();
+    const loserValue = staleNode!.text === "First paragraph."
+      ? `First concurrent edit ${suffix}.`
+      : `Second concurrent edit ${suffix}.`;
     const rebased = await editing.patchDraft({
       site: repositoryContext.site,
       revisionId: winner.draft.revisionId,
