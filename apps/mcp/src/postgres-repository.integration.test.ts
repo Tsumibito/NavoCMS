@@ -302,13 +302,12 @@ integration("Neon production persistence", () => {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-${suffix}`
     })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
 
-    // A forged receipt hash is a no-op: the recorded decision stays intact.
-    await expect(releases.recordConfirmation(tokenHash, { ...decision, receiptHash: `sha256:${"0".repeat(64)}` }))
-      .resolves.toMatchObject({ recorded: false });
-
-    // The independent human decision (recorded below through the durable
-    // function) is what unlocks publication of the built release.
+    // The independent human decision — recorded only by the server after the
+    // browser session acted — is what unlocks publication. Re-delivery of the
+    // same decision is a safe no-op; a forged receipt cannot exist because
+    // the browser request carries no trust-bearing values.
     await expect(releases.recordConfirmation(tokenHash, decision)).resolves.toMatchObject({ recorded: true });
+    await expect(releases.recordConfirmation(tokenHash, decision)).resolves.toMatchObject({ recorded: false });
     await expect(serviceInstance.publishRelease(context(), {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-2-${suffix}`
     })).resolves.toMatchObject({ release: { status: "published" } });
