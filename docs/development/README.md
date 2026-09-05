@@ -8,6 +8,13 @@ pnpm install --frozen-lockfile
 pnpm check
 ```
 
+Keep implementation PRs in draft while iterating and run the local checks before submission.
+Mark the final PR ready for review to run the complete GitHub gate, including PostgreSQL/RLS,
+Chromium, and the production container. Every subsequent push to a ready PR runs it again;
+batch report/documentation corrections before the final push. A draft's skipped check is not
+acceptance evidence. `main` merges retain the full gate, and `workflow_dispatch` permits an
+explicit full run on a selected branch. See the [CI review](../operations/CI_RESOURCE_REVIEW.md).
+
 ## Workspace
 
 | Package | Responsibility | Allowed dependencies |
