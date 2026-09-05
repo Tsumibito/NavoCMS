@@ -157,9 +157,9 @@ AS $record_release_confirmation$
 DECLARE
   v_row release_confirmations%ROWTYPE;
 BEGIN
-  SELECT * INTO v_row FROM release_confirmations
-   WHERE token_hash = p_token_hash AND preview_expires_at > now()
-   FOR UPDATE;
+  SELECT * INTO v_row FROM release_confirmations AS k
+   WHERE k.token_hash = p_token_hash AND k.preview_expires_at > now()
+   FOR UPDATE OF k;
   IF NOT FOUND THEN
     RETURN;
   END IF;
@@ -170,13 +170,13 @@ BEGIN
       v_row.preview_expires_at, false;
     RETURN;
   END IF;
-  UPDATE release_confirmations
+  UPDATE release_confirmations AS t
      SET decision_at = p_decision_at,
          output_manifest_digest = p_output_manifest_digest,
          receipt_hash = p_receipt_hash,
          receipt_expires_at = p_receipt_expires_at,
          updated_at = now()
-   WHERE id = v_row.id;
+   WHERE t.id = v_row.id;
   RETURN QUERY SELECT v_row.release_id, v_row.tenant_id, v_row.site_id,
     v_row.release_hash, v_row.policy_version, p_decision_at,
     p_output_manifest_digest, p_receipt_hash, p_receipt_expires_at,
