@@ -271,7 +271,9 @@ integration("Neon production persistence", () => {
     const receiptHash = `sha256:${"c".repeat(64)}`;
     const decision = { decidedAt, outputManifestDigest: digest, receiptHash, receiptExpiresAt };
     await expect(releases.latestConfirmation({ site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId }, preview.releaseId, preview.releaseHash))
-      .resolves.toMatchObject({ decisionAt: undefined, releaseHash: preview.releaseHash });
+      .resolves.toMatchObject({ releaseHash: preview.releaseHash });
+    await expect(serviceInstance.releaseConfirmationStatus(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash }))
+      .resolves.toMatchObject({ status: "pending" });
 
     await serviceInstance.approveRelease(context(), {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-approve-${suffix}`
