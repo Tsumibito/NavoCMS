@@ -13,7 +13,7 @@ staging-деплой и обновление статуса остаются з�
 | Ветка | `codex/sprint-8-1-editing-integrity` (создана от базового коммита, не от старого `main`) |
 | Implementation commit | `06ab6b8` (`feat(editing): reliable everyday edits with current-head patches and bounded reads`) |
 | Submission commit | этот документ идёт последним коммитом ветки; принимающий фиксирует фактический HEAD (`git rev-parse HEAD`) |
-| PR | см. описание Pull Request ветки `codex/sprint-8-1-editing-integrity` → `main` |
+| PR | https://github.com/Tsumibito/NavoCMS/pull/53 |
 | Изменённые контракты | `docs/specs/mcp-editing-v0alpha1.md` (bounds, mutation semantics, compatibility note); ADR `docs/architecture/0025-current-head-patch-gate-and-bounded-reads.md`; индекс ADR |
 
 Конечное изменение поведения: правка текста больше не может молча потерять параллельную правку —
@@ -68,7 +68,7 @@ pnpm 10.26.0, точный HEAD `06ab6b8` + submission-коммит.
 | Unit + integration vitest | входит в `pnpm check` с `NAVOCMS_INTEGRATION_DATABASE_URL`/`NAVOCMS_INTEGRATION_ADMIN_DATABASE_URL` | **222/222 passed, 39 files, 0 skipped, 0 failed** (включая все 4 PostgreSQL integration suite файла и новые тесты 1–3, 5 критериев) |
 | Visual/a11y (playwright + axe) | `pnpm test:visual` | **6/6 passed** (включая новый handoff-тест) |
 | Tenant isolation | `psql -f packages/persistence-postgres/tests/{rls,content,runtime,release-workflow,media}-isolation.sql` | 5/5 «checks passed» |
-| CI GitHub Actions | автоматически запустится на PR (тот же набор шагов + service postgres:17-alpine) | pending — принимает проверяющий по точному SHA |
+| CI GitHub Actions | run [33989004141](https://github.com/Tsumibito/NavoCMS/actions/runs/33989004141) на `c0b5a567a6d93f7a20bb49d7a1eea9db1dedc169` (job `check`): **success**, ~2 мин | PASS; финальный head ветки добавляет только этот документ — принимающий подтверждает CI на фактическом merge/head SHA |
 
 Замечание о повторных прогонах: интеграционные тесты рассчитаны на чистую БД (как в CI);
 на персистентной локальной базе второй прогон подряд даёт ожидаемые конфликты фиксированных
