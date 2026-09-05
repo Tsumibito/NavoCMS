@@ -309,7 +309,10 @@ function assertBindingScope(binding: ObjectBinding, site: Readonly<{ tenantId: s
 }
 
 function assertAuthority(authority: ReviewedAstroArtifactAuthority, context: RepositoryContext): void {
-  if (authority.principal.kind !== "human" || authority.tenantId !== context.site.tenantId || authority.siteId !== context.site.siteId || authority.principal.id !== context.principalId) {
+  // "human" is the publisher bearer; "service" is the in-process trusted
+  // runtime that registers pre-review builds. No MCP tool exposes this path.
+  if ((authority.principal.kind !== "human" && authority.principal.kind !== "service") ||
+    authority.tenantId !== context.site.tenantId || authority.siteId !== context.site.siteId || authority.principal.id !== context.principalId) {
     throw new McpEditingError("REVIEWED_ASTRO_AUTHORITY_DENIED", "Reviewed Astro registration authority does not match its database scope");
   }
 }

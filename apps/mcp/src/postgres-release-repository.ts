@@ -11,6 +11,8 @@ import { type PostgresDatabase, type SqlClient } from "@navocms/persistence-post
 import { McpEditingError } from "./errors.js";
 import type { RepositoryContext } from "./repository.js";
 import type {
+  ConfirmationDecision,
+  ConfirmationRecord,
   CreateReleaseInput,
   PreviewDocument,
   PublicationRecord,
@@ -48,11 +50,29 @@ interface PublicationRow extends Record<string, unknown> {
 }
 
 interface PreviewRow extends Record<string, unknown> {
+  readonly release_id: string;
+  readonly tenant_id: string;
+  readonly site_id: string;
   readonly media_type: string;
   readonly body: string;
   readonly release_hash: string;
   readonly artifact_hash: string;
   readonly expires_at: Date | string;
+}
+
+interface ConfirmationRow extends Record<string, unknown> {
+  readonly release_id: string;
+  readonly tenant_id: string;
+  readonly site_id: string;
+  readonly release_hash: string;
+  readonly policy_version: string;
+  readonly decision_at: Date | string | null;
+  readonly output_manifest_digest: string | null;
+  readonly receipt_hash: string | null;
+  readonly receipt_expires_at: Date | string | null;
+  readonly preview_expires_at?: Date | string;
+  readonly revoked_at?: Date | string | null;
+  readonly recorded?: boolean;
 }
 
 export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowRepository {
@@ -96,6 +116,15 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
         [randomUUID(), input.context.site.tenantId, input.context.site.siteId,
           release.id, input.previewTokenHash, input.previewExpiresAt]
       );
+      await client.query(
+        `INSERT INTO navocms.release_confirmations (
+           id, tenant_id, site_id, release_id, release_hash, token_hash,
+           policy_version, preview_expires_at, created_by
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [randomUUID(), input.context.site.tenantId, input.context.site.siteId,
+          release.id, input.releaseHash, input.confirmationTokenHash,
+          input.confirmationPolicyVersion, input.previewExpiresAt, uuidOrNull(input.context.principalId)]
+      );
       if (release.status === "previewed") {
         await writeCompletedPreviewRun(client, input.context, release.id, input.workflow, input.releaseHash, input.artifact.hash);
       }
@@ -104,22 +133,60 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
   }
 
   public async resolvePreview(tokenHash: string): Promise<PreviewDocument | undefined> {
-    return this.#database.withScope({
-      tenantId: "00000000-0000-4000-8000-000000000000",
-      siteId: "00000000-0000-4000-8000-000000000000",
-      principalId: "00000000-0000-4000-8000-000000000000"
-    }, async (client) => {
+    return this.#database.withScope(nullScope(), async (client) => {
       const row = (await client.query<PreviewRow>(
-        "SELECT media_type, body, release_hash, artifact_hash, expires_at FROM navocms.resolve_release_preview($1)",
+        `SELECT release_id, tenant_id, site_id, media_type, body, release_hash, artifact_hash, expires_at
+           FROM navocms.resolve_release_preview($1)`,
         [tokenHash]
       )).rows[0];
       return row ? Object.freeze({
+        releaseId: row.release_id,
+        tenantId: row.tenant_id,
+        siteId: row.site_id,
         mediaType: row.media_type,
         body: row.body,
         releaseHash: row.release_hash,
         artifactHash: row.artifact_hash,
         expiresAt: iso(row.expires_at)
       }) : undefined;
+    });
+  }
+
+  public async resolveConfirmation(tokenHash: string): Promise<ConfirmationRecord | undefined> {
+    return this.#database.withScope(nullScope(), async (client) => {
+      const row = (await client.query<ConfirmationRow>(
+        `SELECT release_id, tenant_id, site_id, release_hash, policy_version, decision_at,
+                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at, revoked_at
+           FROM navocms.resolve_release_confirmation($1)`,
+        [tokenHash]
+      )).rows[0];
+      return row ? toConfirmation(row) : undefined;
+    });
+  }
+
+  public async recordConfirmation(tokenHash: string, decision: ConfirmationDecision) {
+    return this.#database.withScope(nullScope(), async (client) => {
+      const row = (await client.query<ConfirmationRow>(
+        `SELECT release_id, tenant_id, site_id, release_hash, policy_version, decision_at,
+                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at, recorded
+           FROM navocms.record_release_confirmation($1, $2, $3, $4, $5)`,
+        [tokenHash, decision.outputManifestDigest, decision.receiptHash, decision.receiptExpiresAt, decision.decidedAt]
+      )).rows[0];
+      return row ? Object.freeze({ record: toConfirmation(row), recorded: row.recorded === true }) : undefined;
+    });
+  }
+
+  public async latestConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<ConfirmationRecord | undefined> {
+    return this.#database.withScope(databaseScope(context), async (client) => {
+      const row = (await client.query<ConfirmationRow>(
+        `SELECT release_id, tenant_id, site_id, release_hash, policy_version, decision_at,
+                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at, revoked_at
+           FROM navocms.release_confirmations
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND release_hash = $4
+          ORDER BY created_at DESC LIMIT 1`,
+        [context.site.tenantId, context.site.siteId, releaseId, releaseHash]
+      )).rows[0];
+      return row ? toConfirmation(row) : undefined;
     });
   }
 
@@ -410,18 +477,84 @@ async function requireExactRelease(client: SqlClient, context: RepositoryContext
 }
 
 async function requireCurrentHumanApproval(client: SqlClient, context: RepositoryContext, release: ReleaseRow): Promise<void> {
-  const approval = (await client.query<{ present: boolean }>(
-    `SELECT EXISTS(
-       SELECT 1 FROM navocms.release_approvals
-        WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND release_hash = $4
-          AND actor_kind = 'human' AND revoked_at IS NULL AND expires_at > now()
-          AND scope_json->>'environmentId' = $5
-     ) AS present`,
+  const approval = (await client.query<{ present: boolean; built: boolean; confirmed: boolean }>(
+    `SELECT
+       EXISTS(
+         SELECT 1 FROM navocms.release_approvals
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND release_hash = $4
+            AND actor_kind = 'human' AND revoked_at IS NULL AND expires_at > now()
+            AND scope_json->>'environmentId' = $5
+       ) AS present,
+       EXISTS(
+         SELECT 1 FROM navocms.reviewed_astro_artifact_object_bindings
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3
+       ) AS built,
+       EXISTS(
+         SELECT 1 FROM navocms.release_confirmations
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND release_hash = $4
+            AND decision_at IS NOT NULL AND revoked_at IS NULL
+            AND receipt_expires_at > now()
+            AND output_manifest_digest IS NOT NULL
+       ) AS confirmed`,
     [context.site.tenantId, context.site.siteId, release.id, release.release_hash, release.environment_id]
   )).rows[0];
   if (!approval?.present) {
     throw new McpEditingError("RELEASE_APPROVAL_EXPIRED", "A current human approval is required before publication");
   }
+  // Built releases follow the independent-confirmation policy; embedded proof
+  // releases (no reviewed artifact) keep their test/development behavior.
+  if (approval.built && !approval.confirmed) {
+    throw new McpEditingError("HUMAN_CONFIRMATION_REQUIRED", "A current independent human confirmation receipt is required before publication");
+  }
+}
+
+function toConfirmation(row: ConfirmationRow): ConfirmationRecord {
+  const record: {
+    releaseId: string;
+    tenantId: string;
+    siteId: string;
+    releaseHash: string;
+    policyVersion: string;
+    previewExpiresAt?: string;
+    decisionAt?: string;
+    outputManifestDigest?: string;
+    receiptHash?: string;
+    receiptExpiresAt?: string;
+    revokedAt?: string;
+  } = {
+    releaseId: row.release_id,
+    tenantId: row.tenant_id,
+    siteId: row.site_id,
+    releaseHash: row.release_hash,
+    policyVersion: row.policy_version
+  };
+  if (row.preview_expires_at !== undefined) {
+    record.previewExpiresAt = iso(row.preview_expires_at);
+  }
+  if (row.decision_at) {
+    record.decisionAt = iso(row.decision_at);
+  }
+  if (row.output_manifest_digest) {
+    record.outputManifestDigest = row.output_manifest_digest;
+  }
+  if (row.receipt_hash) {
+    record.receiptHash = row.receipt_hash;
+  }
+  if (row.receipt_expires_at) {
+    record.receiptExpiresAt = iso(row.receipt_expires_at);
+  }
+  if (row.revoked_at) {
+    record.revokedAt = iso(row.revoked_at);
+  }
+  return Object.freeze(record);
+}
+
+function nullScope() {
+  return {
+    tenantId: "00000000-0000-4000-8000-000000000000",
+    siteId: "00000000-0000-4000-8000-000000000000",
+    principalId: "00000000-0000-4000-8000-000000000000"
+  };
 }
 
 async function requireValidatedHumanApprovalCheckpoint(client: SqlClient, context: RepositoryContext, release: ReleaseRow): Promise<void> {

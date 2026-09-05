@@ -14,7 +14,7 @@ import { assertSafeProjection, requirePermission } from "@navocms/security";
 import type { PostgresDatabase } from "@navocms/persistence-postgres";
 
 import { McpEditingError } from "./errors.js";
-import { MCP_LIMITS, type McpRequestContext, type PreviewPreparation } from "./model.js";
+import { MCP_LIMITS, type ConfirmationStatus, type McpRequestContext, type PreviewBuildStatus, type PreviewPreparation } from "./model.js";
 import {
   EmbeddedReleaseProvider,
   InMemoryReleaseWorkflowRepository,
@@ -56,11 +56,55 @@ export interface RuntimePolicyGuard {
   }): Promise<void>;
 }
 
+/** Browser preview surface for one capability token. */
+export interface PreviewSurface {
+  readonly releaseId: string;
+  readonly releaseHash: string;
+  readonly artifactHash: string;
+  readonly expiresAt: string;
+  readonly proof: Readonly<{ mediaType: string; body: string }>;
+  readonly built?: Readonly<{ output: Readonly<Record<string, string>>; outputManifestDigest: string; sourceCommitSha: string; fileCount: number; totalBytes: number }>;
+}
+
+/** Read-only model for the confirmation page. */
+export interface ConfirmationView {
+  readonly releaseId: string;
+  readonly releaseHash: string;
+  readonly policyVersion: string;
+  readonly previewExpiresAt?: string;
+  readonly decisionAt?: string;
+  readonly receiptHash?: string;
+  readonly receiptExpiresAt?: string;
+  readonly revokedAt?: string;
+  readonly build: Readonly<{ ready: boolean; outputManifestDigest?: string; fileCount?: number; totalBytes?: number }>;
+}
+
+export interface RecordedConfirmation {
+  readonly recorded: boolean;
+  readonly receiptHash: string;
+  readonly decidedAt: string;
+  readonly receiptExpiresAt: string;
+  readonly outputManifestDigest: string;
+}
+
+/** Summary of one registered reviewed artifact, hash-bearing only. */
+export interface ReviewedArtifactSummary {
+  readonly outputManifestDigest: string;
+  readonly fileCount: number;
+  readonly totalBytes: number;
+  readonly sourceCommitSha: string;
+}
+
 /** Internal runtime boundary; it is never registered in MCP tool discovery. */
 export interface StagingAstroOperations {
   prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision): Promise<AstroRenderInput>;
   persistPreviewInput(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease, render: AstroRenderInput): Promise<void>;
-  ensureArtifact(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease): Promise<void>;
+  /** Starts or resumes the durable pre-review build job; never runs inside a request effect. */
+  startBuild(repository: RepositoryContext, release: StoredRelease): Promise<PreviewBuildStatus>;
+  buildStatus(repository: RepositoryContext, releaseId: string): Promise<PreviewBuildStatus>;
+  artifactSummary(repository: RepositoryContext, releaseId: string): Promise<ReviewedArtifactSummary | undefined>;
+  /** Scope-explicit read used by the preview/confirmation browser surfaces. */
+  artifactFor(scope: Readonly<{ tenantId: string; siteId: string; releaseId: string }>): Promise<Readonly<{ output: Readonly<Record<string, string>> } & ReviewedArtifactSummary> | undefined>;
 }
 
 export class InMemoryIdempotencyStore implements IdempotencyStore {
@@ -388,6 +432,7 @@ export class McpEditingService {
       const locale = typeof revision.metadata.locale === "string" ? revision.metadata.locale : repositoryContext.site.primaryLocale;
       const artifact = renderMarkdownProofArtifact({ releaseHash, title, locale, markdown: revision.source });
       const token = randomBytes(32).toString("base64url");
+      const confirmationToken = randomBytes(32).toString("base64url");
       const expiresAt = new Date(Date.now() + this.#releaseConfig.previewTtlSeconds * 1000).toISOString();
       const release = await this.#releases.createPreview({
         context: repositoryContext,
@@ -399,9 +444,16 @@ export class McpEditingService {
         artifact,
         previewTokenHash: sha256(token),
         previewExpiresAt: expiresAt,
+        confirmationTokenHash: sha256(confirmationToken),
+        confirmationPolicyVersion: this.#releaseConfig.approvalPolicyVersion,
         correlationId: revision.documentId
       });
-      if (stagingRender) await this.#stagingAstro!.persistPreviewInput(context, repositoryContext, release, stagingRender);
+      if (stagingRender) {
+        await this.#stagingAstro!.persistPreviewInput(context, repositoryContext, release, stagingRender);
+        // The trusted build runs before review, outside this request, under the
+        // service principal; its durable job survives disconnects and restarts.
+        await this.#stagingAstro!.startBuild(repositoryContext, release);
+      }
       await this.appendEvent(context, "io.navocms.release.preview.created.v1", release.id, idempotencyKey, {
         phase: "verified",
         releaseId: release.id,
@@ -410,6 +462,9 @@ export class McpEditingService {
         revisionId: revision.id,
         expiresAt
       }, "G1", release.correlationId);
+      const build = this.#stagingAstro
+        ? await this.#stagingAstro.buildStatus(repositoryContext, release.id)
+        : Object.freeze({ releaseId: release.id, status: "unsupported" as const });
       return safe({
         status: "previewed",
         releaseId: release.id,
@@ -419,6 +474,8 @@ export class McpEditingService {
         artifactHash: artifact.hash,
         workflow,
         previewUrl: `${this.#releaseConfig.previewBaseUrl}/previews/${token}`,
+        confirmationUrl: `${this.#releaseConfig.previewBaseUrl}/confirmations/${confirmationToken}`,
+        build,
         expiresAt,
         nextStep: "approve-exact-release"
       });
@@ -441,8 +498,27 @@ export class McpEditingService {
     }
     return this.idempotent({ ...scope(repositoryContext), principalId: context.authorization.principal.id }, "release_approve", input.idempotencyKey, input, async () => {
       const candidate = await this.#releases.getRelease(repositoryContext, input.releaseId);
+      // The MCP bearer alone — even with a human subject — is never the
+      // decision. A built release must carry an independent browser receipt
+      // whose output manifest digest still matches the registered artifact.
+      let confirmation: Readonly<{ receiptHash: string; outputManifestDigest: string }> | undefined;
+      if (this.#stagingAstro) {
+        const summary = await this.#stagingAstro.artifactSummary(repositoryContext, candidate.id);
+        if (!summary) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_NOT_BUILT", "The trusted build for this release has not completed");
+        const receipt = await this.#releases.latestConfirmation(repositoryContext, candidate.id, input.releaseHash);
+        if (!receipt?.decisionAt || !receipt.outputManifestDigest || !receipt.receiptHash || !receipt.receiptExpiresAt || receipt.revokedAt) {
+          throw new McpEditingError("HUMAN_CONFIRMATION_REQUIRED", "An independent human confirmation receipt is required for this release");
+        }
+        if (new Date(receipt.receiptExpiresAt).getTime() <= Date.now()) {
+          throw new McpEditingError("HUMAN_CONFIRMATION_EXPIRED", "The human confirmation receipt has expired; prepare a fresh preview and confirm again");
+        }
+        if (receipt.outputManifestDigest !== summary.outputManifestDigest) {
+          throw new McpEditingError("RELEASE_DECISION_STALE", "The recorded confirmation does not match the registered build output");
+        }
+        confirmation = Object.freeze({ receiptHash: receipt.receiptHash, outputManifestDigest: receipt.outputManifestDigest });
+      }
       const release = await this.#releases.approve(repositoryContext, input.releaseId, input.releaseHash,
-        this.approvalFor(context, repositoryContext, candidate.environmentId));
+        this.approvalFor(context, repositoryContext, candidate.environmentId, confirmation));
       await this.appendEvent(context, "io.navocms.release.approved.v1", release.id, input.idempotencyKey, {
         phase: "applied", releaseId: release.id, releaseHash: release.releaseHash, artifactHash: release.artifactHash
       }, "G1", release.correlationId);
@@ -525,12 +601,203 @@ export class McpEditingService {
     return preview ? Object.freeze({ mediaType: preview.mediaType, body: preview.body }) : undefined;
   }
 
+  /**
+   * Browser preview surface for one capability token. While the trusted build
+   * is running this is the Markdown proof artifact; once the reviewed output
+   * is registered, `built` carries the exact immutable files that publication
+   * promotes. Never a production publication and never indexable.
+   */
+  public async resolvePreviewSurface(token: string): Promise<PreviewSurface | undefined> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+    const preview = await this.#releases.resolvePreview(sha256(token));
+    if (!preview) return undefined;
+    let built: PreviewSurface["built"];
+    if (this.#stagingAstro) {
+      const artifact = await this.#stagingAstro.artifactFor({
+        tenantId: preview.tenantId, siteId: preview.siteId, releaseId: preview.releaseId
+      });
+      if (artifact) {
+        built = Object.freeze({
+          output: artifact.output,
+          outputManifestDigest: artifact.outputManifestDigest,
+          sourceCommitSha: artifact.sourceCommitSha,
+          fileCount: artifact.fileCount,
+          totalBytes: artifact.totalBytes
+        });
+      }
+    }
+    return Object.freeze({
+      releaseId: preview.releaseId,
+      releaseHash: preview.releaseHash,
+      artifactHash: preview.artifactHash,
+      expiresAt: preview.expiresAt,
+      proof: Object.freeze({ mediaType: preview.mediaType, body: preview.body }),
+      ...(built ? { built } : {})
+    });
+  }
+
+  public async releaseBuildStatus(context: McpRequestContext, releaseId: string): Promise<PreviewBuildStatus> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    if (!this.#stagingAstro) return Object.freeze({ releaseId, status: "unsupported" });
+    return this.#stagingAstro.buildStatus(repositoryContext, releaseId);
+  }
+
+  public async releaseConfirmationStatus(context: McpRequestContext, input: {
+    readonly releaseId: string;
+    readonly releaseHash: string;
+  }): Promise<ConfirmationStatus> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    const release = await this.#releases.getRelease(repositoryContext, input.releaseId);
+    if (release.releaseHash !== input.releaseHash) {
+      throw new McpEditingError("STALE_RELEASE_APPROVAL", "Release hash does not match the previewed candidate");
+    }
+    const confirmation = await this.#releases.latestConfirmation(repositoryContext, input.releaseId, input.releaseHash);
+    if (!confirmation) {
+      return Object.freeze({ releaseId: input.releaseId, releaseHash: input.releaseHash, status: "pending", policyVersion: this.#releaseConfig.approvalPolicyVersion });
+    }
+    const status: ConfirmationStatus["status"] = confirmation.revokedAt ? "revoked"
+      : !confirmation.decisionAt ? "pending"
+        : new Date(confirmation.receiptExpiresAt ?? 0).getTime() <= Date.now() ? "expired" : "confirmed";
+    return Object.freeze({
+      releaseId: input.releaseId,
+      releaseHash: input.releaseHash,
+      status,
+      policyVersion: confirmation.policyVersion,
+      ...(confirmation.decisionAt ? { decidedAt: confirmation.decisionAt } : {}),
+      ...(confirmation.receiptHash ? { receiptHash: confirmation.receiptHash } : {}),
+      ...(confirmation.outputManifestDigest ? { outputManifestDigest: confirmation.outputManifestDigest } : {}),
+      ...(confirmation.receiptExpiresAt ? { receiptExpiresAt: confirmation.receiptExpiresAt } : {})
+    });
+  }
+
+  /** Read-only summary the confirmation page renders; resolved by capability only. */
+  public async resolveConfirmationView(token: string): Promise<ConfirmationView | undefined> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+    const confirmation = await this.#releases.resolveConfirmation(sha256(token));
+    if (!confirmation) return undefined;
+    const artifact = this.#stagingAstro
+      ? await this.#stagingAstro.artifactFor({ tenantId: confirmation.tenantId, siteId: confirmation.siteId, releaseId: confirmation.releaseId })
+      : undefined;
+    return Object.freeze({
+      releaseId: confirmation.releaseId,
+      releaseHash: confirmation.releaseHash,
+      policyVersion: confirmation.policyVersion,
+      ...(confirmation.previewExpiresAt ? { previewExpiresAt: confirmation.previewExpiresAt } : {}),
+      ...(confirmation.decisionAt ? { decisionAt: confirmation.decisionAt } : {}),
+      ...(confirmation.receiptHash ? { receiptHash: confirmation.receiptHash } : {}),
+      ...(confirmation.receiptExpiresAt ? { receiptExpiresAt: confirmation.receiptExpiresAt } : {}),
+      ...(confirmation.revokedAt ? { revokedAt: confirmation.revokedAt } : {}),
+      build: Object.freeze({
+        ready: artifact !== undefined,
+        ...(artifact ? {
+          outputManifestDigest: artifact.outputManifestDigest,
+          fileCount: artifact.fileCount,
+          totalBytes: artifact.totalBytes
+        } : {})
+      })
+    });
+  }
+
+  /**
+   * Records the human decision from the independent browser session. The
+   * output manifest digest is computed server-side from the registered
+   * artifact; the browser request carries no trust-bearing values. Repeated
+   * delivery of an already-recorded decision is a safe no-op.
+   */
+  public async recordConfirmationDecision(token: string): Promise<RecordedConfirmation | undefined> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+    const tokenHash = sha256(token);
+    const confirmation = await this.#releases.resolveConfirmation(tokenHash);
+    if (!confirmation) return undefined;
+    if (confirmation.revokedAt) throw new McpEditingError("RELEASE_CONFIRMATION_REVOKED", "This confirmation has been revoked");
+    if (confirmation.decisionAt) {
+      return Object.freeze({
+        recorded: false,
+        receiptHash: confirmation.receiptHash!,
+        decidedAt: confirmation.decisionAt,
+        receiptExpiresAt: confirmation.receiptExpiresAt!,
+        outputManifestDigest: confirmation.outputManifestDigest!
+      });
+    }
+    if (!this.#stagingAstro) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_NOT_BUILT", "No staging runtime is configured for this release");
+    if (!confirmation.previewExpiresAt) throw new McpEditingError("RELEASE_CONFIRMATION_EXPIRED", "This confirmation link is no longer valid");
+    const artifact = await this.#stagingAstro.artifactFor({
+      tenantId: confirmation.tenantId, siteId: confirmation.siteId, releaseId: confirmation.releaseId
+    });
+    if (!artifact) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_NOT_BUILT", "The trusted build for this release has not completed yet; ask the agent for the build status");
+    const decidedAt = new Date().toISOString();
+    const receiptExpiresAt = new Date(Math.min(
+      new Date(confirmation.previewExpiresAt).getTime(),
+      Date.now() + this.#releaseConfig.approvalTtlSeconds * 1000
+    )).toISOString();
+    const receiptHash = `sha256:${sha256(inputFingerprint({
+      releaseId: confirmation.releaseId,
+      releaseHash: confirmation.releaseHash,
+      outputManifestDigest: artifact.outputManifestDigest,
+      policyVersion: confirmation.policyVersion,
+      decidedAt,
+      receiptExpiresAt
+    }))}`;
+    const result = await this.#releases.recordConfirmation(tokenHash, {
+      decidedAt,
+      outputManifestDigest: artifact.outputManifestDigest,
+      receiptHash,
+      receiptExpiresAt
+    });
+    if (!result) throw new McpEditingError("RELEASE_CONFIRMATION_EXPIRED", "This confirmation link is no longer valid");
+    if (result.recorded) {
+      const factory = new DomainEventFactory({
+        source: "urn:navocms:mcp",
+        tenantId: confirmation.tenantId,
+        siteId: confirmation.siteId,
+        correlationId: confirmation.releaseId,
+        // The receipt records the decision, not an identity: the bearer of the
+        // confirmation capability acted in an independent browser session.
+        actor: { type: "human", id: "independent-browser-session" }
+      });
+      await this.#events.append(factory.create({
+        type: "io.navocms.release.human-confirmed.v1",
+        subject: `release:${confirmation.releaseId}`,
+        consequence: "G1",
+        idempotencyKey: `release_confirm:${receiptHash}`,
+        data: Object.freeze({
+          releaseId: confirmation.releaseId,
+          releaseHash: confirmation.releaseHash,
+          outputManifestDigest: artifact.outputManifestDigest,
+          policyVersion: confirmation.policyVersion,
+          receiptHash,
+          decidedAt,
+          receiptExpiresAt
+        })
+      }));
+    }
+    return Object.freeze({
+      recorded: result.recorded,
+      receiptHash,
+      decidedAt,
+      receiptExpiresAt,
+      outputManifestDigest: artifact.outputManifestDigest
+    });
+  }
+
   private async applyAndVerify(context: McpRequestContext, repositoryContext: RepositoryContext, releaseId: string, releaseHash: string): Promise<PublicationRecord> {
     const candidate = await this.#releases.getRelease(repositoryContext, releaseId);
     if (candidate.releaseHash !== releaseHash) throw new McpEditingError("STALE_RELEASE_APPROVAL", "Release hash does not match the previewed candidate");
-    // The trusted local build is completed before release state moves to
-    // publishing or the external provider receives any coordinates.
-    if (this.#stagingAstro) await this.#stagingAstro.ensureArtifact(context, repositoryContext, candidate);
+    // Publication promotes the reviewed output; it never builds. When the
+    // staging runtime is active the registered artifact must already exist and
+    // its output manifest digest must equal the digest bound to the recorded
+    // human confirmation — a stale or missing build fails closed here.
+    if (this.#stagingAstro) {
+      const summary = await this.#stagingAstro.artifactSummary(repositoryContext, releaseId);
+      if (!summary) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_NOT_BUILT", "The trusted build for this release has not completed; publication never builds");
+      const receipt = await this.#releases.latestConfirmation(repositoryContext, releaseId, releaseHash);
+      if (!receipt?.outputManifestDigest || receipt.revokedAt) {
+        throw new McpEditingError("HUMAN_CONFIRMATION_REQUIRED", "An independent human confirmation receipt is required before publication");
+      }
+      if (receipt.outputManifestDigest !== summary.outputManifestDigest) {
+        throw new McpEditingError("RELEASE_DECISION_STALE", "The recorded confirmation does not match the registered build output");
+      }
+    }
     const prepared = await this.#releases.beginPublication(repositoryContext, releaseId, releaseHash);
     const applied = await this.#releaseProvider.publish({
       releaseId,
@@ -653,18 +920,27 @@ export class McpEditingService {
     await this.#events.append(factory.create({ type, subject, consequence, idempotencyKey, data }));
   }
 
-  private approvalFor(context: McpRequestContext, repositoryContext: RepositoryContext, environmentId: string): ReleaseApprovalInput {
+  private approvalFor(context: McpRequestContext, repositoryContext: RepositoryContext, environmentId: string, confirmation?: Readonly<{ receiptHash: string; outputManifestDigest: string }>): ReleaseApprovalInput {
     return Object.freeze({
       policyVersion: this.#releaseConfig.approvalPolicyVersion,
       // Keep verifiable, non-secret evidence; the OIDC subject itself remains in the identity store.
-      evidence: Object.freeze({ actorReferenceHash: sha256(`${context.authorization.principal.issuer}|${context.authorization.principal.subject}`), channel: "authenticated-mcp" }),
+      evidence: Object.freeze({
+        actorReferenceHash: sha256(`${context.authorization.principal.issuer}|${context.authorization.principal.subject}`),
+        channel: "authenticated-mcp",
+        ...(confirmation ? {
+          confirmationChannel: "browser-confirmation",
+          confirmationReceiptHash: confirmation.receiptHash,
+          outputManifestDigest: confirmation.outputManifestDigest
+        } : {})
+      }),
       expiresAt: new Date(Date.now() + this.#releaseConfig.approvalTtlSeconds * 1000).toISOString(),
       actorKind: "human",
       scope: Object.freeze({
         tenantId: repositoryContext.site.tenantId,
         siteId: repositoryContext.site.siteId,
         environmentId
-      })
+      }),
+      ...(confirmation ? { confirmation: Object.freeze(confirmation) } : {})
     });
   }
 }
