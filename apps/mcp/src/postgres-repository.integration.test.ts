@@ -283,21 +283,20 @@ integration("Neon production persistence", () => {
     // A registered built artifact flips publication onto the independent
     // confirmation policy: without a decision this publish fails closed.
     await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
-      const environment = (await client.query<{ environment_id: string }>(
-        "SELECT environment_id FROM navocms.release_candidates WHERE tenant_id = $1 AND site_id = $2 AND id = $3",
-        [tenantId, siteId, preview.releaseId]
-      )).rows[0]!.environment_id;
       await client.query(
         `INSERT INTO navocms.reviewed_astro_artifact_object_bindings (
            tenant_id, site_id, environment_id, environment_key, release_id, release_hash,
            artifact_hash, astro_artifact_hash, source_commit_sha, source_object_key, source_object_sha256,
            source_object_bytes, output_object_key, output_object_sha256, output_object_bytes, state, evidence_hash
-         ) VALUES ($1,$2,$3,'default',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'ready',$15)`,
-        [tenantId, siteId, environment, preview.releaseId, preview.releaseHash, "a".repeat(64),
-          `sha256:${"d".repeat(64)}`, "f".repeat(64),
+         )
+         SELECT c.tenant_id, c.site_id, c.environment_id, 'default', c.id, c.release_hash, c.artifact_hash,
+                $1, $2, $3, $4, $5, $6, $7, $8, 'ready', $9
+           FROM navocms.release_candidates c
+          WHERE c.tenant_id = $10 AND c.site_id = $11 AND c.id = $12`,
+        [`sha256:${"d".repeat(64)}`, "f".repeat(64),
           `tenants/${tenantId}/sites/${siteId}/reviewed-astro/source/sha256/${"e".repeat(64)}.json`, "e".repeat(64), 2048,
           `tenants/${tenantId}/sites/${siteId}/reviewed-astro/output/sha256/${"f".repeat(64)}.json`, "f".repeat(64), 4096,
-          `sha256:${"9".repeat(64)}`]
+          `sha256:${"9".repeat(64)}`, tenantId, siteId, preview.releaseId]
       );
     });
     await expect(serviceInstance.publishRelease(context(), {
