@@ -1,6 +1,6 @@
 # Sprint 8.1 — исправления после независимой приёмки
 
-Статус: **changes requested**. Это продолжение Sprint 8.1, не разрешение начинать Sprint 8.2.
+Историческое задание на исправления. **Закрыто:** см. [приёмку](../operations/SPRINT_8_1_ACCEPTANCE.md).
 Проверен PR [#53](https://github.com/Tsumibito/NavoCMS/pull/53), head
 `58d105af3c6f7e94fbd1855b91671423d3f1f86c`. GitHub CI этого SHA: success,
 [проверенный run](https://github.com/Tsumibito/NavoCMS/actions/runs/33989248153).
