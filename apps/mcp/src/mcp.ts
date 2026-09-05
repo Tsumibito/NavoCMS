@@ -81,22 +81,24 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
 
   if (canRead) server.registerTool("content_read", {
     title: "Read bounded content windows",
-    description: "Continue reading a revision in bounded pieces: a Markdown window (markdownOffset), one AST node's full text (nodeId), or a page of AST nodes (nodeOffset). Revisions are immutable, so windows are stable.",
+    description: "Continue reading a revision in bounded pieces: a Markdown window (markdownOffset), a metadata field's JSON value (metadataKey with markdownOffset), one AST node's full text (nodeId), or a page of AST nodes (nodeOffset). Revisions are immutable, so windows are stable.",
     inputSchema: {
       revisionId: z.string().min(1),
       markdownOffset: z.number().int().min(0).max(10_000_000).optional(),
       markdownLength: z.number().int().min(1).max(20_000).optional(),
+      metadataKey: z.string().min(1).optional(),
       nodeId: z.string().min(1).optional(),
       nodeOffset: z.number().int().min(0).max(10_000_000).optional(),
       nodeLimit: z.number().int().min(1).max(100).optional()
     },
     annotations: readOnlyAnnotations()
-  }, safeTool(async ({ revisionId, markdownOffset, markdownLength, nodeId, nodeOffset, nodeLimit }) => result(
+  }, safeTool(async ({ revisionId, markdownOffset, markdownLength, metadataKey, nodeId, nodeOffset, nodeLimit }) => result(
     "Content window loaded",
     await service.readContent(context, {
       revisionId,
       ...(markdownOffset !== undefined ? { markdownOffset } : {}),
       ...(markdownLength !== undefined ? { markdownLength } : {}),
+      ...(metadataKey !== undefined ? { metadataKey } : {}),
       ...(nodeId !== undefined ? { nodeId } : {}),
       ...(nodeOffset !== undefined ? { nodeOffset } : {}),
       ...(nodeLimit !== undefined ? { nodeLimit } : {})

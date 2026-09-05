@@ -412,6 +412,48 @@ describe("MCP editing service", () => {
       .rejects.toMatchObject({ code: "METADATA_KEY_NOT_FOUND" });
   });
 
+  it("advertises and reads omitted metadata through the MCP transport", async () => {
+    const { service, context } = fixture("editor");
+    const server = createMcpServer(service, context);
+    const client = new Client({ name: "metadata-acceptance", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.find(({ name }) => name === "content_read")?.inputSchema.properties)
+        .toHaveProperty("metadataKey");
+      const contact = { description: "🌍".repeat(12_000) };
+      const created = await client.callTool({ name: "draft_create", arguments: {
+        typeName: "organization", slug: "metadata-transport", locale: "en", title: "Metadata transport",
+        markdown: "# Short Markdown\n", metadata: { contact }, idempotencyKey: "metadata-transport-create"
+      } });
+      expect(created.isError).not.toBe(true);
+      const revisionId = (created.structuredContent as unknown as DraftResult).draft.revisionId;
+      const summary = await client.callTool({ name: "content_get", arguments: { revisionId } });
+      expect(summary.structuredContent).toMatchObject({ metadataTruncated: true, metadataOmittedKeys: ["contact"] });
+      let assembled = "";
+      let offset = 0;
+      for (let page = 0; page < 10; page += 1) {
+        const result = await client.callTool({ name: "content_read", arguments: { revisionId, metadataKey: "contact", markdownOffset: offset } });
+        expect(result.isError).not.toBe(true);
+        const window = result.structuredContent as { text: string; metadataKey: string; truncated: boolean; nextOffset?: number };
+        expect(window.metadataKey).toBe("contact");
+        expect(window.text.length).toBeLessThanOrEqual(20_000);
+        assembled += window.text;
+        if (!window.truncated) break;
+        expect(window.nextOffset).toBeGreaterThan(offset);
+        offset = window.nextOffset!;
+      }
+      expect(JSON.parse(assembled)).toEqual(contact);
+      const missing = await client.callTool({ name: "content_read", arguments: { revisionId, metadataKey: "absent" } });
+      expect(missing.isError).toBe(true);
+      expect(missing.structuredContent).toMatchObject({ code: "METADATA_KEY_NOT_FOUND" });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("aligns idempotency key bounds across tools, service, and the event ledger", async () => {
     const { service, context, events } = fixture("editor");
     const base = {
