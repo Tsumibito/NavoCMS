@@ -223,13 +223,19 @@ integration("Neon production persistence", () => {
     });
     const status = await runtime.buildStatus(repositoryContext, preview.releaseId);
     expect(status.status).toBe("building");
-    const runs = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
-      await client.query<{ status: string; last_error_code: string | null }>(
-        `SELECT status, last_error_code FROM navocms.workflow_runs
-          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
-        [tenantId, siteId, preview.releaseId]
-      )).rows
-    );
+    // The resumed executor runs asynchronously; poll for its durable outcome.
+    let runs: ReadonlyArray<{ status: string; last_error_code: string | null }> = [];
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      runs = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+        await client.query<{ status: string; last_error_code: string | null }>(
+          `SELECT status, last_error_code FROM navocms.workflow_runs
+            WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+          [tenantId, siteId, preview.releaseId]
+        )).rows
+      );
+      if (runs.length === 1 && runs[0]!.status === "failed") break;
+    }
     // Exactly one job exists; the resumed executor failed closed on the
     // unattestable toolchain of this synthetic environment and recorded its
     // error durably for the next recovery attempt.

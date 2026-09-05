@@ -68,6 +68,7 @@ RETURNS TABLE (
   decision_at timestamptz,
   output_manifest_digest text,
   receipt_hash text,
+  receipt_expires_at timestamptz,
   preview_expires_at timestamptz,
   revoked_at timestamptz
 )
@@ -77,7 +78,7 @@ SECURITY DEFINER
 SET search_path = navocms, pg_catalog
 AS $resolve_release_confirmation$
   SELECT k.release_id, k.tenant_id, k.site_id, k.release_hash, k.policy_version,
-         k.decision_at, k.output_manifest_digest, k.receipt_hash,
+         k.decision_at, k.output_manifest_digest, k.receipt_hash, k.receipt_expires_at,
          k.preview_expires_at, k.revoked_at
     FROM release_confirmations k
    WHERE k.token_hash = p_token_hash
@@ -90,7 +91,9 @@ GRANT EXECUTE ON FUNCTION resolve_release_confirmation(text) TO navocms_app;
 
 -- Extended preview resolution for the real-output preview surface: the row
 -- must carry tenant/site/release identity so the server can load the built
--- artifact inside its exact scope. Replaces the 0004 signature in place.
+-- artifact inside its exact scope. PostgreSQL cannot change a return type in
+-- place, so the 0004 signature is replaced here as a new ordered step.
+DROP FUNCTION IF EXISTS navocms.resolve_release_preview(text);
 CREATE OR REPLACE FUNCTION resolve_release_preview(p_token_hash text)
 RETURNS TABLE (
   release_id uuid,
