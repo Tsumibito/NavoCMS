@@ -12,7 +12,8 @@ staging-деплой и обновление статуса остаются з�
 | Аудированная основа плана | `1b02acd29cab60bb74c9a80a401606c8540260b5` (`main`, предок базового коммита) |
 | Ветка | `codex/sprint-8-1-editing-integrity` (создана от базового коммита, не от старого `main`) |
 | Implementation commit | `06ab6b8` (`feat(editing): reliable everyday edits with current-head patches and bounded reads`) |
-| Submission commit | этот документ идёт последним коммитом ветки; принимающий фиксирует фактический HEAD (`git rev-parse HEAD`) |
+| Корректирующий commit | `5a17b90` (`fix(editing): preserve effect evidence on retries and bound metadata reads`) |
+| Submission commit | этот документ и принятие тестовой инфраструктуры идут последними коммитами ветки; принимающий фиксирует фактический HEAD (`git rev-parse HEAD`) |
 | PR | [Tsumibito/NavoCMS#53](https://github.com/Tsumibito/NavoCMS/pull/53) |
 | Изменённые контракты | `docs/specs/mcp-editing-v0alpha1.md` (bounds, mutation semantics, compatibility note); ADR `docs/architecture/0025-current-head-patch-gate-and-bounded-reads.md`; индекс ADR |
 
@@ -66,11 +67,11 @@ staging/production и соседние проекты не использова�
 
 | Проверка | Команда | Результат |
 | --- | --- | --- |
-| Полный гейт | `dotenvx run -f .env.test -- node scripts/test-neon.mjs` (два последовательных чистых запуска) | PASS ×2 (exit 0): build, `pnpm check` (contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright) + 5 isolation suites, временная БД удалена после каждого запуска |
-| Unit + integration vitest | входит в оба Neon-прогона (`NAVOCMS_NEON_TEST_RUN=true`, test-only timeout 180 с для удалённых round trips) | **226/226 passed, 39 files, 0 skipped, 0 failed** (счётчики сняты с первого прогона с полным логом; второй прогон — тот же набор, exit 0 без сбоев) |
-| Visual/a11y (playwright + axe) | входит в `pnpm check` | **6/6 passed** в обоих прогонах |
-| Tenant isolation | 5 SQL suites внутри помощника | 5/5 «Isolation passed» в обоих прогонах |
-| CI GitHub Actions | автоматически перезапускается на каждый push ветки (service postgres:17-alpine) | итоговый зелёный run фиксируется на финальном SHA и приводится в финальном ответе исполнителя; принимающий подтверждает CI на merge/head SHA |
+| Полный гейт | `dotenvx run -f .env.test -- node scripts/test-neon.mjs` — два последовательных чистых запуска + контрольный на финальном SHA ветки | PASS ×3 (exit 0): build, `pnpm check` (contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright) + 5 isolation suites; временная БД удалялась после каждого запуска |
+| Unit + integration vitest | входит в Neon-прогоны (`NAVOCMS_NEON_TEST_RUN=true`, test-only timeout 180 с для удалённых round trips) | **226/226 passed, 39 files, 0 skipped, 0 failed** в контрольном прогоне на финальном SHA (те же счётчики в первом прогоне; второй — exit 0 без сбоев) |
+| Visual/a11y (playwright + axe) | входит в `pnpm check` | **6/6 passed** в контрольном прогоне (и в первом) |
+| Tenant isolation | 5 SQL suites внутри помощника | 5/5 «Isolation passed» во всех прогонах |
+| CI GitHub Actions | [run 33992480249](https://github.com/Tsumibito/NavoCMS/actions/runs/33992480249) на `e42628dfce182b87dda326d6399d3af482074075`: **success** | PASS; промежуточный упавший run 33992299882 — недетерминизм самого конкурентного теста (зафиксирован и исправлен отдельным test-only коммитом), повтор прогнал success; принимающий подтверждает CI на merge/head SHA |
 
 Повторные прогоны не конфликтуют: помощник создаёт чистую временную БД на каждый запуск, поэтому
 фиксированные fixture-ключи не встречают записей предыдущего прогона (два последовательных чистых
