@@ -403,7 +403,7 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     const ready = preview.status === "previewed" || preview.status === "ready-for-workflow";
     // The text fallback must report the same result the widget renders.
     const message = ready
-      ? `Protected preview is bound and ready; the capability URL expires at ${String(preview.expiresAt)}. Nothing was published.`
+      ? `Protected preview is bound and ready; the capability URL expires at ${String(preview.expiresAt)}. It renders a Markdown proof artifact, not the final site design. Nothing was published.`
       : `Protected preview is blocked (${String(preview.status)}); nothing was published.`;
     return result(message, { view: "workflow", ...preview });
   }));
@@ -480,6 +480,7 @@ function safeTool<TArgs extends Record<string, unknown>>(
         : publicCloudflareDeliveryErrorCode(error) ?? "REQUEST_REJECTED";
       const { text, effectState } = effectAwareMessage(error, code, options.effectful === true);
       const structured: Record<string, unknown> = { code, effectState };
+      if (error instanceof McpEditingError && error.nextAction !== undefined) structured.nextAction = error.nextAction;
       if (error instanceof ContentError) {
         for (const key of ["currentRevisionId", "currentSourceHash", "currentRevisionNumber"] as const) {
           const value = error.details[key];
@@ -494,6 +495,11 @@ function safeTool<TArgs extends Record<string, unknown>>(
 function effectAwareMessage(error: unknown, code: string, effectful: boolean): { readonly text: string; readonly effectState: "none" | "applied" | "unknown" } {
   if (error instanceof McpEditingError && error.effectState === "applied") {
     return { text: `NavoCMS rejected the request (${code}). ${APPLIED_EFFECT_TEXT}`, effectState: "applied" };
+  }
+  if (error instanceof McpEditingError && error.effectState === "unknown") {
+    // The service composes this message from recorded reservation state only;
+    // it names the recovery path instead of claiming a clean outcome.
+    return { text: `NavoCMS rejected the request (${code}). ${error.message}`, effectState: "unknown" };
   }
   if (effectful && !PRE_EFFECT_ERROR_CODES.has(code) && !(error instanceof SecurityError)) {
     return { text: `NavoCMS rejected the request (${code}). ${UNKNOWN_EFFECT_TEXT}`, effectState: "unknown" };

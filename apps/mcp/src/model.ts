@@ -47,6 +47,7 @@ export const MCP_LIMITS = Object.freeze({
   maxMarkdownCharacters: 20_000,
   maxExcerptCharacters: 280,
   maxAstNodes: 100,
+  maxMetadataCharacters: 4_000,
   maxDiffLines: 400,
   maxRequestBytes: 256 * 1024,
   idempotencyKeyMinLength: 16,

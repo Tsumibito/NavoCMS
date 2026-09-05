@@ -198,15 +198,20 @@ export class McpEditingService {
     const truncated = revision.source.length > MCP_LIMITS.maxMarkdownCharacters;
     const astTotalNodes = revision.ast.nodes.length;
     const astTruncated = astTotalNodes > MCP_LIMITS.maxAstNodes;
+    const metadataProjection = boundedMetadataProjection(revision.metadata);
     return safe({
       revisionId: revision.id,
       documentId: revision.documentId,
       variantId: revision.variantId,
       revisionNumber: revision.number,
       sourceHash: revision.sourceHash,
-      // `metadata.body` mirrors the full Markdown source; it is projected out so
-      // the response never duplicates unbounded content behind a bounded field.
-      metadata: metadataWithoutBody(revision.metadata),
+      // The metadata projection never duplicates the Markdown `body` mirror and
+      // stays inside its own serialized-character budget; omitted fields stay
+      // reachable through `content_read` windows on the immutable revision.
+      metadata: metadataProjection.metadata,
+      metadataTruncated: metadataProjection.truncated,
+      metadataTotalCharacters: metadataProjection.totalCharacters,
+      ...(metadataProjection.omittedKeys.length > 0 ? { metadataOmittedKeys: metadataProjection.omittedKeys } : {}),
       markdown: truncated ? revision.source.slice(0, MCP_LIMITS.maxMarkdownCharacters) : revision.source,
       truncated,
       totalCharacters: revision.source.length,
@@ -232,6 +237,7 @@ export class McpEditingService {
     readonly markdownOffset?: number;
     readonly markdownLength?: number;
     readonly nodeId?: string;
+    readonly metadataKey?: string;
     readonly nodeOffset?: number;
     readonly nodeLimit?: number;
   }): Promise<object> {
@@ -253,6 +259,13 @@ export class McpEditingService {
         totalCharacters: node.text.length
       });
     }
+    if (input.metadataKey !== undefined) {
+      if (!Object.prototype.hasOwnProperty.call(revision.metadata, input.metadataKey)) {
+        throw new McpEditingError("METADATA_KEY_NOT_FOUND", "The requested metadata key does not exist in this revision");
+      }
+      const serialized = JSON.stringify(revision.metadata[input.metadataKey]) ?? "null";
+      return boundedWindow(revision.id, serialized, input.markdownOffset, input.markdownLength, "text", input.metadataKey);
+    }
     if (input.nodeOffset !== undefined || input.nodeLimit !== undefined) {
       const offset = Math.max(0, Math.floor(input.nodeOffset ?? 0));
       const limit = Math.min(Math.max(1, Math.floor(input.nodeLimit ?? MCP_LIMITS.maxAstNodes)), MCP_LIMITS.maxAstNodes);
@@ -272,20 +285,7 @@ export class McpEditingService {
         ...(nextOffset < totalNodes ? { nextOffset, truncatedNodes: true } : {})
       });
     }
-    const offset = Math.max(0, Math.floor(input.markdownOffset ?? 0));
-    const length = Math.min(
-      Math.max(1, Math.floor(input.markdownLength ?? MCP_LIMITS.maxMarkdownCharacters)),
-      MCP_LIMITS.maxMarkdownCharacters
-    );
-    const markdown = revision.source.slice(offset, offset + length);
-    const nextOffset = offset + markdown.length;
-    return safe({
-      revisionId: revision.id,
-      totalCharacters: revision.source.length,
-      offset,
-      markdown,
-      ...(nextOffset < revision.source.length ? { nextOffset, truncated: true } : { truncated: false })
-    });
+    return boundedWindow(revision.id, revision.source, input.markdownOffset, input.markdownLength, "markdown");
   }
 
   public async listDrafts(context: McpRequestContext, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<object> {
@@ -582,8 +582,8 @@ export class McpEditingService {
     // Provider calls cross an external trust boundary. Their durable prepare
     // state must commit before an effect, so they cannot share an outer SQL
     // transaction that would roll it back when the provider crashes.
-    if (this.#database && transactional) return this.#database.withScope(scope, () => this.idempotentInTransaction(scope, operation, key, input, create));
-    return this.idempotentInTransaction(scope, operation, key, input, create);
+    if (this.#database && transactional) return this.#database.withScope(scope, () => this.idempotentInTransaction(scope, operation, key, input, create, transactional));
+    return this.idempotentInTransaction(scope, operation, key, input, create, transactional);
   }
 
   private async idempotentInTransaction<T>(
@@ -591,7 +591,8 @@ export class McpEditingService {
     operation: string,
     key: string,
     input: unknown,
-    create: () => Promise<T>
+    create: () => Promise<T>,
+    transactional: boolean
   ): Promise<T> {
     const fingerprint = inputFingerprint(input);
     let reservation: IdempotencyReservation<T>;
@@ -605,7 +606,13 @@ export class McpEditingService {
     }
     if (reservation.status === "completed") return reservation.value as T;
     if (reservation.status !== "reserved") {
-      throw new McpEditingError("IDEMPOTENCY_INCOMPLETE", "A previous attempt is pending or requires reconciliation");
+      // An incomplete reservation does not prove the first attempt had no
+      // effect. A transactional operation rolled back with its effect, but a
+      // non-transactional provider operation may already have been applied.
+      throw new McpEditingError("IDEMPOTENCY_INCOMPLETE", incompleteReservationMessage(reservation.errorCode, transactional), {
+        effectState: transactional ? "none" : "unknown",
+        ...(transactional ? {} : { nextAction: "release_reconcile" })
+      });
     }
     try {
       const value = await create();
@@ -686,9 +693,84 @@ function assertIdempotencyKey(key: string): void {
   }
 }
 
-function metadataWithoutBody(metadata: Readonly<Record<string, unknown>>): Record<string, unknown> {
-  const { body: _body, ...projection } = metadata;
-  return projection;
+/**
+ * Explains an incomplete reservation without claiming the first attempt had no
+ * effect: only a committed transactional rollback proves that.
+ */
+function incompleteReservationMessage(previousErrorCode: string | undefined, transactional: boolean): string {
+  const recorded = previousErrorCode ? ` (recorded error: ${previousErrorCode})` : "";
+  if (transactional) {
+    return `A previous attempt with this idempotency key did not complete${recorded}. No content was published because its database transaction did not commit.`;
+  }
+  return `A previous attempt with this idempotency key did not complete${recorded}. Its external outcome is unknown. Read release_status, then run release_reconcile with the same release hash; the provider treats the release hash as its idempotency key, so reconciliation does not duplicate the effect. Do not reuse the key for new input.`;
+}
+
+/**
+ * Metadata projection for one read response. The `body` mirror duplicates the
+ * Markdown source and is dropped; every remaining field is included whole as
+ * long as the cumulative serialized size fits its budget, and larger fields
+ * are reported by name instead of being silently cut. Values stay reachable
+ * through bounded `content_read` windows on the immutable revision.
+ */
+function boundedMetadataProjection(metadata: Readonly<Record<string, unknown>>): {
+  readonly metadata: Record<string, unknown>;
+  readonly truncated: boolean;
+  readonly totalCharacters: number;
+  readonly omittedKeys: readonly string[];
+} {
+  const entries = Object.entries(metadata)
+    .filter(([key]) => key !== "body")
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const projected: Record<string, unknown> = {};
+  const omittedKeys: string[] = [];
+  let used = 0;
+  let total = 0;
+  for (const [key, value] of entries) {
+    const serialized = JSON.stringify({ [key]: value }) ?? "";
+    total += serialized.length;
+    if (serialized.length > MCP_LIMITS.maxMetadataCharacters || used + serialized.length > MCP_LIMITS.maxMetadataCharacters) {
+      omittedKeys.push(key);
+      continue;
+    }
+    projected[key] = value;
+    used += serialized.length;
+  }
+  return Object.freeze({
+    metadata: projected,
+    truncated: omittedKeys.length > 0,
+    totalCharacters: total,
+    omittedKeys: Object.freeze(omittedKeys)
+  });
+}
+
+/**
+ * One bounded slice of an immutable string with explicit totals. `field`
+ * selects the payload property name (`markdown` for source windows, `text`
+ * for serialized metadata values); the unit is UTF-16 code units.
+ */
+function boundedWindow(
+  revisionId: string,
+  source: string,
+  rawOffset: number | undefined,
+  rawLength: number | undefined,
+  field: "markdown" | "text",
+  metadataKey?: string
+): object {
+  const offset = Math.max(0, Math.floor(rawOffset ?? 0));
+  const length = Math.min(
+    Math.max(1, Math.floor(rawLength ?? MCP_LIMITS.maxMarkdownCharacters)),
+    MCP_LIMITS.maxMarkdownCharacters
+  );
+  const text = source.slice(offset, offset + length);
+  const nextOffset = offset + text.length;
+  return safe({
+    revisionId,
+    ...(metadataKey !== undefined ? { metadataKey } : {}),
+    totalCharacters: source.length,
+    offset,
+    [field]: text,
+    ...(nextOffset < source.length ? { nextOffset, truncated: true } : { truncated: false })
+  });
 }
 
 function boundDiff(diff: { readonly fromHash: string; readonly toHash: string; readonly lines: readonly object[] }) {

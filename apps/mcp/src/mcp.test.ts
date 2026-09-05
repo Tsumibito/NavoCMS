@@ -13,8 +13,8 @@ import { describe, expect, it } from "vitest";
 
 import { createMcpHttpServer } from "./http.js";
 import { createMcpServer } from "./mcp.js";
-import { InMemoryEditingRepository } from "./repository.js";
-import { McpEditingService } from "./service.js";
+import { InMemoryEditingRepository, inputFingerprint } from "./repository.js";
+import { InMemoryIdempotencyStore, McpEditingService } from "./service.js";
 
 const site = Object.freeze({
   tenantId: "11111111-1111-4111-8111-111111111111",
@@ -347,6 +347,71 @@ describe("MCP editing service", () => {
     expect(detail.truncated).toBe(false);
   });
 
+  it("bounds the read response budget across metadata and offers a bounded metadata continuation", async () => {
+    const { service, context } = fixture("editor");
+    const longKey = `key-${"k".repeat(300)}`;
+    const metadata = {
+      contact: { description: "x".repeat(180_000), [longKey]: { note: "\u{1F30D}".repeat(500) } },
+      legalName: "Bounded metadata organization"
+    };
+    const created = await service.createDraft(context, {
+      typeName: "organization",
+      slug: "bounded-metadata",
+      locale: "en",
+      title: "Bounded metadata",
+      markdown: "# Test\n",
+      metadata,
+      idempotencyKey: "bounded-metadata-draft-1"
+    }) as DraftResult;
+    const content = await service.getContent(context, created.draft.revisionId) as ContentResult & {
+      metadata: Record<string, unknown>;
+      metadataTruncated: boolean;
+      metadataTotalCharacters: number;
+      metadataOmittedKeys?: readonly string[];
+    };
+    const serialized = JSON.stringify(content);
+    expect(serialized.length).toBeLessThan(60_000);
+    expect(serialized).not.toContain("x".repeat(1_000));
+    expect(content.metadataTruncated).toBe(true);
+    expect(content.metadataTotalCharacters).toBeGreaterThan(180_000);
+    expect(content.metadataOmittedKeys).toEqual(["contact"]);
+    expect(content.metadata.legalName).toBe("Bounded metadata organization");
+
+    // The omitted value stays reachable through bounded windows on the
+    // immutable revision, without widening the site scope.
+    const contactJson = JSON.stringify(metadata.contact);
+    const readInput = { revisionId: created.draft.revisionId, metadataKey: "contact" };
+    let assembled = "";
+    let offset = 0;
+    for (let window = 0; window < 20 && (offset === 0 || assembled.length < contactJson.length); window += 1) {
+      const page = await service.readContent(context, { ...readInput, markdownOffset: offset }) as {
+        text: string;
+        truncated: boolean;
+        nextOffset?: number;
+        totalCharacters: number;
+      };
+      expect(page.totalCharacters).toBe(contactJson.length);
+      expect(page.text.length).toBeLessThanOrEqual(20_000);
+      assembled += page.text;
+      if (!page.truncated) break;
+      offset = page.nextOffset!;
+    }
+    expect(assembled).toBe(contactJson);
+
+    // A deep unicode key with a long name survives a window aligned to its own
+    // serialized position inside the contact value.
+    const fragment = JSON.stringify(metadata.contact[longKey]);
+    const fragmentStart = contactJson.indexOf(fragment);
+    expect(fragmentStart).toBeGreaterThan(0);
+    const aligned = await service.readContent(context, {
+      revisionId: created.draft.revisionId, metadataKey: "contact", markdownOffset: fragmentStart
+    }) as { text: string };
+    expect(aligned.text.startsWith(fragment)).toBe(true);
+
+    await expect(service.readContent(context, { revisionId: created.draft.revisionId, metadataKey: "missing-key" }))
+      .rejects.toMatchObject({ code: "METADATA_KEY_NOT_FOUND" });
+  });
+
   it("aligns idempotency key bounds across tools, service, and the event ledger", async () => {
     const { service, context, events } = fixture("editor");
     const base = {
@@ -407,6 +472,7 @@ describe("MCP editing service", () => {
       expect(handoff.isError).not.toBe(true);
       const text = (handoff.content as { type: string; text?: string }[])[0]?.text ?? "";
       expect(text).toContain("ready");
+      expect(text).toContain("Markdown proof artifact");
       expect(text).not.toContain("Blocked");
       expect(handoff.structuredContent).toMatchObject({
         view: "workflow",
@@ -419,6 +485,74 @@ describe("MCP editing service", () => {
       await client.close();
       await server.close();
     }
+  });
+
+  it("keeps applied-effect evidence when a retry meets an incomplete reservation", async () => {
+    const provider = new ThrowingVerifyProvider();
+    const session = await publishSession(provider);
+    const publishArgs = {
+      releaseId: session.preview.releaseId,
+      releaseHash: session.preview.releaseHash,
+      idempotencyKey: "review-publish-000001"
+    };
+    try {
+      const first = await session.client.callTool({ name: "release_publish", arguments: publishArgs });
+      expect(first.isError).toBe(true);
+      expect(((first.content as { type: string; text?: string }[])[0]?.text ?? "")).toContain("LIVE_VERIFICATION_FAILED");
+      expect(provider.publishCalls).toBe(1);
+
+      const retry = await session.client.callTool({ name: "release_publish", arguments: publishArgs });
+      expect(retry.isError).toBe(true);
+      const retryText = (retry.content as { type: string; text?: string }[])[0]?.text ?? "";
+      expect(retryText).not.toContain("No content was published");
+      expect(retryText).toContain("release_reconcile");
+      expect(retry.structuredContent).toMatchObject({ code: "IDEMPOTENCY_INCOMPLETE", effectState: "unknown" });
+
+      // Reconciliation re-verifies the recorded effect without repeating it.
+      provider.verificationSucceeds = true;
+      const reconciled = await session.client.callTool({ name: "release_reconcile", arguments: {
+        releaseId: session.preview.releaseId,
+        releaseHash: session.preview.releaseHash,
+        idempotencyKey: "review-reconcile-0001"
+      } });
+      expect(reconciled.isError).not.toBe(true);
+      expect(reconciled.structuredContent).toMatchObject({ release: { status: "published" } });
+      expect(provider.publishCalls).toBe(1);
+    } finally {
+      await session.client.close();
+      await session.server.close();
+    }
+  });
+
+  it("reports an unknown effect state while a non-transactional reservation is pending", async () => {
+    const repository = new InMemoryEditingRepository();
+    repository.registerSite(site);
+    const store = new InMemoryIdempotencyStore();
+    const service = new McpEditingService(repository, new InMemoryEventStore(), store);
+    const context = requestContext("publisher");
+    const draft = await service.createDraft(context, {
+      typeName: "article",
+      slug: "pending-reservation-surface",
+      locale: "en",
+      title: "Pending reservation surface",
+      markdown: "# Pending reservation surface\n",
+      idempotencyKey: "pending-reserve-draft-01"
+    }) as DraftResult;
+    const preview = await service.preparePreview(context, draft.draft.revisionId, "pending-reserve-preview-1") as { releaseId: string; releaseHash: string };
+    await service.approveRelease(context, {
+      releaseId: preview.releaseId,
+      releaseHash: preview.releaseHash,
+      idempotencyKey: "pending-reserve-approve-1"
+    });
+    const input = { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "pending-reserve-publish" };
+    await store.reserve(
+      { tenantId: site.tenantId, siteId: site.siteId },
+      "release_publish", input.idempotencyKey, inputFingerprint(input)
+    );
+    await expect(service.publishRelease(context, input)).rejects.toMatchObject({
+      code: "IDEMPOTENCY_INCOMPLETE",
+      effectState: "unknown"
+    });
   });
 
   it("reports provider effect state instead of claiming nothing was published", async () => {
@@ -447,14 +581,17 @@ describe("MCP editing service", () => {
 
 class ThrowingVerifyProvider implements ReleaseProvider {
   readonly key = "test-verify-failure-provider";
+  publishCalls = 0;
+  verificationSucceeds = false;
   async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
+    this.publishCalls += 1;
     return {
       providerKey: this.key,
       providerReference: `ref-${input.releaseHash.slice(0, 12)}`,
       artifactHash: input.artifact.hash
     };
   }
-  async verify() { return false; }
+  async verify() { return this.verificationSucceeds; }
   async rollback() {}
 }
 
@@ -658,6 +795,26 @@ describe("MCP protocol and agent evaluations", () => {
 });
 
 async function releasePublishWithProvider(provider: ReleaseProvider) {
+  const session = await publishSession(provider);
+  try {
+    return await session.client.callTool({ name: "release_publish", arguments: {
+      releaseId: session.preview.releaseId,
+      releaseHash: session.preview.releaseHash,
+      idempotencyKey: "provider-error-publish-001"
+    } });
+  } finally {
+    await session.client.close();
+    await session.server.close();
+  }
+}
+
+async function publishSession(provider: ReleaseProvider): Promise<{
+  readonly service: McpEditingService;
+  readonly context: { authorization: AuthorizationContext };
+  readonly preview: { releaseId: string; releaseHash: string };
+  readonly client: Client;
+  readonly server: ReturnType<typeof createMcpServer>;
+}> {
   const repository = new InMemoryEditingRepository();
   repository.registerSite(site);
   const service = new McpEditingService(repository, new InMemoryEventStore(), undefined, undefined, provider);
@@ -680,16 +837,7 @@ async function releasePublishWithProvider(provider: ReleaseProvider) {
   const client = new Client({ name: "navocms-provider-error-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  try {
-    return await client.callTool({ name: "release_publish", arguments: {
-      releaseId: preview.releaseId,
-      releaseHash: preview.releaseHash,
-      idempotencyKey: "provider-error-publish-001"
-    } });
-  } finally {
-    await client.close();
-    await server.close();
-  }
+  return { service, context, preview, client, server };
 }
 
 function releasePublishError(error: Error) {

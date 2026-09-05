@@ -197,6 +197,46 @@ integration("Neon production persistence", () => {
     expect(resolutionEvents.some(({ event }) => event.type === "io.navocms.delivery.phase-resolved.v1" && event.data.externalId === "coolify-human-resolved-1")).toBe(true);
   });
 
+  it("preserves applied-effect evidence across service restart after verification failure", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const provider = new RecoverableVerifyProvider();
+    const firstService = service(new PostgresEventStore(database!), undefined, provider);
+    const created = await firstService.createDraft(context(), {
+      typeName: "article",
+      slug: `verify-failure-${suffix}`,
+      locale: "en",
+      title: `Verify failure ${suffix}`,
+      markdown: "# Verify failure\n",
+      idempotencyKey: `verify-failure-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await firstService.preparePreview(context(), created.draft.revisionId, `verify-failure-preview-${suffix}`);
+    await firstService.approveRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `verify-failure-approve-${suffix}`
+    });
+    await expect(firstService.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `verify-failure-publish-${suffix}`
+    })).rejects.toMatchObject({ code: "LIVE_VERIFICATION_FAILED", effectState: "applied" });
+    expect(provider.publishCalls).toBe(1);
+
+    // A restart shares the same durable idempotency store; the retry must not
+    // claim the first attempt had no effect.
+    const restarted = service(new PostgresEventStore(database!), undefined, provider);
+    const publishInput = {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `verify-failure-publish-${suffix}`
+    };
+    await expect(restarted.publishRelease(context(), publishInput)).rejects.toMatchObject({
+      code: "IDEMPOTENCY_INCOMPLETE", effectState: "unknown"
+    });
+    expect(provider.publishCalls).toBe(1);
+
+    // Reconciliation re-verifies the recorded effect without repeating it.
+    provider.verificationSucceeds = true;
+    await expect(restarted.reconcileRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `verify-failure-reconcile-${suffix}`
+    })).resolves.toMatchObject({ release: { status: "published" } });
+    expect(provider.publishCalls).toBe(1);
+  });
+
   it("reconciles a publishing checkpoint after its exact approval expires", async () => {
     const suffix = randomUUID().replace(/-/g, "");
     const provider = new InterruptingPublishProvider();
@@ -491,6 +531,22 @@ integration("Neon production persistence", () => {
     expect(Number(persisted.outbox)).toBeGreaterThan(0);
   });
 });
+
+class RecoverableVerifyProvider implements ReleaseProvider {
+  readonly key = "navocms.integration.verify-recovery";
+  publishCalls = 0;
+  verificationSucceeds = false;
+  async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
+    this.publishCalls += 1;
+    return {
+      providerKey: this.key,
+      providerReference: `integration:${input.releaseHash}`,
+      artifactHash: input.artifact.hash
+    };
+  }
+  async verify(): Promise<boolean> { return this.verificationSucceeds; }
+  async rollback(): Promise<void> {}
+}
 
 function service(
   events: EventStore = new PostgresEventStore(database!),
