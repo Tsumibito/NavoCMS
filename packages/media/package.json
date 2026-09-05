@@ -17,6 +17,6 @@
     "@navocms/kernel": "workspace:*",
     "@navocms/persistence-postgres": "workspace:*",
     "@navocms/security": "workspace:*",
-    "sharp": "0.35.3"
+    "sharp": "0.35.4"
   }
 }
