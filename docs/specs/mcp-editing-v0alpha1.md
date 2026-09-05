@@ -23,9 +23,10 @@ database interface.
 | Tool | Intent | Permission | Effect |
 |---|---|---|---|
 | `sites_list` | Confirm authorized site context | `content:read` | Read only |
-| `content_search` | Discover content with bounded excerpts | `content:read` | Read only |
-| `content_get` | Read one Markdown revision and stable node IDs | `content:read` | Read only |
-| `drafts_list` | Inspect current drafts | `content:read` | Read only |
+| `content_search` | Discover content with bounded excerpts and a keyset cursor | `content:read` | Read only |
+| `content_get` | Read one Markdown revision window and stable node IDs | `content:read` | Read only |
+| `content_read` | Read a bounded Markdown window, AST node page, or one full node | `content:read` | Read only |
+| `drafts_list` | Inspect current drafts with a keyset cursor | `content:read` | Read only |
 | `draft_create` | Create an immutable first draft revision | `content:draft` | G1, idempotent |
 | `revision_patch` | Apply stable structural operations to an exact hash | `content:draft` | G1, idempotent |
 | `revision_compare` | Compare two revisions of one variant | `content:read` | Read only |
@@ -50,21 +51,54 @@ calling the underlying data tool and presenting its result.
 
 ## Bounds and redaction
 
-- Search and draft lists return at most 20 items; the default is 8.
-- Markdown returns at most 20,000 characters and reports truncation and total size.
+- Search and draft lists return at most 20 items; the default is 8. Both accept an opaque
+  `cursor` (the previous page's last content variant id) and return `nextCursor` until the
+  current set is exhausted. Search rows are ordered by `(slug, locale, variant id)`; drafts by
+  `(latest revision created_at, variant id)` descending. Slugs and locales are immutable, so a
+  full pass over an unchanged set yields every row exactly once. Draft positions move forward
+  when a draft is patched, so an in-flight draft pass may shift rows into later pages; documents
+  or drafts created after the cursor was issued are picked up on the next pass. The cursor only
+  positions the scan inside the authorized site — tenant and site filters always apply, and an
+  unknown-but-well-formed cursor yields an empty page.
+- Markdown windows return at most 20,000 characters and report truncation and total size.
+- `content_read` returns the remaining source through repeated bounded Markdown windows, one
+  AST node's full text (at most 20,000 characters), a page of AST nodes, or the JSON value of
+  one metadata key (`metadataKey` with the same window parameters). Revisions are immutable, so
+  window offsets and node pages are stable across calls; windows are UTF-16 code-unit slices.
+- AST node listings return at most 100 nodes per response with 280-character text excerpts and
+  report truncation and the total node count. Larger ASTs never bypass the budget through
+  multiple excerpted pages plus full-node reads; each response stays inside its own bound.
+- Metadata projections exclude the `metadata.body` mirror and are capped at 4,000 serialized
+  JSON characters per response (UTF-16 code units, keys sorted for determinism). Fields that
+  no longer fit are omitted whole — never cut mid-value — and reported through
+  `metadataTruncated`, `metadataTotalCharacters`, and `metadataOmittedKeys`; each omitted value
+  remains readable through bounded `content_read` windows bound to the same immutable revision
+  and site scope. The combined read response therefore stays bounded across Markdown, AST, and
+  metadata regardless of how large an individual stored field is.
+- Structured content projections omit the `metadata.body` mirror so the full source is never
+  duplicated behind a bounded field.
 - Diffs return at most 400 lines and report truncation and total size.
-- AST node text excerpts return at most 280 characters.
 - HTTP request bodies are limited to 256 KiB before MCP parsing.
 - Every structured result passes the shared safe-projection check. Secret-shaped keys are rejected,
   not masked after exposure.
-- Tool errors return stable safe codes and never include stack traces, tokens, hidden reasoning, or
-  unrestricted input payloads.
+- Tool errors return stable safe codes, an `effectState` projection (`none`, `applied`, or
+  `unknown`), and — for revision conflicts — the current revision id and source hash. They never
+  include stack traces, tokens, hidden reasoning, or unrestricted input payloads. An error after
+  the provider applied an effect is never reported as "no content was published"; it names the
+  applied effect and the `release_reconcile` recovery path, or honestly reports the outcome as
+  unknown. Retrying with the same idempotency key after an incomplete reservation reports the
+  recorded state the same way: `none` only where the operation's transactional rollback proves
+  no effect, `unknown` with `release_status`/`release_reconcile` guidance for operations that
+  cross the provider boundary. A retry never repeats the provider effect.
 
 ## Mutation semantics
 
-Every mutating tool requires an 8–128 character idempotency key. Repeating the same
-operation, site, key, and input returns the original result. Reusing a key with different input
-fails closed.
+Every mutating tool requires a 16–128 character idempotency key. The floor matches the event
+envelope's `navoidempotencykey` minimum, so a key accepted by a tool can never fail only at
+event validation after the mutation was prepared. Repeating the same operation, site, key, and
+input returns the original result — including after the variant head advanced. Reusing a key
+with different input fails closed. A rebased retry after a `REVISION_NOT_CURRENT` conflict is a
+new operation and needs a new key.
 
 Draft creation accepts optional content-type metadata. The repository always derives `slug`, the
 portable Markdown `body`, and the type's title/name field from explicit tool arguments; remaining
@@ -76,11 +110,19 @@ hashes, phase, and operation count only. It never records full Markdown or agent
 
 `revision_patch` accepts `replaceText`, `replaceNode`, `insertAfter`, and `remove`. The content engine
 rejects stale hashes, invalid targets, overlapping operations, unsafe Markdown, and invalid metadata.
+A patch must also be based on the variant's **current head revision**. A patch that targets an older
+revision fails closed with `REVISION_NOT_CURRENT` and reports the current revision id, number, and
+source hash, so the caller can re-read the head and reapply the change on top of it. Two concurrent
+edits from the same base therefore cannot silently orphan each other: in-memory, the engine compares
+the base against the variant head; in PostgreSQL, the head check runs under the variant's advisory
+lock inside the same transaction as the insert.
 
 ## Preview and release boundary
 
 `preview_prepare` assembles a canonical release manifest, renders one immutable proof artifact, and
-returns an expiring 256-bit capability URL. The response contains revision, source, release, and
+returns an expiring 256-bit capability URL. The tool's text fallback states the same readiness and
+the same limitation as the widget: the URL renders a Markdown proof artifact, not the final site
+design; a rendered-design preview arrives with the Sprint 8.2 release boundary. The response contains revision, source, release, and
 artifact hashes. Preview responses set `X-Robots-Tag: noindex, nofollow, noarchive`, a matching HTML
 robots directive, `Cache-Control: private, no-store`, a restrictive CSP, and no referrer policy.
 
@@ -103,3 +145,25 @@ Sprint 7 changes the v0alpha1 `preview_prepare` input by requiring `idempotencyK
 Sprint 5 handoff fields with a real capability URL and release/artifact hashes. It also adds the five
 release tools above. No released JSON Schema changes. The review URI remains `v1` because the widget
 continues to consume a backwards-compatible workflow-shaped projection.
+
+Sprint 8.1 tightens the mutating-tool idempotency key from 8–128 to 16–128 characters (the event
+envelope minimum was already 16; keys of 8–15 characters previously passed tool validation and then
+failed event validation after the mutation was prepared). `content_get` now returns only the first
+20,000-character Markdown window with bounded AST projections and omits the `metadata.body` mirror;
+`content_read` is added for bounded continuation reads. `content_search` and `drafts_list` accept an
+optional cursor and return `nextCursor` when more rows exist. `revision_patch` additionally rejects
+patches whose base revision is no longer the variant head with `REVISION_NOT_CURRENT` including the
+current head coordinates; callers that previously patched from a stale base must rebase onto the
+current head. Tool error results now carry a safe `effectState` structured projection. The preview
+handoff renders `previewed` (and the legacy `ready-for-workflow`) payloads as ready and states the
+honest limitation that the capability URL renders a Markdown proof artifact, not a rendered design
+preview. No released JSON Schema changes; the v0alpha1 tool descriptions and this note document the
+new bounds.
+
+Post-acceptance corrections to the same sprint: `content_get` additionally bounds its metadata
+projection to 4,000 serialized characters (reporting omissions instead of truncating values
+mid-field), and `content_read` gains a `metadataKey` mode so omitted metadata stays reachable
+through bounded windows. Retrying an incomplete idempotency reservation now reports `effectState`
+of `unknown` with reconcile guidance for provider-crossing operations instead of a false
+"nothing was published" statement; the previously accepted current-head patch gate, keyset
+pagination, and the 16–128 key bound are unchanged.

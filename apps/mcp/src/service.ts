@@ -154,11 +154,18 @@ export class McpEditingService {
     })]);
   }
 
-  public async search(context: McpRequestContext, query: string, requestedLimit?: number): Promise<object> {
+  public async search(context: McpRequestContext, query: string, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<object> {
     const repositoryContext = await this.requireSite(context, "content:read");
-    const limit = boundedLimit(requestedLimit);
-    const results = await this.#repository.search(repositoryContext, query, limit);
-    return safe({ query, results, count: results.length, limit });
+    const limit = boundedLimit(options.limit);
+    assertPageCursor(options.cursor);
+    const page = await this.#repository.search(repositoryContext, query, limit, options.cursor);
+    return safe({
+      query,
+      results: page.items,
+      count: page.items.length,
+      limit,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+    });
   }
 
   public async fetch(context: McpRequestContext, id: string): Promise<object> {
@@ -189,30 +196,109 @@ export class McpEditingService {
     const repositoryContext = await this.requireSite(context, "content:read");
     const revision = await this.#repository.getRevision(repositoryContext, revisionId);
     const truncated = revision.source.length > MCP_LIMITS.maxMarkdownCharacters;
+    const astTotalNodes = revision.ast.nodes.length;
+    const astTruncated = astTotalNodes > MCP_LIMITS.maxAstNodes;
+    const metadataProjection = boundedMetadataProjection(revision.metadata);
     return safe({
       revisionId: revision.id,
       documentId: revision.documentId,
       variantId: revision.variantId,
       revisionNumber: revision.number,
       sourceHash: revision.sourceHash,
-      metadata: revision.metadata,
+      // The metadata projection never duplicates the Markdown `body` mirror and
+      // stays inside its own serialized-character budget; omitted fields stay
+      // reachable through `content_read` windows on the immutable revision.
+      metadata: metadataProjection.metadata,
+      metadataTruncated: metadataProjection.truncated,
+      metadataTotalCharacters: metadataProjection.totalCharacters,
+      ...(metadataProjection.omittedKeys.length > 0 ? { metadataOmittedKeys: metadataProjection.omittedKeys } : {}),
       markdown: truncated ? revision.source.slice(0, MCP_LIMITS.maxMarkdownCharacters) : revision.source,
       truncated,
       totalCharacters: revision.source.length,
-      astNodes: revision.ast.nodes.map(({ id, type, parentId, text }) => ({
+      ...(truncated ? { nextOffset: MCP_LIMITS.maxMarkdownCharacters } : {}),
+      astNodes: revision.ast.nodes.slice(0, MCP_LIMITS.maxAstNodes).map(({ id, type, parentId, text }) => ({
         id,
         type,
         ...(parentId ? { parentId } : {}),
         text: text.slice(0, MCP_LIMITS.maxExcerptCharacters)
-      }))
+      })),
+      truncatedNodes: astTruncated,
+      totalNodes: astTotalNodes
     });
   }
 
-  public async listDrafts(context: McpRequestContext, requestedLimit?: number): Promise<object> {
+  /**
+   * Bounded continuation read for content that does not fit into one response.
+   * Revisions are immutable, so offset windows and node pages are stable; the
+   * full source can always be assembled from consecutive bounded windows.
+   */
+  public async readContent(context: McpRequestContext, input: {
+    readonly revisionId: string;
+    readonly markdownOffset?: number;
+    readonly markdownLength?: number;
+    readonly nodeId?: string;
+    readonly metadataKey?: string;
+    readonly nodeOffset?: number;
+    readonly nodeLimit?: number;
+  }): Promise<object> {
     const repositoryContext = await this.requireSite(context, "content:read");
-    const limit = boundedLimit(requestedLimit);
-    const drafts = await this.#repository.listDrafts(repositoryContext, limit);
-    return safe({ drafts, count: drafts.length, limit });
+    const revision = await this.#repository.getRevision(repositoryContext, input.revisionId);
+    if (input.nodeId !== undefined) {
+      const node = revision.ast.nodes.find((candidate) => candidate.id === input.nodeId);
+      if (!node) throw new McpEditingError("CONTENT_NODE_NOT_FOUND", "The requested AST node does not exist in this revision");
+      const truncated = node.text.length > MCP_LIMITS.maxMarkdownCharacters;
+      return safe({
+        revisionId: revision.id,
+        node: {
+          id: node.id,
+          type: node.type,
+          ...(node.parentId ? { parentId: node.parentId } : {}),
+          text: node.text.slice(0, MCP_LIMITS.maxMarkdownCharacters)
+        },
+        truncated,
+        totalCharacters: node.text.length
+      });
+    }
+    if (input.metadataKey !== undefined) {
+      if (!Object.prototype.hasOwnProperty.call(revision.metadata, input.metadataKey)) {
+        throw new McpEditingError("METADATA_KEY_NOT_FOUND", "The requested metadata key does not exist in this revision");
+      }
+      const serialized = JSON.stringify(revision.metadata[input.metadataKey]) ?? "null";
+      return boundedWindow(revision.id, serialized, input.markdownOffset, input.markdownLength, "text", input.metadataKey);
+    }
+    if (input.nodeOffset !== undefined || input.nodeLimit !== undefined) {
+      const offset = Math.max(0, Math.floor(input.nodeOffset ?? 0));
+      const limit = Math.min(Math.max(1, Math.floor(input.nodeLimit ?? MCP_LIMITS.maxAstNodes)), MCP_LIMITS.maxAstNodes);
+      const totalNodes = revision.ast.nodes.length;
+      const nodes = revision.ast.nodes.slice(offset, offset + limit).map(({ id, type, parentId, text }) => ({
+        id,
+        type,
+        ...(parentId ? { parentId } : {}),
+        text: text.slice(0, MCP_LIMITS.maxExcerptCharacters)
+      }));
+      const nextOffset = offset + nodes.length;
+      return safe({
+        revisionId: revision.id,
+        nodes,
+        offset,
+        totalNodes,
+        ...(nextOffset < totalNodes ? { nextOffset, truncatedNodes: true } : {})
+      });
+    }
+    return boundedWindow(revision.id, revision.source, input.markdownOffset, input.markdownLength, "markdown");
+  }
+
+  public async listDrafts(context: McpRequestContext, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<object> {
+    const repositoryContext = await this.requireSite(context, "content:read");
+    const limit = boundedLimit(options.limit);
+    assertPageCursor(options.cursor);
+    const page = await this.#repository.listDrafts(repositoryContext, limit, options.cursor);
+    return safe({
+      drafts: page.items,
+      count: page.items.length,
+      limit,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+    });
   }
 
   public async createDraft(context: McpRequestContext, input: {
@@ -401,7 +487,10 @@ export class McpEditingService {
         state.release.status === "verification_failed" || publication.status === "verification_failed"
       )) {
         const valid = await this.#releaseProvider.verify(publication);
-        if (!valid) throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider still does not expose the previewed artifact");
+        if (!valid) throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider still does not expose the previewed artifact", {
+          effectState: "applied",
+          nextAction: "release_reconcile"
+        });
         await this.#releases.markVerified(repositoryContext, input.releaseId, publication.id);
       }
       const release = await this.#releases.getRelease(repositoryContext, input.releaseId);
@@ -453,7 +542,12 @@ export class McpEditingService {
     const valid = await this.#releaseProvider.verify(publication);
     if (!valid) {
       await this.#releases.markVerificationFailed(repositoryContext, releaseId, publication.id);
-      throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider did not expose the previewed artifact hash");
+      // The provider already applied the artifact; the durable state is
+      // verification-failed. Clients must reconcile, not repeat the effect.
+      throw new McpEditingError("LIVE_VERIFICATION_FAILED", "Provider did not expose the previewed artifact hash", {
+        effectState: "applied",
+        nextAction: "release_reconcile"
+      });
     }
     await this.#releases.markVerified(repositoryContext, releaseId, publication.id);
     return publication;
@@ -481,12 +575,15 @@ export class McpEditingService {
     create: () => Promise<T>,
     transactional = true
   ): Promise<T> {
+    // Validate the key before any reservation or policy charge so a key that
+    // would later fail event-schema validation never reaches an effect.
+    assertIdempotencyKey(key);
     await this.#policyGuard?.consume({ ...scope, operation, idempotencyKey: key });
     // Provider calls cross an external trust boundary. Their durable prepare
     // state must commit before an effect, so they cannot share an outer SQL
     // transaction that would roll it back when the provider crashes.
-    if (this.#database && transactional) return this.#database.withScope(scope, () => this.idempotentInTransaction(scope, operation, key, input, create));
-    return this.idempotentInTransaction(scope, operation, key, input, create);
+    if (this.#database && transactional) return this.#database.withScope(scope, () => this.idempotentInTransaction(scope, operation, key, input, create, transactional));
+    return this.idempotentInTransaction(scope, operation, key, input, create, transactional);
   }
 
   private async idempotentInTransaction<T>(
@@ -494,7 +591,8 @@ export class McpEditingService {
     operation: string,
     key: string,
     input: unknown,
-    create: () => Promise<T>
+    create: () => Promise<T>,
+    transactional: boolean
   ): Promise<T> {
     const fingerprint = inputFingerprint(input);
     let reservation: IdempotencyReservation<T>;
@@ -508,7 +606,13 @@ export class McpEditingService {
     }
     if (reservation.status === "completed") return reservation.value as T;
     if (reservation.status !== "reserved") {
-      throw new McpEditingError("IDEMPOTENCY_INCOMPLETE", "A previous attempt is pending or requires reconciliation");
+      // An incomplete reservation does not prove the first attempt had no
+      // effect. A transactional operation rolled back with its effect, but a
+      // non-transactional provider operation may already have been applied.
+      throw new McpEditingError("IDEMPOTENCY_INCOMPLETE", incompleteReservationMessage(reservation.errorCode, transactional), {
+        effectState: transactional ? "none" : "unknown",
+        ...(transactional ? {} : { nextAction: "release_reconcile" })
+      });
     }
     try {
       const value = await create();
@@ -568,6 +672,105 @@ export class McpEditingService {
 function boundedLimit(limit?: number): number {
   if (limit === undefined) return MCP_LIMITS.defaultSearchResults;
   return Math.max(1, Math.min(Math.floor(limit), MCP_LIMITS.maxSearchResults));
+}
+
+function assertPageCursor(cursor: string | undefined): void {
+  if (cursor !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cursor)) {
+    throw new McpEditingError("PAGE_CURSOR_INVALID", "The page cursor is not a valid content variant identifier");
+  }
+}
+
+function assertIdempotencyKey(key: string): void {
+  if (
+    typeof key !== "string" ||
+    key.length < MCP_LIMITS.idempotencyKeyMinLength ||
+    key.length > MCP_LIMITS.idempotencyKeyMaxLength
+  ) {
+    throw new McpEditingError(
+      "IDEMPOTENCY_KEY_INVALID",
+      `Idempotency key must be ${MCP_LIMITS.idempotencyKeyMinLength}-${MCP_LIMITS.idempotencyKeyMaxLength} characters`
+    );
+  }
+}
+
+/**
+ * Explains an incomplete reservation without claiming the first attempt had no
+ * effect: only a committed transactional rollback proves that.
+ */
+function incompleteReservationMessage(previousErrorCode: string | undefined, transactional: boolean): string {
+  const recorded = previousErrorCode ? ` (recorded error: ${previousErrorCode})` : "";
+  if (transactional) {
+    return `A previous attempt with this idempotency key did not complete${recorded}. No content was published because its database transaction did not commit.`;
+  }
+  return `A previous attempt with this idempotency key did not complete${recorded}. Its external outcome is unknown. Read release_status, then run release_reconcile with the same release hash; the provider treats the release hash as its idempotency key, so reconciliation does not duplicate the effect. Do not reuse the key for new input.`;
+}
+
+/**
+ * Metadata projection for one read response. The `body` mirror duplicates the
+ * Markdown source and is dropped; every remaining field is included whole as
+ * long as the cumulative serialized size fits its budget, and larger fields
+ * are reported by name instead of being silently cut. Values stay reachable
+ * through bounded `content_read` windows on the immutable revision.
+ */
+function boundedMetadataProjection(metadata: Readonly<Record<string, unknown>>): {
+  readonly metadata: Record<string, unknown>;
+  readonly truncated: boolean;
+  readonly totalCharacters: number;
+  readonly omittedKeys: readonly string[];
+} {
+  const entries = Object.entries(metadata)
+    .filter(([key]) => key !== "body")
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const projected: Record<string, unknown> = {};
+  const omittedKeys: string[] = [];
+  let used = 0;
+  let total = 0;
+  for (const [key, value] of entries) {
+    const serialized = JSON.stringify({ [key]: value }) ?? "";
+    total += serialized.length;
+    if (serialized.length > MCP_LIMITS.maxMetadataCharacters || used + serialized.length > MCP_LIMITS.maxMetadataCharacters) {
+      omittedKeys.push(key);
+      continue;
+    }
+    projected[key] = value;
+    used += serialized.length;
+  }
+  return Object.freeze({
+    metadata: projected,
+    truncated: omittedKeys.length > 0,
+    totalCharacters: total,
+    omittedKeys: Object.freeze(omittedKeys)
+  });
+}
+
+/**
+ * One bounded slice of an immutable string with explicit totals. `field`
+ * selects the payload property name (`markdown` for source windows, `text`
+ * for serialized metadata values); the unit is UTF-16 code units.
+ */
+function boundedWindow(
+  revisionId: string,
+  source: string,
+  rawOffset: number | undefined,
+  rawLength: number | undefined,
+  field: "markdown" | "text",
+  metadataKey?: string
+): object {
+  const offset = Math.max(0, Math.floor(rawOffset ?? 0));
+  const length = Math.min(
+    Math.max(1, Math.floor(rawLength ?? MCP_LIMITS.maxMarkdownCharacters)),
+    MCP_LIMITS.maxMarkdownCharacters
+  );
+  const text = source.slice(offset, offset + length);
+  const nextOffset = offset + text.length;
+  return safe({
+    revisionId,
+    ...(metadataKey !== undefined ? { metadataKey } : {}),
+    totalCharacters: source.length,
+    offset,
+    [field]: text,
+    ...(nextOffset < source.length ? { nextOffset, truncated: true } : { truncated: false })
+  });
 }
 
 function boundDiff(diff: { readonly fromHash: string; readonly toHash: string; readonly lines: readonly object[] }) {

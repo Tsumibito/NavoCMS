@@ -20,6 +20,7 @@ import {
   type EditingRepository,
   type PatchDraftInput,
   type RepositoryContext,
+  type RepositoryPage,
   type RepositoryScope,
   inputFingerprint
 } from "./repository.js";
@@ -34,6 +35,7 @@ interface SiteRow extends Record<string, unknown> {
 
 interface HitRow extends Record<string, unknown> {
   readonly document_id: string;
+  readonly variant_id: string;
   readonly type_name: string;
   readonly slug: string;
   readonly locale: string;
@@ -102,17 +104,32 @@ export class PostgresEditingRepository implements EditingRepository {
     });
   }
 
-  public async search(context: RepositoryContext, query: string, limit: number): Promise<readonly ContentHit[]> {
-    const rows = await this.#database.withScope(databaseScope(context), async (client) => {
-      const needle = `%${query.trim()}%`;
-      return (await client.query<HitRow>(`${hitSelect()}
+  /**
+   * Keyset page ordered by (slug, locale, variant_id). The cursor is the
+   * previous page's last variant id and only positions the scan inside the
+   * authorized site; tenant/site filters always apply. Slugs and locales are
+   * immutable, so concurrent revision patches never reorder rows.
+   */
+  public async search(context: RepositoryContext, query: string, limit: number, cursor?: string): Promise<RepositoryPage<ContentHit>> {
+    assertPageCursor(cursor);
+    const rows = await this.#database.withScope(databaseScope(context), async (client) => (
+      await client.query<HitRow>(`${hitSelect()}
         WHERE d.tenant_id = $1 AND d.site_id = $2
           AND ($3 = '%%' OR concat_ws(' ', d.slug, t.name,
             r.metadata_json->>'title', r.metadata_json->>'name', r.source_markdown) ILIKE $3)
-        ORDER BY d.slug, v.locale
-        LIMIT $4`, [context.site.tenantId, context.site.siteId, needle, limit])).rows;
-    });
-    return Object.freeze(rows.map(toHit));
+          AND ($4::uuid IS NULL OR (d.slug, v.locale, v.id) > (
+            SELECT cursor_document.slug, cursor_variant.locale, cursor_variant.id
+              FROM navocms.content_variants cursor_variant
+              JOIN navocms.content_documents cursor_document
+                ON cursor_document.tenant_id = cursor_variant.tenant_id
+               AND cursor_document.site_id = cursor_variant.site_id
+               AND cursor_document.id = cursor_variant.document_id
+             WHERE cursor_variant.tenant_id = $1 AND cursor_variant.site_id = $2
+               AND cursor_variant.id = $4))
+        ORDER BY d.slug, v.locale, v.id
+        LIMIT $5`, [context.site.tenantId, context.site.siteId, `%${query.trim()}%`, cursor ?? null, limit + 1])).rows
+    );
+    return pageOf(rows, limit, (row) => row.variant_id, toHit);
   }
 
   public async findDocument(context: RepositoryContext, documentId: string): Promise<ContentHit | undefined> {
@@ -167,6 +184,7 @@ export class PostgresEditingRepository implements EditingRepository {
     });
     return toDraft({
       document_id: created.document.id,
+      variant_id: created.variant.id,
       type_name: created.document.typeName,
       slug: created.document.slug,
       locale: created.variant.locale,
@@ -198,12 +216,30 @@ export class PostgresEditingRepository implements EditingRepository {
         directives: variant.directive_definitions
       });
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [base.variantId]);
-      const nextNumber = (await client.query<{ next_number: number }>(
-        `SELECT coalesce(max(revision_number), 0) + 1 AS next_number
+      // The head check must run under the advisory lock together with the
+      // insert: two concurrent patches from the same base would otherwise both
+      // pass and the loser would silently orphan the winner's revision.
+      const head = (await client.query<{ id: string; revision_number: number; source_hash: string }>(
+        `SELECT id, revision_number, source_hash
            FROM navocms.content_revisions
-          WHERE tenant_id = $1 AND site_id = $2 AND variant_id = $3`,
+          WHERE tenant_id = $1 AND site_id = $2 AND variant_id = $3
+          ORDER BY revision_number DESC
+          LIMIT 1`,
         [input.site.tenantId, input.site.siteId, base.variantId]
-      )).rows[0]!.next_number;
+      )).rows[0];
+      if (!head || head.id !== base.id) {
+        throw new ContentError(
+          "REVISION_NOT_CURRENT",
+          `Revision ${base.id} is no longer the current head of the variant`,
+          {
+            baseRevisionId: base.id,
+            baseRevisionNumber: base.number,
+            currentRevisionId: head?.id,
+            ...(head ? { currentRevisionNumber: head.revision_number, currentSourceHash: head.source_hash } : {})
+          }
+        );
+      }
+      const nextNumber = head.revision_number + 1;
       const provenance: RevisionProvenance = Object.freeze({
         kind: "agent", actorId: input.actorId, note: "Patched through MCP"
       });
@@ -220,9 +256,10 @@ export class PostgresEditingRepository implements EditingRepository {
       await insertRevision(client, revision, input.actorId);
       return Object.freeze({
         draft: toDraft({
-          document_id: base.documentId, type_name: variant.type_name, slug: variant.slug,
-          locale: variant.locale, revision_id: revision.id, revision_number: revision.number,
-          source_hash: revision.sourceHash, source_markdown: revision.source,
+          document_id: base.documentId, variant_id: base.variantId, type_name: variant.type_name,
+          slug: variant.slug, locale: variant.locale, revision_id: revision.id,
+          revision_number: revision.number, source_hash: revision.sourceHash,
+          source_markdown: revision.source,
           metadata_json: revision.metadata as Record<string, unknown>, created_at: revision.createdAt
         }),
         diff: patched.diff
@@ -236,14 +273,32 @@ export class PostgresEditingRepository implements EditingRepository {
     return compareMarkdown(from.source, to.source);
   }
 
-  public async listDrafts(context: RepositoryContext, limit: number): Promise<readonly DraftSummary[]> {
+  /**
+   * Keyset page over the draft queue ordered by (latest revision created_at,
+   * variant_id) descending. A patch moves a draft's position forward, so an
+   * in-flight pass may shift it into a later page or surface it again; a full
+   * pass over an unchanged queue yields every draft exactly once.
+   */
+  public async listDrafts(context: RepositoryContext, limit: number, cursor?: string): Promise<RepositoryPage<DraftSummary>> {
+    assertPageCursor(cursor);
     const rows = await this.#database.withScope(databaseScope(context), async (client) => (
       await client.query<HitRow>(`${hitSelect()}
         WHERE d.tenant_id = $1 AND d.site_id = $2
-        ORDER BY r.created_at DESC
-        LIMIT $3`, [context.site.tenantId, context.site.siteId, limit])
-    ).rows);
-    return Object.freeze(rows.map(toDraft));
+          AND ($3::uuid IS NULL OR (r.created_at, v.id) < (
+            SELECT cursor_latest.created_at, cursor_variant.id
+              FROM navocms.content_variants cursor_variant
+              JOIN LATERAL (
+                SELECT cr.created_at FROM navocms.content_revisions cr
+                 WHERE cr.tenant_id = cursor_variant.tenant_id AND cr.site_id = cursor_variant.site_id
+                   AND cr.variant_id = cursor_variant.id
+                 ORDER BY cr.revision_number DESC LIMIT 1
+              ) cursor_latest ON true
+             WHERE cursor_variant.tenant_id = $1 AND cursor_variant.site_id = $2
+               AND cursor_variant.id = $3))
+        ORDER BY r.created_at DESC, v.id DESC
+        LIMIT $4`, [context.site.tenantId, context.site.siteId, cursor ?? null, limit + 1])).rows
+    );
+    return pageOf(rows, limit, (row) => row.variant_id, toDraft);
   }
 
   public async workflowFor(context: RepositoryContext, revisionId: string): Promise<string> {
@@ -267,7 +322,7 @@ function databaseScope(context: RepositoryContext) {
 }
 
 function hitSelect(): string {
-  return `SELECT d.id AS document_id, t.name AS type_name, d.slug, v.locale,
+  return `SELECT d.id AS document_id, t.name AS type_name, d.slug, v.id AS variant_id, v.locale,
       r.id AS revision_id, r.revision_number, r.source_hash, r.source_markdown,
       r.metadata_json, r.created_at
     FROM navocms.content_documents d
@@ -279,6 +334,20 @@ function hitSelect(): string {
        WHERE cr.tenant_id = v.tenant_id AND cr.site_id = v.site_id AND cr.variant_id = v.id
        ORDER BY cr.revision_number DESC LIMIT 1
     ) r ON true`;
+}
+
+function pageOf<T extends HitRow, R>(rows: readonly T[], limit: number, cursorOf: (row: T) => string, map: (row: T) => R): RepositoryPage<R> {
+  const page = rows.slice(0, limit);
+  return Object.freeze({
+    items: Object.freeze(page.map(map)),
+    ...(rows.length > limit ? { nextCursor: cursorOf(page.at(-1)!) } : {})
+  });
+}
+
+function assertPageCursor(cursor: string | undefined): void {
+  if (cursor !== undefined && !isUuid(cursor)) {
+    throw new ContentError("PAGE_CURSOR_INVALID", "The page cursor is not a valid content variant identifier");
+  }
 }
 
 async function requireRevision(client: SqlClient, site: SiteDescriptor, revisionId: string): Promise<ContentRevision> {

@@ -7,6 +7,7 @@ export default defineConfig({
     },
     include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "plugins/**/*.test.ts"],
     pool: "forks",
-    testTimeout: 10_000
+    // Remote integration runs include network round trips; local/CI keeps its original limit.
+    testTimeout: process.env.NAVOCMS_NEON_TEST_RUN === "true" ? 180_000 : 10_000
   }
 });

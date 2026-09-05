@@ -192,6 +192,23 @@ export class ContentEngine {
   public patchRevision(input: PatchRevisionInput): { readonly revision: ContentRevision; readonly diff: RevisionDiff } {
     const base = this.requireRevision(input, input.revisionId);
     const document = this.requireDocument(input, base.documentId);
+    // A patch claims to edit the variant's current text. When the base revision
+    // is no longer the head, applying it would silently replace newer work, so
+    // it fails closed and reports the revision a rebase must start from.
+    const head = this.headRevision(base.variantId);
+    if (head.id !== base.id) {
+      throw new ContentError(
+        "REVISION_NOT_CURRENT",
+        `Revision ${base.id} is no longer the current head of the variant`,
+        {
+          baseRevisionId: base.id,
+          baseRevisionNumber: base.number,
+          currentRevisionId: head.id,
+          currentRevisionNumber: head.number,
+          currentSourceHash: head.sourceHash
+        }
+      );
+    }
     const result = applyStructuralPatch({
       source: base.source,
       baseSourceHash: input.baseSourceHash,
@@ -213,6 +230,16 @@ export class ContentEngine {
       provenance: input.provenance
     });
     return immutable({ revision, diff: result.diff });
+  }
+
+  private headRevision(variantId: string): ContentRevision {
+    let head: ContentRevision | undefined;
+    for (const revision of this.#revisions.values()) {
+      if (revision.variantId !== variantId) continue;
+      if (!head || revision.number > head.number) head = revision;
+    }
+    if (!head) throw new ContentError("REVISION_NOT_FOUND", "Revision does not exist in this site");
+    return head;
   }
 
   public compare(scope: ContentScope, fromRevisionId: string, toRevisionId: string): RevisionDiff {
