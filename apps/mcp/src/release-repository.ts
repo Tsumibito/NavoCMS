@@ -33,11 +33,36 @@ export interface StoredRelease extends ReleaseSummary {
 }
 
 export interface PreviewDocument {
+  readonly releaseId: string;
+  readonly tenantId: string;
+  readonly siteId: string;
   readonly mediaType: string;
   readonly body: string;
   readonly releaseHash: string;
   readonly artifactHash: string;
   readonly expiresAt: string;
+}
+
+/** A pending or decided independent human confirmation, resolved by capability hash. */
+export interface ConfirmationRecord {
+  readonly releaseId: string;
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly releaseHash: string;
+  readonly policyVersion: string;
+  readonly previewExpiresAt?: string;
+  readonly decisionAt?: string;
+  readonly outputManifestDigest?: string;
+  readonly receiptHash?: string;
+  readonly receiptExpiresAt?: string;
+  readonly revokedAt?: string;
+}
+
+export interface ConfirmationDecision {
+  readonly decidedAt: string;
+  readonly outputManifestDigest: string;
+  readonly receiptHash: string;
+  readonly receiptExpiresAt: string;
 }
 
 export interface PublicationRecord extends ReleaseProviderPublication {
@@ -58,6 +83,8 @@ export interface CreateReleaseInput {
   readonly artifact: ReleaseArtifact;
   readonly previewTokenHash: string;
   readonly previewExpiresAt: string;
+  readonly confirmationTokenHash: string;
+  readonly confirmationPolicyVersion: string;
   readonly correlationId: string;
 }
 
@@ -67,12 +94,17 @@ export interface ReleaseApprovalInput {
   readonly expiresAt: string;
   readonly actorKind: "human";
   readonly scope: Readonly<{ tenantId: string; siteId: string; environmentId: string }>;
+  /** Present when the approval copies an independent confirmation receipt. */
+  readonly confirmation?: Readonly<{ receiptHash: string; outputManifestDigest: string }>;
 }
 
 export interface ReleaseWorkflowRepository {
   environmentId(context: RepositoryContext, environmentKey: string): Promise<string>;
   createPreview(input: CreateReleaseInput): Promise<StoredRelease>;
   resolvePreview(tokenHash: string): Promise<PreviewDocument | undefined>;
+  resolveConfirmation(tokenHash: string): Promise<ConfirmationRecord | undefined>;
+  recordConfirmation(tokenHash: string, decision: ConfirmationDecision): Promise<{ readonly record: ConfirmationRecord; readonly recorded: boolean } | undefined>;
+  latestConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<ConfirmationRecord | undefined>;
   getRelease(context: RepositoryContext, releaseId: string): Promise<StoredRelease>;
   approve(context: RepositoryContext, releaseId: string, releaseHash: string, approval: ReleaseApprovalInput): Promise<StoredRelease>;
   beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<{
@@ -115,6 +147,7 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
   readonly #environmentId: string;
   readonly #releases = new Map<string, MutableRelease>();
   readonly #previews = new Map<string, PreviewDocument>();
+  readonly #confirmations = new Map<string, MutableConfirmation>();
   readonly #publications = new Map<string, PublicationRecord>();
   readonly #pendingRollbacks = new Map<string, { readonly current: PublicationRecord; readonly target: PublicationRecord }>();
 
@@ -141,12 +174,20 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     };
     this.#releases.set(release.id, release);
     this.#previews.set(input.previewTokenHash, Object.freeze({
+      releaseId: release.id,
+      tenantId: release.tenantId,
+      siteId: release.siteId,
       mediaType: input.artifact.mediaType,
       body: input.artifact.body,
       releaseHash: input.releaseHash,
       artifactHash: input.artifact.hash,
       expiresAt: input.previewExpiresAt
     }));
+    this.#confirmations.set(input.confirmationTokenHash, {
+      releaseId: release.id, tenantId: release.tenantId, siteId: release.siteId,
+      releaseHash: input.releaseHash, policyVersion: input.confirmationPolicyVersion,
+      previewExpiresAt: input.previewExpiresAt
+    });
     return freezeRelease(release);
   }
 
@@ -154,6 +195,34 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     const preview = this.#previews.get(tokenHash);
     if (!preview || new Date(preview.expiresAt).getTime() <= Date.now()) return undefined;
     return preview;
+  }
+
+  public async resolveConfirmation(tokenHash: string): Promise<ConfirmationRecord | undefined> {
+    const confirmation = this.#confirmations.get(tokenHash);
+    if (!confirmation || new Date(confirmation.previewExpiresAt).getTime() <= Date.now()) return undefined;
+    return freezeConfirmation(confirmation);
+  }
+
+  public async recordConfirmation(tokenHash: string, decision: ConfirmationDecision) {
+    const confirmation = this.#confirmations.get(tokenHash);
+    if (!confirmation || new Date(confirmation.previewExpiresAt).getTime() <= Date.now()) return undefined;
+    if (confirmation.decisionAt) {
+      return Object.freeze({ record: freezeConfirmation(confirmation), recorded: false });
+    }
+    confirmation.decisionAt = decision.decidedAt;
+    confirmation.outputManifestDigest = decision.outputManifestDigest;
+    confirmation.receiptHash = decision.receiptHash;
+    confirmation.receiptExpiresAt = decision.receiptExpiresAt;
+    return Object.freeze({ record: freezeConfirmation(confirmation), recorded: true });
+  }
+
+  public async latestConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<ConfirmationRecord | undefined> {
+    const candidates = [...this.#confirmations.values()]
+      .filter((confirmation) => confirmation.tenantId === context.site.tenantId &&
+        confirmation.siteId === context.site.siteId && confirmation.releaseId === releaseId &&
+        confirmation.releaseHash === releaseHash)
+      .sort((left, right) => (right.decisionAt ?? right.previewExpiresAt).localeCompare(left.decisionAt ?? left.previewExpiresAt));
+    return candidates[0] ? freezeConfirmation(candidates[0]) : undefined;
   }
 
   public async getRelease(context: RepositoryContext, releaseId: string): Promise<StoredRelease> {
@@ -289,7 +358,50 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
       new Date(approval.expiresAt).getTime() <= Date.now()) {
       throw new McpEditingError("RELEASE_APPROVAL_INVALID", "Approval must be current, human, and scoped to this exact release");
     }
+    // An approval inside the real preview pipeline must copy an independent
+    // browser confirmation: the MCP bearer alone is never the decision.
+    if (approval.confirmation) {
+      const receipt = [...this.#confirmations.values()].find((confirmation) =>
+        confirmation.tenantId === release.tenantId && confirmation.siteId === release.siteId &&
+        confirmation.releaseId === release.id && confirmation.releaseHash === release.releaseHash &&
+        confirmation.receiptHash === approval.confirmation!.receiptHash);
+      if (!receipt || !receipt.decisionAt || receipt.revokedAt ||
+        receipt.outputManifestDigest !== approval.confirmation.outputManifestDigest ||
+        new Date(receipt.receiptExpiresAt ?? 0).getTime() <= Date.now()) {
+        throw new McpEditingError("HUMAN_CONFIRMATION_REQUIRED", "A current independent human confirmation receipt is required for this release");
+      }
+    }
   }
+}
+
+interface MutableConfirmation {
+  releaseId: string;
+  tenantId: string;
+  siteId: string;
+  releaseHash: string;
+  policyVersion: string;
+  previewExpiresAt: string;
+  decisionAt?: string;
+  outputManifestDigest?: string;
+  receiptHash?: string;
+  receiptExpiresAt?: string;
+  revokedAt?: string;
+}
+
+function freezeConfirmation(confirmation: MutableConfirmation): ConfirmationRecord {
+  return Object.freeze({
+    releaseId: confirmation.releaseId,
+    tenantId: confirmation.tenantId,
+    siteId: confirmation.siteId,
+    releaseHash: confirmation.releaseHash,
+    policyVersion: confirmation.policyVersion,
+    previewExpiresAt: confirmation.previewExpiresAt,
+    ...(confirmation.decisionAt ? { decisionAt: confirmation.decisionAt } : {}),
+    ...(confirmation.outputManifestDigest ? { outputManifestDigest: confirmation.outputManifestDigest } : {}),
+    ...(confirmation.receiptHash ? { receiptHash: confirmation.receiptHash } : {}),
+    ...(confirmation.receiptExpiresAt ? { receiptExpiresAt: confirmation.receiptExpiresAt } : {}),
+    ...(confirmation.revokedAt ? { revokedAt: confirmation.revokedAt } : {})
+  });
 }
 
 export class EmbeddedReleaseProvider implements ReleaseProvider {

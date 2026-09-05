@@ -11,6 +11,7 @@ import { NAVOCMS_PERMISSIONS, effectivePermissions, type AuthorizationContext } 
 import { afterAll, describe, expect, it } from "vitest";
 
 import { PostgresEditingRepository } from "./postgres-repository.js";
+import { StagingOperationalRuntime } from "./staging-operational-runtime.js";
 import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
@@ -195,6 +196,114 @@ integration("Neon production persistence", () => {
     expect(() => new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId }, { authority: { principal: { id: principalId, kind: "human" }, permissions: ["content:publish"] } })).toThrow("Event Ledger");
     const resolutionEvents = await new PostgresEventStore(database!).query({ tenantId, siteId, principalId, correlationId: unknownInput.releaseId });
     expect(resolutionEvents.some(({ event }) => event.type === "io.navocms.delivery.phase-resolved.v1" && event.data.externalId === "coolify-human-resolved-1")).toBe(true);
+  });
+
+  it("resumes a running pre-review build job after a restart without a second job", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `build-resume-${suffix}`, locale: "en", title: `Build resume ${suffix}`,
+      markdown: "# Build resume\n", idempotencyKey: `build-resume-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-resume-preview-${suffix}`) as { releaseId: string; releaseHash: string };
+    // Simulate a killed process that had checkpointed a running build job.
+    const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `INSERT INTO navocms.workflow_runs (id, tenant_id, site_id, release_id, workflow_key, status, current_step)
+         VALUES ($1,$2,$3,$4,'navocms.staging-astro.build.v1','running','build.requested')`,
+        [randomUUID(), tenantId, siteId, preview.releaseId]
+      );
+    });
+    // A restarted runtime (empty in-memory executors) resumes the same job.
+    const runtime = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId
+    });
+    const status = await runtime.buildStatus(repositoryContext, preview.releaseId);
+    expect(status.status).toBe("building");
+    const runs = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ status: string; last_error_code: string | null }>(
+        `SELECT status, last_error_code FROM navocms.workflow_runs
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+        [tenantId, siteId, preview.releaseId]
+      )).rows
+    );
+    // Exactly one job exists; the resumed executor failed closed on the
+    // unattestable toolchain of this synthetic environment and recorded its
+    // error durably for the next recovery attempt.
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("failed");
+    expect(runs[0]!.last_error_code).toBe("REVIEWED_ASTRO_TOOLCHAIN_INVALID");
+    await expect(runtime.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
+      releaseId: preview.releaseId, status: "failed", errorCode: "REVIEWED_ASTRO_TOOLCHAIN_INVALID"
+    });
+  });
+
+  it("persists release confirmations and gates publication of built releases on them", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `confirmation-${suffix}`, locale: "en", title: `Confirmation ${suffix}`,
+      markdown: "# Confirmation\n", idempotencyKey: `confirmation-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `confirmation-preview-${suffix}`) as {
+      releaseId: string; releaseHash: string; confirmationUrl: string;
+    };
+    const confirmationToken = preview.confirmationUrl.split("/confirmations/")[1]!;
+    expect(await serviceInstance.releaseConfirmationStatus(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash }))
+      .toMatchObject({ status: "pending" });
+
+    const releases = new PostgresReleaseWorkflowRepository(database!);
+    const tokenHash = sha256(confirmationToken);
+    const resolved = await releases.resolveConfirmation(tokenHash);
+    expect(resolved).toMatchObject({ releaseId: preview.releaseId, releaseHash: preview.releaseHash });
+    const digest = `sha256:${"b".repeat(64)}`;
+    const decidedAt = new Date().toISOString();
+    const receiptExpiresAt = new Date(Date.now() + 600_000).toISOString();
+    const receiptHash = `sha256:${"c".repeat(64)}`;
+    const decision = { decidedAt, outputManifestDigest: digest, receiptHash, receiptExpiresAt };
+    await expect(releases.recordConfirmation(tokenHash, decision)).resolves.toMatchObject({ recorded: true });
+    await expect(releases.recordConfirmation(tokenHash, decision)).resolves.toMatchObject({ recorded: false });
+    await expect(releases.latestConfirmation({ site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId }, preview.releaseId, preview.releaseHash))
+      .resolves.toMatchObject({ decisionAt: decidedAt, outputManifestDigest: digest, receiptHash });
+    await expect(serviceInstance.releaseConfirmationStatus(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash }))
+      .resolves.toMatchObject({ status: "confirmed", outputManifestDigest: digest });
+
+    await serviceInstance.approveRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-approve-${suffix}`
+    });
+    // A registered built artifact flips publication onto the independent
+    // confirmation policy: without a decision this publish fails closed.
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      const environment = (await client.query<{ environment_id: string }>(
+        "SELECT environment_id FROM navocms.release_candidates WHERE tenant_id = $1 AND site_id = $2 AND id = $3",
+        [tenantId, siteId, preview.releaseId]
+      )).rows[0]!.environment_id;
+      await client.query(
+        `INSERT INTO navocms.reviewed_astro_artifact_object_bindings (
+           tenant_id, site_id, environment_id, environment_key, release_id, release_hash,
+           artifact_hash, astro_artifact_hash, source_commit_sha, source_object_key, source_object_sha256,
+           source_object_bytes, output_object_key, output_object_sha256, output_object_bytes, state, evidence_hash
+         ) VALUES ($1,$2,$3,'default',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'ready',$15)`,
+        [tenantId, siteId, environment, preview.releaseId, preview.releaseHash, "a".repeat(64),
+          `sha256:${"d".repeat(64)}`, "f".repeat(64),
+          `tenants/${tenantId}/sites/${siteId}/reviewed-astro/source/sha256/${"e".repeat(64)}.json`, "e".repeat(64), 2048,
+          `tenants/${tenantId}/sites/${siteId}/reviewed-astro/output/sha256/${"f".repeat(64)}.json`, "f".repeat(64), 4096,
+          `sha256:${"9".repeat(64)}`]
+      );
+    });
+    await expect(serviceInstance.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-${suffix}`
+    })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
+
+    // A forged receipt hash or foreign digest does not satisfy the checkpoint.
+    await expect(releases.recordConfirmation(tokenHash, { ...decision, receiptHash: `sha256:${"0".repeat(64)}` }))
+      .resolves.toMatchObject({ recorded: false });
+    await expect(serviceInstance.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-2-${suffix}`
+    })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
   });
 
   it("preserves applied-effect evidence across service restart after verification failure", async () => {

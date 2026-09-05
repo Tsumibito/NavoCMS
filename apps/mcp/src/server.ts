@@ -43,7 +43,9 @@ const deploymentScope = Object.freeze({
 });
 const environmentKey = runtimeMode === "production" ? required("NAVOCMS_ENVIRONMENT") : (process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode);
 const deploymentEnvironmentKey = process.env.NAVOCMS_ENVIRONMENT_KEY ?? "default";
-const runtimePrincipalId = databaseUrl && runtimeMode === "production"
+// The trusted runtime principal drives pre-review builds and scoped artifact
+// reads outside any request. Required wherever the database runtime runs.
+const runtimePrincipalId = databaseUrl
   ? required("NAVOCMS_RUNTIME_PRINCIPAL_ID")
   : undefined;
 const database = databaseUrl ? new PostgresDatabase({
@@ -116,6 +118,7 @@ if (database) {
       reviewedSourceCommit: required("NAVOCMS_REVIEWED_SOURCE_COMMIT"),
       toolchainDirectory: required("NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN"),
       readinessContext: deliveryRepositoryContext,
+      runtimePrincipalId: runtimePrincipalId!,
       objectStorage: r2Storage!.artifacts,
       mediaStorage: r2Storage!.media
     });

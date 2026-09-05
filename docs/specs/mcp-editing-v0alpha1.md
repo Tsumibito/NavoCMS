@@ -120,14 +120,42 @@ lock inside the same transaction as the insert.
 ## Preview and release boundary
 
 `preview_prepare` assembles a canonical release manifest, renders one immutable proof artifact, and
-returns an expiring 256-bit capability URL. The tool's text fallback states the same readiness and
-the same limitation as the widget: the URL renders a Markdown proof artifact, not the final site
-design; a rendered-design preview arrives with the Sprint 8.2 release boundary. The response contains revision, source, release, and
+returns an expiring 256-bit capability URL plus a separate confirmation capability URL. The tool's
+text fallback states the same readiness and the same limitation as the widget: the URL renders a
+Markdown proof artifact until the trusted build has completed. The response contains revision, source, release, and
 artifact hashes. Preview responses set `X-Robots-Tag: noindex, nofollow, noarchive`, a matching HTML
 robots directive, `Cache-Control: private, no-store`, a restrictive CSP, and no referrer policy.
 
-Approval stores the exact release hash. Publication fails closed if the supplied hash or provider's
-artifact hash differs. Workflow runs and step outputs are checkpointed in PostgreSQL. Verification
+When the staging runtime is active, `preview_prepare` also starts the durable pre-review trusted
+Astro build — a job under the service principal, checkpointed in `workflow_runs` and
+`workflow_checkpoints`. `preview_build_status` reports `building`, `ready` with the output manifest
+digest, or `failed` with its error code; a restarted server resumes a running job without creating a
+second one, and both deterministic builds finish before any review.
+
+`GET /previews/:token` serves the Markdown proof artifact while the build runs and the exact built
+page afterwards, with a short-lived `HttpOnly` capability cookie that lets same-origin absolute
+asset URLs (for example `/_astro/*`) stream the remaining immutable files of the same token.
+Preview responses stay `noindex`, `no-store`, script-blocked, and capability-gated. Documented
+staging limitation: two previews opened in the same browser profile share the last-issued cookie,
+so only the most recently opened preview's assets resolve; this never affects publication, which
+always serves the hash-verified immutable record.
+
+The human decision is recorded through the separate confirmation capability in an independent
+browser session. The confirmation page renders the release hash, the output manifest digest, file
+count, byte total, policy version, and expiry; the server derives the digest from the registered
+artifact, never from the browser request. The receipt (`release_confirmations`, ordered migration
+0013) is append-once, bound to tenant, site, release, release hash, output manifest digest,
+policy version, decision time, and expiry, and is CSRF-protected (double-submit cookie,
+`SameSite=Strict`, cross-origin `Origin` rejection). Re-delivering an accepted decision is a safe
+no-op. The MCP bearer can read the outcome via `release_confirm_status` but can never record it.
+
+Approval stores the exact release hash **and copies the confirmation receipt** (its hash and the
+output manifest digest) into the durable approval evidence. A built release cannot be approved or
+published from the MCP bearer alone: missing, expired, revoked, forged, or digest-mismatched
+receipts fail closed (`HUMAN_CONFIRMATION_REQUIRED`, `HUMAN_CONFIRMATION_EXPIRED`,
+`RELEASE_DECISION_STALE`). Publication never builds: it fails closed when no reviewed artifact is
+registered and re-verifies the registered output manifest digest against the receipt before the
+provider is invoked. Workflow runs and step outputs are checkpointed in PostgreSQL. Verification
 is distinct from provider application; an interrupted or failed verification is resumed through
 `release_reconcile` without repeating a completed effect. Rollback targets only the previous recorded
 publication and preserves both histories.
@@ -159,6 +187,14 @@ handoff renders `previewed` (and the legacy `ready-for-workflow`) payloads as re
 honest limitation that the capability URL renders a Markdown proof artifact, not a rendered design
 preview. No released JSON Schema changes; the v0alpha1 tool descriptions and this note document the
 new bounds.
+
+Sprint 8.2 (same v0alpha1 boundary): `release_approve` no longer accepts the MCP bearer's
+`kind: "human"` claim as the human decision. A built release requires an independent browser
+confirmation receipt, and publication promotes the registered immutable output without any build
+invocation. Clients that previously approved directly now receive `HUMAN_CONFIRMATION_REQUIRED`
+and must hand the confirmation capability URL to the human. `preview_build_status` and
+`release_confirm_status` are additive. Proof-only pipelines without a staging runtime keep the
+previous behavior.
 
 Post-acceptance corrections to the same sprint: `content_get` additionally bounds its metadata
 projection to 4,000 serialized characters (reporting omissions instead of truncating values

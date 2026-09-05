@@ -91,7 +91,10 @@ export class TrustedAstroBuilder {
   public async buildAndRegister(context: McpRequestContext, request: unknown): Promise<ReviewedAstroArtifactRecord> {
     assertRequest(request);
     const authority = reviewedAstroArtifactAuthority(context);
-    if (authority.principal.kind !== "human") throw new McpEditingError("REVIEWED_ASTRO_HUMAN_REQUIRED", "A human publisher must register a reviewed Astro artifact");
+    // The requesting bearer (human publisher) or the in-process trusted
+    // runtime principal may register a reviewed artifact. No MCP tool reaches
+    // this path with an agent bearer.
+    if (authority.principal.kind !== "human" && authority.principal.kind !== "service") throw new McpEditingError("REVIEWED_ASTRO_HUMAN_REQUIRED", "A human publisher or the trusted runtime must register a reviewed Astro artifact");
     if (authority.tenantId !== this.#context.site.tenantId || authority.siteId !== this.#context.site.siteId || authority.principal.id !== this.#context.principalId) throw new McpEditingError("REVIEWED_ASTRO_AUTHORITY_DENIED", "Reviewed Astro build authority does not match its registration scope");
     const checkout = await this.#runner.attest();
     if (!COMMIT.test(checkout.sourceCommitSha)) throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "Trusted reviewed checkout attestation is invalid");

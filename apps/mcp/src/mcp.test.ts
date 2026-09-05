@@ -492,6 +492,51 @@ describe("MCP editing service", () => {
     expect(records.some(({ event }) => event.navoidempotencykey === "exactly-16-chars")).toBe(true);
   });
 
+  it("exposes build and confirmation tools through MCP discovery and honors their schemas", async () => {
+    const { service, context } = fixture("editor");
+    const created = await service.createDraft(context, {
+      typeName: "article",
+      slug: "build-status-tool",
+      locale: "en",
+      title: "Build status tool",
+      markdown: "# Build status tool\n",
+      idempotencyKey: "build-status-draft-0001"
+    }) as DraftResult;
+    const server = createMcpServer(service, context);
+    const client = new Client({ name: "navocms-build-status-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const tools = await client.listTools();
+      const names = tools.tools.map(({ name }) => name);
+      expect(names).toContain("preview_build_status");
+      expect(names).toContain("release_confirm_status");
+      const buildSchema = tools.tools.find(({ name }) => name === "preview_build_status")?.inputSchema as Record<string, unknown>;
+      expect(JSON.stringify(buildSchema)).toContain("releaseId");
+
+      const buildStatus = await client.callTool({ name: "preview_build_status", arguments: { releaseId: created.draft.revisionId } });
+      // Without a staging runtime the build surface reports unsupported.
+      expect(buildStatus.structuredContent).toMatchObject({ releaseId: created.draft.revisionId, status: "unsupported" });
+
+      // preview_prepare through the transport carries the confirmation URL.
+      const preview = await client.callTool({ name: "preview_prepare", arguments: {
+        revisionId: created.draft.revisionId, idempotencyKey: "build-status-preview-001"
+      } });
+      expect(preview.structuredContent).toMatchObject({ status: "previewed", nextStep: "approve-exact-release" });
+      expect(String((preview.structuredContent as Record<string, unknown>).confirmationUrl))
+        .toMatch(/^https:\/\/preview\.example\.test\/confirmations\/[A-Za-z0-9_-]{43}$/);
+
+      const confirmation = await client.callTool({ name: "release_confirm_status", arguments: {
+        releaseId: (preview.structuredContent as Record<string, unknown>).releaseId,
+        releaseHash: (preview.structuredContent as Record<string, unknown>).releaseHash
+      } });
+      expect(confirmation.structuredContent).toMatchObject({ status: "pending" });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("reports a valid previewed handoff as ready in text and structured results", async () => {
     const { service, context } = fixture("editor");
     const created = await service.createDraft(context, {

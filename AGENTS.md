@@ -5,7 +5,9 @@ These rules apply to every automated agent and human contributor in this reposit
 ## Product invariants
 
 - The primary operator interface is an authenticated MCP agent. Focused UI is optional and cannot
-  become the only way to complete a core workflow.
+  become the only way to complete a core workflow. One guarantee is deliberately not MCP-only: a
+  human publication decision is recorded through an independent browser confirmation session
+  (ADR 0026); the agent reads the decision and can never issue the receipt.
 - Keep the trusted kernel small. Identity, tenant isolation, authorization, event integrity,
   idempotency, migrations, secrets, quotas, and release policy are not ordinary plugins.
 - Plugins request versioned capabilities. They never expand the authority of their caller.
