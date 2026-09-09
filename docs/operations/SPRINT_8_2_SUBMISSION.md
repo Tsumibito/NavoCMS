@@ -47,7 +47,9 @@ Referer-изоляция, lease). Модель доверия зафиксиро
 | База | свежий `origin/main` = `5fab3c0` (`docs: accept Sprint 8.1 and hand off real preview work (#56)`), содержит merge PR #53 (`9317092`), CI-правки PR #54 (`c10a231`) и исправление metadata continuation на границе MCP |
 | Ветка / worktree | `codex/sprint-8-2-real-preview`, отдельный worktree `tmp/navocms-sprint-8-2-preview` |
 | Implementation commit | `69768a2` (`feat(release): real pre-review preview, independent human confirmation, no-rebuild publication`) |
-| Verification commits | `de298a3` (resolver columns + resume polling), `30d8898` (plpgsql column qualification), `352c26f` (exact release binding in test fixture), `b15a3c4`/`bda627e`/`2792d0c` (confirmation gate test ordering) |
+| Verification commits | `de298a3`…`2792d0c` (первый корректирующий прогон тестов/миграции) |
+| Second-cycle commits | `c3891a2` (human-session login, namespace previews, policy binding, lease), `0ce9873` (review corrections: OIDC login flow, full namespace binding, advisory-lock claims), `9b4f49e`/`43db22a` (test determinism on remote DB) |
+| Проверенный head второй приёмки | `9b4f49e274bc03445be40168584e2fc1c7b1b029` |
 | Submission commit | последний коммит ветки (этот файл); фактический head фиксирует принимающий |
 | PR | [Tsumibito/NavoCMS#57](https://github.com/Tsumibito/NavoCMS/pull/57) (Draft → Ready по готовности) |
 | Архитектурное решение | ADR [0026](../architecture/0026-real-preview-and-independent-human-confirmation.md) — оформлен **до** реализации; индекс ADR обновлён |
@@ -107,10 +109,10 @@ secrets/roles/WorkOS/Coolify/Pages/R2 — у принимающего.
 | Проверка | Команда / место | Результат |
 | --- | --- | --- |
 | Полный гейт | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` — полный чистый прогон корректирующего head (fresh install 0001→0013; upgrade-шаг 0012→0013 выполняется внутри той же последовательности) | PASS (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удалена. Два промежуточных не-зелёных прогона в этой итерации — гонка самого нового lease-теста на удалённой БД (TTL 400 мс короче сетевых round trips); тест переписан детерминированно (истечение lease имитируется SQL-UPDATE), prod-код не менялся |
-| Vitest unit+integration | входит в Neon-прогон (`NAVOCMS_NEON_TEST_RUN=true`) | счётчики чистого прогона фиксируются ниже; включает новые session/namespace/lease regression-тесты и двухэкземплярные PostgreSQL lease-тесты (гонка первого захвата, no-op повтор, stale-owner guard) |
+| Vitest unit+integration | входит в Neon-прогон (`NAVOCMS_NEON_TEST_RUN=true`) | **239/239 passed, 39 files, 0 skipped, 0 failed** в чистом прогоне на финальном head — включая новые session/namespace/lease regression-тесты и двухэкземплярные PostgreSQL lease-тесты (гонка первого захвата, no-op повтор, stale-owner guard) |
 | Playwright + axe | входит в `pnpm check` | **10/10 passed**: браузерный OIDC login без инъекций заголовков (аноним → `/authorize` с PKCE → callback → форма → клик → «Decision recorded»), агентная identity отклоняется на login, точный repro изоляции preview (один context, две страницы, задержанный CSS), srcset/css-url биндинг, computed style/натуральная ширина/блокировка скриптов |
 | SQL isolation | 5 suites внутри помощника | 5/5 «Isolation passed» в каждом прогоне |
-| CI GitHub Actions | автоматически на PR; итоговый зелёный run на финальном SHA приводится в финальном ответе исполнителя | принимающий подтверждает CI на merge/head SHA |
+| CI GitHub Actions | [run 34342446747](https://github.com/Tsumibito/NavoCMS/actions/runs/34342446747) на финальном head `43db22ac70fe1dc4a18ed59a9bfa94ff1b934f3e`: **success** | PASS; принимающий подтверждает CI на merge/head SHA |
 
 Итерации Neon-прогонов до зелёной пары зафиксированы честно: прогон 1 — `42P13` (CREATE OR
 REPLACE не может изменить тип возврата `resolve_release_preview`; в 0013 добавлен DROP IF EXISTS
