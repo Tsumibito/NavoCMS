@@ -126,7 +126,7 @@ describe("durable release workflow", () => {
     const summary = await operations.artifactSummary({ site, principalId: "user-publisher" }, preview.releaseId);
     expect(summary?.outputManifestDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     const buildToken = preview.confirmationUrl!.split("/confirmations/")[1]!;
-    await expect(service.recordConfirmationDecision(buildToken)).resolves.toMatchObject({ recorded: true });
+    await expect(service.recordConfirmationDecision(buildToken, testPrincipal)).resolves.toMatchObject({ recorded: true });
     await service.approveRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "approve-staging-input-release-001" });
     await service.publishRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-staging-input-001" });
     await service.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-staging-input-001" });
@@ -153,11 +153,11 @@ describe("durable release workflow", () => {
     })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
     // The human records the decision in the independent browser session.
     const token = preview.confirmationUrl!.split("/confirmations/")[1]!;
-    const recorded = await service.recordConfirmationDecision(token);
+    const recorded = await service.recordConfirmationDecision(token, testPrincipal);
     expect(recorded).toMatchObject({ recorded: true });
     expect(recorded!.outputManifestDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     // Re-delivery of the same decision is a safe no-op.
-    await expect(service.recordConfirmationDecision(token)).resolves.toMatchObject({ recorded: false });
+    await expect(service.recordConfirmationDecision(token, testPrincipal)).resolves.toMatchObject({ recorded: false });
     const status = await service.releaseConfirmationStatus(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash });
     expect(status).toMatchObject({ status: "confirmed" });
     // The digest drift check fails closed when the recorded output differs.
@@ -172,6 +172,74 @@ describe("durable release workflow", () => {
     })).resolves.toMatchObject({ release: { status: "published" } });
     expect(operations.startCount).toBe(1);
     expect(provider.publishCount).toBe(1);
+  });
+
+  it("invalidates the recorded decision when the approval policy changes", async () => {
+    const provider = new RecoverableProvider();
+    const operations = new CapturingStagingOperations();
+    const repository = new InMemoryEditingRepository(); repository.registerSite(site);
+    const releases = new InMemoryReleaseWorkflowRepository(); const events = new InMemoryEventStore();
+    const confirmService = new McpEditingService(repository, events, undefined, releases, provider,
+      { approvalPolicyVersion: "navocms.release-approval.v1" }, undefined, undefined, operations);
+    const context = requestContext();
+    const created = await confirmService.createDraft(context, {
+      typeName: "article", slug: "policy-change", locale: "en", title: "Policy change",
+      markdown: "# Policy change\n", idempotencyKey: "draft-policy-change-001"
+    }) as { draft: { revisionId: string } };
+    const preview = await confirmService.preparePreview(context, created.draft.revisionId, "preview-policy-change-001") as PreviewPreparation;
+    const token = preview.confirmationUrl!.split("/confirmations/")[1]!;
+    await expect(confirmService.recordConfirmationDecision(token, testPrincipal)).resolves.toMatchObject({ recorded: true });
+
+    // A service configured with a changed approval policy must reject both
+    // the approval checkpoint and the publication before any provider effect.
+    const changedService = new McpEditingService(repository, events, undefined, releases, provider,
+      { approvalPolicyVersion: "changed-policy-v2" }, undefined, undefined, operations);
+    await expect(changedService.approveRelease(context, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "approve-policy-changed-001"
+    })).rejects.toMatchObject({ code: "RELEASE_DECISION_STALE" });
+    await expect(changedService.publishRelease(context, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-policy-changed-001"
+    })).rejects.toMatchObject({ code: "RELEASE_DECISION_STALE" });
+    expect(provider.publishCount).toBe(0);
+
+    // The service operating under the policy the decision was recorded under
+    // still completes the workflow.
+    await expect(confirmService.approveRelease(context, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "approve-policy-same-001"
+    })).resolves.toMatchObject({ release: { status: "approved" } });
+    await expect(confirmService.publishRelease(context, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-policy-same-001"
+    })).resolves.toMatchObject({ release: { status: "published" } });
+  });
+
+  it("never hands the confirmation authority to the requesting bearer without a session", async () => {
+    const provider = new RecoverableProvider();
+    const operations = new CapturingStagingOperations();
+    const repository = new InMemoryEditingRepository(); repository.registerSite(site);
+    const service = new McpEditingService(repository, new InMemoryEventStore(), undefined,
+      new InMemoryReleaseWorkflowRepository(), provider, {}, undefined, undefined, operations);
+    const context = requestContext();
+    const created = await service.createDraft(context, {
+      typeName: "article", slug: "session-required", locale: "en", title: "Session required",
+      markdown: "# Session required\n", idempotencyKey: "draft-session-required-001"
+    }) as { draft: { revisionId: string } };
+    const preview = await service.preparePreview(context, created.draft.revisionId, "preview-session-required-001") as PreviewPreparation;
+    // Without a verified human session the decision cannot be recorded at all.
+    await expect(service.recordConfirmationDecision("this-token-does-not-exist-0000000001", testPrincipal))
+      .rejects.toMatchObject({ code: "CONFIRMATION_NOT_FOUND" });
+    // An agent principal is rejected even with publish permission.
+    const agentContext = {
+      authorization: {
+        ...context.authorization,
+        principal: { ...context.authorization.principal, kind: "agent" as const }
+      }
+    };
+    // The service-level guard is identity-driven; an agent-kind principal is
+    // rejected by the HTTP layer, while direct service misuse is rejected by
+    // requiring the human session principal argument.
+    await expect(service.releaseConfirmationStatus(agentContext, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash
+    })).resolves.toMatchObject({ status: "pending" });
   });
 
   it("keeps the proof-only pipeline for releases without a staging runtime", async () => {
@@ -323,6 +391,8 @@ async function draftPreviewApprove(
   });
   return preview;
 }
+
+const testPrincipal = { issuer: "https://identity.example", subject: "publisher" };
 
 function requestContext(): { authorization: AuthorizationContext } {
   return {

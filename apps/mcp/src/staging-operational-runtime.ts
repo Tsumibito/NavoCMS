@@ -47,17 +47,20 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
   readonly #objectStorage: ReviewedAstroObjectStorage | undefined;
   readonly #mediaStorage: MediaStorage | undefined;
   readonly #runtimePrincipalId: string;
+  readonly #leaseTtlMs: number;
+  readonly #ownerToken = randomUUID();
   readonly #preparer = new StagingAstroPreviewPreparer();
   readonly #buildExecutors = new Map<string, Promise<void>>();
   #runnerReadiness: Promise<boolean> | undefined;
 
-  public constructor(input: Readonly<{ database: PostgresDatabase; environmentKey: string; reviewedSourceCommit: string; toolchainDirectory: string; readinessContext: RepositoryContext; runtimePrincipalId: string; runner?: TrustedAstroBuildRunner; objectStorage?: ReviewedAstroObjectStorage; mediaStorage?: MediaStorage }>) {
+  public constructor(input: Readonly<{ database: PostgresDatabase; environmentKey: string; reviewedSourceCommit: string; toolchainDirectory: string; readinessContext: RepositoryContext; runtimePrincipalId: string; leaseTtlMs?: number; runner?: TrustedAstroBuildRunner; objectStorage?: ReviewedAstroObjectStorage; mediaStorage?: MediaStorage }>) {
     this.#database = input.database;
     this.#environmentKey = input.environmentKey;
     this.#readinessContext = input.readinessContext;
     this.#objectStorage = input.objectStorage;
     this.#mediaStorage = input.mediaStorage;
     this.#runtimePrincipalId = input.runtimePrincipalId;
+    this.#leaseTtlMs = input.leaseTtlMs ?? 900_000;
     this.#runner = input.runner ?? new ImageAttestedAstroBuildRunner({ sourceCommitSha: input.reviewedSourceCommit, toolchainDirectory: input.toolchainDirectory });
   }
 
@@ -89,14 +92,17 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
 
   /**
    * Starts (or resumes) the durable pre-review build job for one release. The
-   * executor runs under the service principal, not the requesting bearer; the
-   * durable run/checkpoint rows make a killed process resumable without a
-   * second job, and registration idempotency makes re-execution safe.
+   * executor runs under the service principal, not the requesting bearer.
+   * Ownership is leased in the database: the running workflow row and the
+   * lease commit together before any build work starts, so a second live
+   * instance never duplicates the job and a crashed owner's lease expires
+   * before another instance re-homes it. Registration idempotency makes
+   * re-execution a safe recomputation.
    */
-  public async startBuild(repository: RepositoryContext, release: StoredRelease): Promise<PreviewBuildStatus> {
-    const run = await this.#findBuildRun(repository, release.id);
-    if (run?.status === "succeeded") return await this.buildStatus(repository, release.id);
-    if (!this.#buildExecutors.has(release.id)) this.#launchBuild(repository, release);
+  public async startBuild(repository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): Promise<PreviewBuildStatus> {
+    const owned = await this.#acquireJob(repository, release);
+    if (!owned) return { releaseId: release.id, status: "building" };
+    this.#launchBuild(repository, release);
     return { releaseId: release.id, status: "building" };
   }
 
@@ -110,16 +116,83 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
     const run = await this.#findBuildRun(repository, releaseId);
     if (!run) return { releaseId, status: "failed", errorCode: "BUILD_JOB_MISSING" };
     if (run.status === "failed") return { releaseId, status: "failed", ...(run.last_error_code ? { errorCode: run.last_error_code } : {}) };
-    // A running job without a live executor is a crashed process: resume it.
+    // A running job without a live local executor may belong to another live
+    // instance (its lease is still held) or to a crashed process. Only an
+    // expired lease may be re-homed; a foreign active lease stays untouched.
     if (run.status === "running" && !this.#buildExecutors.has(releaseId)) {
       const release = await this.#loadReleaseForResume(repository, releaseId);
       if (release) {
-        this.#launchBuild(repository, release);
+        const owned = await this.#acquireJob(repository, release);
+        if (owned) this.#launchBuild(repository, release);
         return { releaseId, status: "building" };
       }
       return { releaseId, status: "failed", errorCode: "BUILD_JOB_MISSING" };
     }
     return { releaseId, status: "building" };
+  }
+
+  /**
+   * Atomically claims the build job: inside one transaction, an active
+   * foreign lease returns false without writing anything; otherwise the
+   * running workflow row (with its durable checkpoint) and the lease are
+   * written together, closing the lost-job window before any build work.
+   */
+  async #acquireJob(repository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): Promise<boolean> {
+    return this.#database.withScope(serviceScope(repository), async (client) => {
+      const lease = (await client.query<{ owner_token: string; leased_until: Date | string }>(
+        `SELECT owner_token, leased_until FROM navocms.build_job_leases
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4 FOR UPDATE`,
+        [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
+      )).rows[0];
+      if (lease && lease.owner_token !== this.#ownerToken && new Date(lease.leased_until).getTime() > Date.now()) {
+        return false;
+      }
+      const succeeded = (await client.query<{ id: string }>(
+        `SELECT id FROM navocms.workflow_runs
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4 AND status = 'succeeded'`,
+        [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
+      )).rows[0];
+      if (succeeded) return false;
+      const existing = (await client.query<{ id: string }>(
+        `SELECT id FROM navocms.workflow_runs
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4
+            AND status IN ('running','succeeded')`,
+        [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
+      )).rows[0];
+      if (!existing) {
+        const runId = randomUUID();
+        await client.query(
+          `INSERT INTO navocms.workflow_runs (
+             id, tenant_id, site_id, release_id, workflow_key, status, current_step
+           ) VALUES ($1,$2,$3,$4,$5,'running','build.requested')`,
+          [runId, repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
+        );
+        await client.query(
+          `INSERT INTO navocms.workflow_checkpoints (id, tenant_id, site_id, run_id, step_key, input_hash, output_json)
+           VALUES ($1,$2,$3,$4,'build.requested',$5,$6::jsonb)`,
+          [randomUUID(), repository.site.tenantId, repository.site.siteId, runId, release.releaseHash,
+            JSON.stringify({ releaseHash: release.releaseHash })]
+        );
+      }
+      await client.query(
+        `INSERT INTO navocms.build_job_leases (
+           tenant_id, site_id, release_id, workflow_key, owner_token, leased_until
+         ) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (tenant_id, site_id, release_id, workflow_key) DO UPDATE
+           SET owner_token = $5, leased_until = $6, updated_at = now()`,
+        [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW,
+          this.#ownerToken, new Date(Date.now() + this.#leaseTtlMs).toISOString()]
+      );
+      return true;
+    });
+  }
+
+  async #releaseJob(repository: RepositoryContext, releaseId: string): Promise<void> {
+    await this.#database.withScope(serviceScope(repository), (client) => client.query(
+      `DELETE FROM navocms.build_job_leases
+        WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4 AND owner_token = $5`,
+      [repository.site.tenantId, repository.site.siteId, releaseId, STAGING_ASTRO_BUILD_WORKFLOW, this.#ownerToken]
+    )).catch(() => undefined);
   }
 
   /** Hash-bearing summary of the registered reviewed artifact for one release. */
@@ -162,29 +235,6 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
   #launchBuild(repository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): void {
     const executor = (async () => {
       try {
-        await this.#database.withScope(serviceScope(repository), async (client) => {
-          const existing = (await client.query<{ id: string }>(
-            `SELECT id FROM navocms.workflow_runs
-              WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4
-                AND status IN ('running','succeeded')`,
-            [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
-          )).rows[0];
-          if (!existing) {
-            const runId = randomUUID();
-            await client.query(
-              `INSERT INTO navocms.workflow_runs (
-                 id, tenant_id, site_id, release_id, workflow_key, status, current_step
-               ) VALUES ($1,$2,$3,$4,$5,'running','build.requested')`,
-              [runId, repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
-            );
-            await client.query(
-              `INSERT INTO navocms.workflow_checkpoints (id, tenant_id, site_id, run_id, step_key, input_hash, output_json)
-               VALUES ($1,$2,$3,$4,'build.requested',$5,$6::jsonb)`,
-              [randomUUID(), repository.site.tenantId, repository.site.siteId, runId, release.releaseHash,
-                JSON.stringify({ releaseHash: release.releaseHash })]
-            );
-          }
-        });
         const artifacts = this.#artifactStore(repository);
         const inputs = new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey);
         const builder = new TrustedAstroBuilder({ inputs, registrations: artifacts, context: repository, environmentKey: this.#environmentKey, runner: this.#runner });
@@ -221,6 +271,7 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         }).catch(() => undefined);
       } finally {
         this.#buildExecutors.delete(release.id);
+        await this.#releaseJob(repository, release.id);
       }
     })();
     this.#buildExecutors.set(release.id, executor);

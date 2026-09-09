@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS navocms.release_confirmations (
   preview_expires_at timestamptz NOT NULL,
   decision_at timestamptz,
   output_manifest_digest text CHECK (output_manifest_digest IS NULL OR output_manifest_digest ~ '^sha256:[0-9a-f]{64}$'),
+  decided_by_principal_id uuid,
+  decided_by_reference text CHECK (decided_by_reference IS NULL OR decided_by_reference ~ '^[0-9a-f]{64}$'),
   receipt_hash text CHECK (receipt_hash IS NULL OR receipt_hash ~ '^sha256:[0-9a-f]{64}$'),
   receipt_expires_at timestamptz,
   revoked_at timestamptz,
@@ -28,9 +30,11 @@ CREATE TABLE IF NOT EXISTS navocms.release_confirmations (
   -- the approval checkpoint must reproduce. Revocation only happens after a
   -- decision and never mutates the recorded decision inputs.
   CONSTRAINT release_confirmations_decision_shape CHECK (
-    (decision_at IS NULL AND receipt_hash IS NULL AND receipt_expires_at IS NULL)
+    (decision_at IS NULL AND receipt_hash IS NULL AND receipt_expires_at IS NULL
+      AND decided_by_principal_id IS NULL AND decided_by_reference IS NULL)
     OR (decision_at IS NOT NULL AND receipt_hash IS NOT NULL
-        AND receipt_expires_at IS NOT NULL AND output_manifest_digest IS NOT NULL)
+        AND receipt_expires_at IS NOT NULL AND output_manifest_digest IS NOT NULL
+        AND decided_by_reference IS NOT NULL)
   ),
   CONSTRAINT release_confirmations_receipt_expiry CHECK (
     receipt_expires_at IS NULL OR receipt_expires_at > decision_at
@@ -40,6 +44,35 @@ CREATE TABLE IF NOT EXISTS navocms.release_confirmations (
     OR (revoked_at IS NOT NULL AND revoked_reason IS NOT NULL AND decision_at IS NOT NULL)
   )
 );
+
+-- Durable ownership lease for pre-review build jobs. Exactly one live lease
+-- per (site, release, workflow); a crashed owner's lease expires, after which
+-- another instance may re-home the job. Acquisition is part of the same
+-- transaction as the running workflow row, so the durable checkpoint always
+-- exists before build work starts.
+CREATE TABLE IF NOT EXISTS navocms.build_job_leases (
+  tenant_id uuid NOT NULL,
+  site_id uuid NOT NULL,
+  release_id uuid NOT NULL,
+  workflow_key text NOT NULL,
+  owner_token uuid NOT NULL,
+  leased_until timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, site_id, release_id, workflow_key),
+  CONSTRAINT build_job_leases_release_binding
+    FOREIGN KEY (tenant_id, site_id, release_id)
+    REFERENCES navocms.release_candidates (tenant_id, site_id, id) ON DELETE CASCADE
+);
+
+ALTER TABLE navocms.build_job_leases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE navocms.build_job_leases FORCE ROW LEVEL SECURITY;
+CREATE POLICY site_scope ON navocms.build_job_leases TO navocms_app
+  USING (tenant_id = navocms.current_tenant_id() AND site_id = navocms.current_site_id())
+  WITH CHECK (tenant_id = navocms.current_tenant_id() AND site_id = navocms.current_site_id());
+
+REVOKE ALL ON navocms.build_job_leases FROM PUBLIC, navocms_plugin;
+GRANT SELECT, INSERT, UPDATE, DELETE ON navocms.build_job_leases TO navocms_app;
 
 CREATE INDEX IF NOT EXISTS release_confirmations_open_idx
   ON navocms.release_confirmations (tenant_id, site_id, release_id, release_hash)
@@ -70,6 +103,8 @@ RETURNS TABLE (
   receipt_hash text,
   receipt_expires_at timestamptz,
   preview_expires_at timestamptz,
+  decided_by_principal_id uuid,
+  decided_by_reference text,
   revoked_at timestamptz
 )
 LANGUAGE sql
@@ -79,7 +114,7 @@ SET search_path = navocms, pg_catalog
 AS $resolve_release_confirmation$
   SELECT k.release_id, k.tenant_id, k.site_id, k.release_hash, k.policy_version,
          k.decision_at, k.output_manifest_digest, k.receipt_hash, k.receipt_expires_at,
-         k.preview_expires_at, k.revoked_at
+         k.preview_expires_at, k.decided_by_principal_id, k.decided_by_reference, k.revoked_at
     FROM release_confirmations k
    WHERE k.token_hash = p_token_hash
      AND k.preview_expires_at > now()
@@ -135,7 +170,9 @@ CREATE OR REPLACE FUNCTION record_release_confirmation(
   p_output_manifest_digest text,
   p_receipt_hash text,
   p_receipt_expires_at timestamptz,
-  p_decision_at timestamptz
+  p_decision_at timestamptz,
+  p_decided_by_principal_id uuid,
+  p_decided_by_reference text
 )
 RETURNS TABLE (
   release_id uuid,
@@ -148,6 +185,8 @@ RETURNS TABLE (
   receipt_hash text,
   receipt_expires_at timestamptz,
   preview_expires_at timestamptz,
+  decided_by_principal_id uuid,
+  decided_by_reference text,
   recorded boolean
 )
 LANGUAGE plpgsql
@@ -167,12 +206,15 @@ BEGIN
     RETURN QUERY SELECT v_row.release_id, v_row.tenant_id, v_row.site_id,
       v_row.release_hash, v_row.policy_version, v_row.decision_at,
       v_row.output_manifest_digest, v_row.receipt_hash, v_row.receipt_expires_at,
-      v_row.preview_expires_at, false;
+      v_row.preview_expires_at, v_row.decided_by_principal_id,
+      v_row.decided_by_reference, false;
     RETURN;
   END IF;
   UPDATE release_confirmations AS t
      SET decision_at = p_decision_at,
          output_manifest_digest = p_output_manifest_digest,
+         decided_by_principal_id = p_decided_by_principal_id,
+         decided_by_reference = p_decided_by_reference,
          receipt_hash = p_receipt_hash,
          receipt_expires_at = p_receipt_expires_at,
          updated_at = now()
@@ -180,11 +222,12 @@ BEGIN
   RETURN QUERY SELECT v_row.release_id, v_row.tenant_id, v_row.site_id,
     v_row.release_hash, v_row.policy_version, p_decision_at,
     p_output_manifest_digest, p_receipt_hash, p_receipt_expires_at,
-    v_row.preview_expires_at, true;
+    v_row.preview_expires_at, p_decided_by_principal_id,
+    p_decided_by_reference, true;
 END
 $record_release_confirmation$;
 
-REVOKE ALL ON FUNCTION record_release_confirmation(text, text, text, timestamptz, timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION record_release_confirmation(text, text, text, timestamptz, timestamptz) TO navocms_app;
+REVOKE ALL ON FUNCTION record_release_confirmation(text, text, text, timestamptz, timestamptz, uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION record_release_confirmation(text, text, text, timestamptz, timestamptz, uuid, text) TO navocms_app;
 
 COMMIT;

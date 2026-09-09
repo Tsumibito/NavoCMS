@@ -69,14 +69,24 @@ export interface PreviewSurface {
 /** Read-only model for the confirmation page. */
 export interface ConfirmationView {
   readonly releaseId: string;
+  readonly tenantId: string;
+  readonly siteId: string;
   readonly releaseHash: string;
   readonly policyVersion: string;
   readonly previewExpiresAt?: string;
   readonly decisionAt?: string;
   readonly receiptHash?: string;
   readonly receiptExpiresAt?: string;
+  readonly decidedByReference?: string;
   readonly revokedAt?: string;
   readonly build: Readonly<{ ready: boolean; outputManifestDigest?: string; fileCount?: number; totalBytes?: number }>;
+}
+
+/** Verified identity of the human session that may record a decision. */
+export interface ConfirmedByPrincipal {
+  readonly principalId?: string;
+  readonly issuer: string;
+  readonly subject: string;
 }
 
 export interface RecordedConfirmation {
@@ -512,6 +522,9 @@ export class McpEditingService {
         if (new Date(receipt.receiptExpiresAt).getTime() <= Date.now()) {
           throw new McpEditingError("HUMAN_CONFIRMATION_EXPIRED", "The human confirmation receipt has expired; prepare a fresh preview and confirm again");
         }
+        if (receipt.policyVersion !== this.#releaseConfig.approvalPolicyVersion) {
+          throw new McpEditingError("RELEASE_DECISION_STALE", "The approval policy changed after this decision was recorded; confirm the build again under the current policy");
+        }
         if (receipt.outputManifestDigest !== summary.outputManifestDigest) {
           throw new McpEditingError("RELEASE_DECISION_STALE", "The recorded confirmation does not match the registered build output");
         }
@@ -666,7 +679,8 @@ export class McpEditingService {
       ...(confirmation.decisionAt ? { decidedAt: confirmation.decisionAt } : {}),
       ...(confirmation.receiptHash ? { receiptHash: confirmation.receiptHash } : {}),
       ...(confirmation.outputManifestDigest ? { outputManifestDigest: confirmation.outputManifestDigest } : {}),
-      ...(confirmation.receiptExpiresAt ? { receiptExpiresAt: confirmation.receiptExpiresAt } : {})
+      ...(confirmation.receiptExpiresAt ? { receiptExpiresAt: confirmation.receiptExpiresAt } : {}),
+      ...(confirmation.decidedByReference ? { decidedByReference: confirmation.decidedByReference } : {})
     });
   }
 
@@ -680,12 +694,15 @@ export class McpEditingService {
       : undefined;
     return Object.freeze({
       releaseId: confirmation.releaseId,
+      tenantId: confirmation.tenantId,
+      siteId: confirmation.siteId,
       releaseHash: confirmation.releaseHash,
       policyVersion: confirmation.policyVersion,
       ...(confirmation.previewExpiresAt ? { previewExpiresAt: confirmation.previewExpiresAt } : {}),
       ...(confirmation.decisionAt ? { decisionAt: confirmation.decisionAt } : {}),
       ...(confirmation.receiptHash ? { receiptHash: confirmation.receiptHash } : {}),
       ...(confirmation.receiptExpiresAt ? { receiptExpiresAt: confirmation.receiptExpiresAt } : {}),
+      ...(confirmation.decidedByReference ? { decidedByReference: confirmation.decidedByReference } : {}),
       ...(confirmation.revokedAt ? { revokedAt: confirmation.revokedAt } : {}),
       build: Object.freeze({
         ready: artifact !== undefined,
@@ -699,17 +716,22 @@ export class McpEditingService {
   }
 
   /**
-   * Records the human decision from the independent browser session. The
-   * output manifest digest is computed server-side from the registered
-   * artifact; the browser request carries no trust-bearing values. Repeated
-   * delivery of an already-recorded decision is a safe no-op.
+   * Records the human decision from an authenticated independent session. The
+   * capability token only routes the request; the authority to decide comes
+   * from the verified human principal (a delegated agent session is rejected
+   * by the HTTP boundary before this method). The output manifest digest is
+   * computed server-side from the registered artifact; the browser request
+   * carries no trust-bearing values. Repeated delivery of an
+   * already-recorded decision is a safe no-op.
    */
-  public async recordConfirmationDecision(token: string): Promise<RecordedConfirmation | undefined> {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+  public async recordConfirmationDecision(token: string, principal: ConfirmedByPrincipal): Promise<RecordedConfirmation> {
+    if (principal.issuer === "" || principal.subject === "") throw new McpEditingError("HUMAN_SESSION_REQUIRED", "A verified human session is required to record this decision");
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new McpEditingError("CONFIRMATION_NOT_FOUND", "This confirmation link is invalid");
     const tokenHash = sha256(token);
     const confirmation = await this.#releases.resolveConfirmation(tokenHash);
-    if (!confirmation) return undefined;
+    if (!confirmation) throw new McpEditingError("CONFIRMATION_NOT_FOUND", "This confirmation link is invalid");
     if (confirmation.revokedAt) throw new McpEditingError("RELEASE_CONFIRMATION_REVOKED", "This confirmation has been revoked");
+    const decidedByReference = sha256(`${principal.issuer}|${principal.subject}`);
     if (confirmation.decisionAt) {
       return Object.freeze({
         recorded: false,
@@ -720,7 +742,9 @@ export class McpEditingService {
       });
     }
     if (!this.#stagingAstro) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_NOT_BUILT", "No staging runtime is configured for this release");
-    if (!confirmation.previewExpiresAt) throw new McpEditingError("RELEASE_CONFIRMATION_EXPIRED", "This confirmation link is no longer valid");
+    if (!confirmation.previewExpiresAt || new Date(confirmation.previewExpiresAt).getTime() <= Date.now()) {
+      throw new McpEditingError("RELEASE_CONFIRMATION_EXPIRED", "This confirmation link is no longer valid");
+    }
     const artifact = await this.#stagingAstro.artifactFor({
       tenantId: confirmation.tenantId, siteId: confirmation.siteId, releaseId: confirmation.releaseId
     });
@@ -735,6 +759,7 @@ export class McpEditingService {
       releaseHash: confirmation.releaseHash,
       outputManifestDigest: artifact.outputManifestDigest,
       policyVersion: confirmation.policyVersion,
+      decidedByReference,
       decidedAt,
       receiptExpiresAt
     }))}`;
@@ -742,7 +767,9 @@ export class McpEditingService {
       decidedAt,
       outputManifestDigest: artifact.outputManifestDigest,
       receiptHash,
-      receiptExpiresAt
+      receiptExpiresAt,
+      ...(principal.principalId ? { decidedByPrincipalId: principal.principalId } : {}),
+      decidedByReference
     });
     if (!result) throw new McpEditingError("RELEASE_CONFIRMATION_EXPIRED", "This confirmation link is no longer valid");
     if (result.recorded) {
@@ -751,9 +778,9 @@ export class McpEditingService {
         tenantId: confirmation.tenantId,
         siteId: confirmation.siteId,
         correlationId: confirmation.releaseId,
-        // The receipt records the decision, not an identity: the bearer of the
-        // confirmation capability acted in an independent browser session.
-        actor: { type: "human", id: "independent-browser-session" }
+        // The receipt records the decision against the verified human session
+        // identity; only a hash reference is stored.
+        actor: { type: "human", id: principal.principalId ?? decidedByReference }
       });
       await this.#events.append(factory.create({
         type: "io.navocms.release.human-confirmed.v1",
@@ -766,6 +793,7 @@ export class McpEditingService {
           outputManifestDigest: artifact.outputManifestDigest,
           policyVersion: confirmation.policyVersion,
           receiptHash,
+          decidedByReference,
           decidedAt,
           receiptExpiresAt
         })
@@ -785,14 +813,19 @@ export class McpEditingService {
     if (candidate.releaseHash !== releaseHash) throw new McpEditingError("STALE_RELEASE_APPROVAL", "Release hash does not match the previewed candidate");
     // Publication promotes the reviewed output; it never builds. When the
     // staging runtime is active the registered artifact must already exist and
-    // its output manifest digest must equal the digest bound to the recorded
-    // human confirmation — a stale or missing build fails closed here.
-    if (this.#stagingAstro) {
+    // its output manifest digest and policy must equal the recorded human
+    // confirmation — a stale or missing build fails closed here. Recovery of
+    // an already checkpointed publishing release relies on the durable
+    // validation checkpoint instead of re-asking for a fresh decision.
+    if (this.#stagingAstro && candidate.status !== "publishing") {
       const summary = await this.#stagingAstro.artifactSummary(repositoryContext, releaseId);
       if (!summary) throw new McpEditingError("REVIEWED_ASTRO_ARTIFACT_NOT_BUILT", "The trusted build for this release has not completed; publication never builds");
       const receipt = await this.#releases.latestConfirmation(repositoryContext, releaseId, releaseHash);
       if (!receipt?.outputManifestDigest || receipt.revokedAt) {
         throw new McpEditingError("HUMAN_CONFIRMATION_REQUIRED", "An independent human confirmation receipt is required before publication");
+      }
+      if (receipt.policyVersion !== this.#releaseConfig.approvalPolicyVersion) {
+        throw new McpEditingError("RELEASE_DECISION_STALE", "The approval policy changed after this decision was recorded; confirm the build again under the current policy");
       }
       if (receipt.outputManifestDigest !== summary.outputManifestDigest) {
         throw new McpEditingError("RELEASE_DECISION_STALE", "The recorded confirmation does not match the registered build output");

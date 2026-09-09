@@ -1,8 +1,30 @@
 # Sprint 8.2 submission — Настоящий preview и проверяемое подтверждение
 
-Исполнитель: субагент Sprint 8.2. Статус: `submitted` — приёмка, staging-деплой, реальное решение
-владельца и обновление статуса остаются за принимающим архитектором. PR держится в Draft до
-завершения полных проверок, затем переводится в Ready.
+Исполнитель: субагент Sprint 8.2. Статус: `submitted` после корректирующего цикла (первая сдача
+вернула три блокера и одно замечание по коду; все закрыты) — приёмка, staging-деплой, реальное
+решение владельца и обновление статуса остаются за принимающим архитектором.
+
+## Корректирующий цикл (changes required → resubmitted)
+
+Независимая приёмка head `eb8a904522fe7c02af2b3d965dfe7530ebc7c335` воспроизвела три блокера
+(reproduction.log + acceptance-repro.spec.ts) и одно код-замечание; исправления продолжены в этой
+же ветке, регрессии добавлены по воспроизведениям.
+
+| # | Дефект | Корень | Исправление | Evidence |
+| --- | --- | --- | --- | --- |
+| P1-1 | Confirmation capability давала агенту право «решения человека»: обычный fetch без браузера/входа записывал confirmed | URL считался полномочием; CSRF защищает от cross-site, но не доказывает human presence | Confirmation page/endpoint требуют **авторизованную human-сессию** через существующую identity-систему: verified bearer (тот же verifier/resolveAuthorization), `kind: "human"` (агент-сессия отклонена даже с human subject), точный tenant/site, `content:publish`. Без сессии — инструкция логина вместо формы. Receipt связан с `decidedByPrincipalId` + hash-ссылкой `decidedByReference` (identity не хранится) | http.test.ts: anonymous GET/POST → 401; agent bearer → 403; foreign-site bearer → 403; authorized session → decision recorded; confirmation.spec.ts (браузер без токена видит «Human session required», ноль форм); release-workflow.test.ts (нотариально неверный токен → `CONFIRMATION_NOT_FOUND`) |
+| P1-2 | Preview CSP запрещал собственные CSS/изображения: заголовок оставался чёрным, SVG naturalWidth=0 | `style-src 'unsafe-inline'` без `'self'`, `img-src data:` без `'self'` | CSP: `default-src 'none'` сохранён, добавлены `style-src 'self' 'unsafe-inline'`, `img-src 'self' data:`, `font-src 'self' data:` — скрипты и чужие origin по-прежнему запрещены. Asset-релей резолвит токен прежде всего по same-origin `Referer` (изоляция двух preview), cookie — fallback; HTML через релей не отдаётся; CSP/noindex/no-referrer на каждом asset | preview-render.spec.ts (Chromium): h1 computed color = rgb(12,34,56), image naturalWidth = 10, inline script заблокирован (ровно одно CSP-нарушение в консоли); два preview в одном браузере рендерят каждый свой CSS (rgb(1,2,3) vs rgb(4,5,6)) при общем cookie |
+| P1-3 | Смена approval policy не инвалидирует решение: `changed-policy-v2` сервис успешно одобрял релиз | approveRelease/applyAndVerify сравнивали digest, но не policyVersion | `release_approve` и пред-publish гейт требуют `receipt.policyVersion === текущей approvalPolicyVersion`, иначе `RELEASE_DECISION_STALE` до provider; recovery уже checkpointed `publishing` опирается на durable validation checkpoint, а не на новое решение | release-workflow.test.ts `invalidates the recorded decision when the approval policy changes` (reject на approve+publish со счётчиком publishCount=0; оригинальный сервис завершает workflow) |
+| Код | Второй экземпляр сервера считает running-job «умершим» (per-process Map) и запускает дублирующий build; SELECT→INSERT без блокировки | владение job не было durable | `build_job_leases` (в миграции 0013): атомарное приобретение lease + running workflow row в одной транзакции (FOR UPDATE, TTL 15 мин, owner_token per instance); чужой активный lease → второй экземпляр простаивает; истёкший lease → пере-домовление (безопасная recomputation, регистрация идемпотентна); публикационные helper'ы фильтруют workflow_runs по workflow_key релиза | postgres-repository.integration.test.ts: два runtime-экземпляра на одной БД — ровно один run и один lease, второй ждёт; после истечения lease пере-домовлен второму (owner_token меняется, run по-прежнему один); терминальный статус восстановлен; отдельный тест: публикация не трогает running build job |
+
+ADR 0026 дополнен явными пометками «Corrected after independent acceptance» по всем четырём
+пунктам; спецификация mcp-editing-v0alpha1 обновлена (session requirement, policy binding, CSP,
+Referer-изоляция, lease). Модель доверия зафиксирована честно: receipt доказывает, что в окне
+действовала сессия с verified human identity данного сайта; физический клик не доказывается, а
+делегированный MCP-доступ никогда не принимается как такая сессия. Interactive browser login
+выполняется против существующего authorization server — новой identity platform нет (пункт для
+приёмки: провайдер должен выдавать человеку bearer-токен с scope `content:publish`; настройка
+провайдера — у архитектора).
 
 ## Идентификация изменения
 
@@ -71,9 +93,9 @@ secrets/roles/WorkOS/Coolify/Pages/R2 — у принимающего.
 
 | Проверка | Команда / место | Результат |
 | --- | --- | --- |
-| Полный гейт ×2 | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` — два последовательных чистых запуска на head `2792d0c`+ | PASS ×2 (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удаляется после каждого запуска |
-| Vitest unit+integration | входит в Neon-прогоны (`NAVOCMS_NEON_TEST_RUN=true`) | **232/232 passed, 39 files, 0 skipped, 0 failed** в обоих прогонах — включая новые MCP-transport, HTTP browser-flow, confirmation persistence и build-resume тесты |
-| Playwright + axe | входит в `pnpm check` | **7/7 passed** в обоих прогонах (включая новый browser-flow confirmation спек) |
+| Полный гейт | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` — один полный чистый прогон корректирующего head (покрывает fresh install 0001→0013; upgrade-шаг 0012→0013 выполняется внутри той же последовательности) | PASS (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удаляется после запуска |
+| Vitest unit+integration | входит в Neon-прогон (`NAVOCMS_NEON_TEST_RUN=true`) | **237/237 passed, 39 files, 0 skipped, 0 failed** — включая новые session/policy/lease regression-тесты (188 локально без БД + 49 PostgreSQL integration) |
+| Playwright + axe | входит в `pnpm check` | **9/9 passed** (новые: реальный рендеринг preview с computed style/натуральной шириной изображения/блокировкой скриптов; изоляция двух preview; human-session guard на confirmation flow) |
 | SQL isolation | 5 suites внутри помощника | 5/5 «Isolation passed» в каждом прогоне |
 | CI GitHub Actions | автоматически на PR; итоговый зелёный run на финальном SHA приводится в финальном ответе исполнителя | принимающий подтверждает CI на merge/head SHA |
 
@@ -128,8 +150,12 @@ REPLACE не может изменить тип возврата `resolve_releas
    `confirmationUrl` + `build: {status}`; `preview_build_status` до готовности → `building`,
    после → `ready` c `outputManifestDigest`; `GET previewUrl` — настоящая страница с CSS;
    `GET confirmationUrl` — сводка сборки.
-4. **Реальное решение владельца:** владелец открывает confirmation-ссылку, проверяет digest и
-   нажимает «Confirm this build»; агент видит `release_confirm_status: confirmed`.
+4. **Реальное решение владельца:** владелец входит в authorization server в своём браузере
+   (interactive login; нужен провайдер, выпускающий человеку bearer со scope `content:publish` —
+   настройка на стороне архитектора), открывает confirmation-ссылку, проверяет digest и нажимает
+   «Confirm this build». Без входа страница показывает инструкцию логина и не содержит формы;
+   ссылка, открытая агентом или обычным fetch, решение записать не может. Агент видит
+   `release_confirm_status: confirmed` с `decidedByReference`.
 5. **Approval + publish:** `release_approve` (human bearer) — без решения владельца падает
    `HUMAN_CONFIRMATION_REQUIRED`; после решения — approval, затем `release_publish` →
    `published`; build runner не вызывается (в логах деплоя нет новых сборок Pages до публикации —

@@ -6,6 +6,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   NAVOCMS_PERMISSIONS,
   bearerChallenge,
+  effectivePermissions,
   protectedResourceMetadata,
   type AccessTokenVerifier,
   type AuthorizationContext,
@@ -39,7 +40,7 @@ export interface McpHttpOptions {
 
 const PREVIEW_COOKIE = "navocms_preview_token";
 const CONFIRMATION_CSRF_COOKIE = "navocms_confirmation_csrf";
-const PREVIEW_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const PREVIEW_CSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const CONFIRMATION_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 export interface ReadinessResult {
@@ -108,7 +109,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
       return;
     }
     if (request.method === "GET" && request.url?.startsWith("/confirmations/")) {
-      return confirmationPage(response, options, resourceUrl, request.url.slice("/confirmations/".length));
+      return confirmationPage(response, options, request.url.slice("/confirmations/".length), request);
     }
     if (request.method === "POST" && request.url?.startsWith("/confirmations/")) {
       return confirmDecision(response, options, request.url.slice("/confirmations/".length), request);
@@ -201,18 +202,37 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
 }
 
 async function servePreviewAsset(response: ServerResponse, options: McpHttpOptions, request: IncomingMessage): Promise<boolean> {
-  const previewToken = parseCookies(request.headers.cookie)[PREVIEW_COOKIE];
+  // Subresource requests carry the full page URL as Referer; prefer that
+  // token so two previews open in one browser profile never borrow each
+  // other's files. The cookie is the fallback for clients without Referer.
+  const refererToken = previewTokenFromReferer(request.headers.referer);
+  const cookieToken = parseCookies(request.headers.cookie)[PREVIEW_COOKIE];
+  const previewToken = refererToken ?? cookieToken;
   if (!previewToken) return false;
   const surface = await options.service.resolvePreviewSurface(previewToken);
   if (!surface?.built) return false;
   const path = decodeURIComponent((request.url ?? "").replace(/^\//, "").split("?")[0] ?? "");
-  if (!safeOutputPath(path) || surface.built.output[path] === undefined) return false;
+  if (!safeOutputPath(path) || path.endsWith(".html") || surface.built.output[path] === undefined) return false;
   response.statusCode = 200;
   response.setHeader("content-type", outputContentType(path));
   response.setHeader("cache-control", "private, no-store, max-age=0");
   response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
+  response.setHeader("content-security-policy", "default-src 'none'");
+  response.setHeader("referrer-policy", "no-referrer");
   response.end(surface.built.output[path]);
   return true;
+}
+
+function previewTokenFromReferer(referer: string | undefined): string | undefined {
+  if (!referer) return undefined;
+  try {
+    const url = new URL(referer);
+    if (!url.pathname.startsWith("/previews/")) return undefined;
+    const token = url.pathname.slice("/previews/".length);
+    return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function sendHtml(response: ServerResponse, status: number, body: string): void {
@@ -237,9 +257,11 @@ async function readBody(request: IncomingMessage, maximumBytes: number): Promise
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function confirmationPage(response: ServerResponse, options: McpHttpOptions, resourceUrl: URL, token: string): Promise<void> {
+async function confirmationPage(response: ServerResponse, options: McpHttpOptions, token: string, request: IncomingMessage): Promise<void> {
   const view = await options.service.resolveConfirmationView(token);
   if (!view) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "This confirmation link is invalid or has expired. Ask the agent for a fresh preview."));
+  const session = await requireHumanSession(options, request, view);
+  if (session.error) return sendHtml(response, session.error.status, confirmationShell(session.error.title, escapeHtml(session.error.body)));
   if (view.revokedAt) return sendHtml(response, 410, confirmationShell("Confirmation revoked", "This confirmation has been revoked; prepare a new preview."));
   if (view.decisionAt) {
     return sendHtml(response, 200, confirmationShell("Decision already recorded", escapeHtml(`This release was confirmed on ${view.decisionAt}. Receipt ${view.receiptHash ?? "unknown"}. Re-delivery is safe; nothing was published by revisiting this page.`)));
@@ -267,6 +289,13 @@ async function confirmationPage(response: ServerResponse, options: McpHttpOption
 }
 
 async function confirmDecision(response: ServerResponse, options: McpHttpOptions, token: string, request: IncomingMessage): Promise<void> {
+  // The capability routes the request; only a verified human session may
+  // decide. This check comes before CSRF so agent/foreign sessions get a
+  // clear rejection regardless of form contents.
+  const view = await options.service.resolveConfirmationView(token);
+  if (!view) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "This confirmation link is invalid or has expired."));
+  const session = await requireHumanSession(options, request, view);
+  if (session.error) return sendHtml(response, session.error.status, confirmationShell(session.error.title, escapeHtml(session.error.body)));
   // Cross-origin form posts are rejected: a known foreign Origin never
   // matches the host that served the confirmation page (scheme-agnostic
   // behind TLS termination). A `null` Origin (sandboxed contexts) is still
@@ -275,7 +304,6 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
   const origin = request.headers.origin;
   const host = request.headers.host;
   if (origin && origin !== "null" && host && origin !== `https://${host}` && origin !== `http://${host}`) {
-    console.error("ORIGIN-DEBUG", JSON.stringify({ origin, host }));
     return sendHtml(response, 403, confirmationShell("Request rejected", "This confirmation must be submitted from its own page."));
   }
   const cookies = parseCookies(request.headers.cookie);
@@ -289,8 +317,7 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
     return sendHtml(response, 403, confirmationShell("Request rejected", "The confirmation form was not opened in this session. Reopen the confirmation link and try again."));
   }
   try {
-    const decision = await options.service.recordConfirmationDecision(token);
-    if (!decision) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "This confirmation link is invalid or has expired."));
+    const decision = await options.service.recordConfirmationDecision(token, session.principal!);
     const body = decision.recorded
       ? escapeHtml(`Your decision was recorded at ${decision.decidedAt}. Receipt ${decision.receiptHash}. It covers output manifest ${decision.outputManifestDigest}. Publication is a separate step and uses exactly these files.`)
       : escapeHtml(`This decision was already recorded at ${decision.decidedAt}. Receipt ${decision.receiptHash}. Re-delivery is safe.`);
@@ -302,6 +329,42 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
     if (code === "REVIEWED_ASTRO_ARTIFACT_NOT_BUILT") return sendHtml(response, 409, confirmationShell("Build not finished", "The trusted build for this release has not completed yet; ask the agent for the build status, then reopen this page."));
     return sendHtml(response, 400, confirmationShell("Request rejected", "The decision could not be recorded."));
   }
+}
+
+/**
+ * Resolves the bearer of this request into a verified human session with
+ * publication authority over the release's site. The confirmation capability
+ * identifies the request but grants nothing: delegated agent sessions,
+ * foreign sites, and read-only principals are rejected here before any form
+ * or decision exists.
+ */
+async function requireHumanSession(options: McpHttpOptions, request: IncomingMessage, view: { tenantId: string; siteId: string }): Promise<{ principal?: { principalId?: string; issuer: string; subject: string }; error?: { status: number; title: string; body: string } }> {
+  const token = bearerToken(request.headers.authorization);
+  if (!token) {
+    return { error: { status: 401, title: "Human session required", body: "This confirmation records a human publication decision and requires your own logged-in session. Sign in to the authorization server and retry with your personal access token; the link the agent shared does not authorize the decision by itself." } };
+  }
+  let verified: VerifiedAccessToken;
+  try {
+    verified = await options.verifier.verify(token);
+  } catch {
+    return { error: { status: 401, title: "Human session required", body: "Your access token was rejected. Sign in to the authorization server again and retry with a fresh token." } };
+  }
+  let context: AuthorizationContext;
+  try {
+    context = options.resolveAuthorization ? await options.resolveAuthorization(verified) : authorizationContext(verified);
+  } catch {
+    return { error: { status: 403, title: "Not authorized", body: "Your session is not a member of the site this release belongs to." } };
+  }
+  if (context.principal.kind !== "human") {
+    return { error: { status: 403, title: "Not authorized", body: "A delegated agent session cannot record this decision; the confirmation must come from your own logged-in human session." } };
+  }
+  if (context.tenantId !== view.tenantId || context.siteId !== view.siteId) {
+    return { error: { status: 403, title: "Not authorized", body: "Your session belongs to another site; this confirmation is scoped to the release's site." } };
+  }
+  if (!effectivePermissions(context.layers).includes("content:publish")) {
+    return { error: { status: 403, title: "Not authorized", body: "Your session does not hold publication authority for this site." } };
+  }
+  return { principal: { principalId: context.principal.id, issuer: context.principal.issuer, subject: context.principal.subject } };
 }
 
 function confirmationShell(title: string, body: string): string {

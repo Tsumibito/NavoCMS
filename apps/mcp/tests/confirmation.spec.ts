@@ -51,7 +51,20 @@ test("confirmation page is accessible, noindex, and records the human decision o
   const token = preview.confirmationUrl.split("/confirmations/")[1]!;
   const server = createMcpHttpServer({
     service,
-    verifier: { verify: async () => { throw new Error("not called"); } },
+    // The browser session carries the human's own logged-in access token;
+    // the capability URL alone never authorizes the decision.
+    verifier: {
+      verify: async (token: string) => {
+        if (token !== "browser-human-session-token") throw new Error("unknown token");
+        return {
+          claims: { iss: "https://identity.example", sub: "publisher", aud: "https://cms.example.test/mcp", exp: Math.floor(Date.now() / 1000) + 3600 },
+          scopes: [...NAVOCMS_PERMISSIONS],
+          tenantId: site.tenantId,
+          siteId: site.siteId,
+          principal: { id: "principal-browser", kind: "human" as const, issuer: "https://identity.example", subject: "publisher" }
+        };
+      }
+    },
     resource: "https://cms.example.test/mcp",
     authorizationServers: ["https://identity.example.test"]
   });
@@ -59,7 +72,21 @@ test("confirmation page is accessible, noindex, and records the human decision o
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Test server did not bind a TCP port");
   const base = `http://127.0.0.1:${address.port}`;
+  // Emulate an authenticated browser session: the human's token is attached
+  // by the browser after its own interactive login.
+  await page.route("**/confirmations/**", (route) => {
+    const headers = { ...route.request().headers(), authorization: "Bearer browser-human-session-token" };
+    void route.continue({ headers });
+  });
   try {
+    // Without the session the capability page must not even render a form.
+    const anonymousContext = page.context();
+    const anonymousPage = await anonymousContext.newPage();
+    await anonymousPage.goto(`${base}/confirmations/${token}`);
+    await expect(anonymousPage.getByRole("heading", { name: "Human session required" })).toBeVisible();
+    expect(await anonymousPage.locator("form").count()).toBe(0);
+    await anonymousPage.close();
+
     await page.setViewportSize({ width: 840, height: 720 });
     await page.goto(`${base}/confirmations/${token}`);
     await expect(page.getByRole("heading", { name: "Confirm publication of this exact build" })).toBeVisible();
@@ -81,6 +108,8 @@ test("confirmation page is accessible, noindex, and records the human decision o
       releaseId: preview.releaseId, releaseHash: preview.releaseHash
     });
     expect(status).toMatchObject({ status: "confirmed" });
+    // The receipt carries the verified session reference, not just "someone".
+    expect((status as unknown as Record<string, unknown>).decidedByReference).toMatch(/^[a-f0-9]{64}$/);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

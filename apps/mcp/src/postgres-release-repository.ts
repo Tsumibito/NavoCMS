@@ -71,6 +71,8 @@ interface ConfirmationRow extends Record<string, unknown> {
   readonly receipt_hash: string | null;
   readonly receipt_expires_at: Date | string | null;
   readonly preview_expires_at?: Date | string;
+  readonly decided_by_principal_id?: string | null;
+  readonly decided_by_reference?: string | null;
   readonly revoked_at?: Date | string | null;
   readonly recorded?: boolean;
 }
@@ -156,7 +158,8 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
     return this.#database.withScope(nullScope(), async (client) => {
       const row = (await client.query<ConfirmationRow>(
         `SELECT release_id, tenant_id, site_id, release_hash, policy_version, decision_at,
-                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at, revoked_at
+                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at,
+                decided_by_principal_id, decided_by_reference, revoked_at
            FROM navocms.resolve_release_confirmation($1)`,
         [tokenHash]
       )).rows[0];
@@ -168,9 +171,11 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
     return this.#database.withScope(nullScope(), async (client) => {
       const row = (await client.query<ConfirmationRow>(
         `SELECT release_id, tenant_id, site_id, release_hash, policy_version, decision_at,
-                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at, recorded
-           FROM navocms.record_release_confirmation($1, $2, $3, $4, $5)`,
-        [tokenHash, decision.outputManifestDigest, decision.receiptHash, decision.receiptExpiresAt, decision.decidedAt]
+                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at,
+                decided_by_principal_id, decided_by_reference, recorded
+           FROM navocms.record_release_confirmation($1, $2, $3, $4, $5, $6, $7)`,
+        [tokenHash, decision.outputManifestDigest, decision.receiptHash, decision.receiptExpiresAt,
+          decision.decidedAt, decision.decidedByPrincipalId ?? null, decision.decidedByReference]
       )).rows[0];
       return row ? Object.freeze({ record: toConfirmation(row), recorded: row.recorded === true }) : undefined;
     });
@@ -180,7 +185,8 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
     return this.#database.withScope(databaseScope(context), async (client) => {
       const row = (await client.query<ConfirmationRow>(
         `SELECT release_id, tenant_id, site_id, release_hash, policy_version, decision_at,
-                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at, revoked_at
+                output_manifest_digest, receipt_hash, receipt_expires_at, preview_expires_at,
+                decided_by_principal_id, decided_by_reference, revoked_at
            FROM navocms.release_confirmations
           WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND release_hash = $4
           ORDER BY created_at DESC LIMIT 1`,
@@ -367,7 +373,9 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
       // checkpoint projection cannot be read.
       await client.query(
         `UPDATE navocms.workflow_runs SET current_step = 'rollback.pending', updated_at = now()
-          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'`,
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'
+            AND workflow_key = (SELECT c.workflow_key FROM navocms.release_candidates c
+                                 WHERE c.tenant_id = $1 AND c.site_id = $2 AND c.id = $3)`,
         [context.site.tenantId, context.site.siteId, releaseId]
       );
       return Object.freeze({ release: toRelease(release), current: toPublication(current), target: toPublication(target) });
@@ -520,6 +528,8 @@ function toConfirmation(row: ConfirmationRow): ConfirmationRecord {
     outputManifestDigest?: string;
     receiptHash?: string;
     receiptExpiresAt?: string;
+    decidedByPrincipalId?: string;
+    decidedByReference?: string;
     revokedAt?: string;
   } = {
     releaseId: row.release_id,
@@ -542,6 +552,12 @@ function toConfirmation(row: ConfirmationRow): ConfirmationRecord {
   }
   if (row.receipt_expires_at) {
     record.receiptExpiresAt = iso(row.receipt_expires_at);
+  }
+  if (row.decided_by_principal_id) {
+    record.decidedByPrincipalId = row.decided_by_principal_id;
+  }
+  if (row.decided_by_reference) {
+    record.decidedByReference = row.decided_by_reference;
   }
   if (row.revoked_at) {
     record.revokedAt = iso(row.revoked_at);
@@ -620,9 +636,11 @@ async function writePublishingRun(client: SqlClient, context: RepositoryContext,
 
 async function writeCheckpoint(client: SqlClient, context: RepositoryContext, releaseId: string, step: string, inputHash: string, output: object): Promise<void> {
   let run = (await client.query<{ id: string }>(
-    `SELECT id FROM navocms.workflow_runs
-      WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'
-      ORDER BY started_at DESC LIMIT 1`,
+    `SELECT r.id FROM navocms.workflow_runs r
+      WHERE r.tenant_id = $1 AND r.site_id = $2 AND r.release_id = $3 AND r.status = 'running'
+        AND r.workflow_key = (SELECT c.workflow_key FROM navocms.release_candidates c
+                               WHERE c.tenant_id = $1 AND c.site_id = $2 AND c.id = $3)
+      ORDER BY r.started_at DESC LIMIT 1`,
     [context.site.tenantId, context.site.siteId, releaseId]
   )).rows[0];
   if (!run) {
@@ -655,7 +673,9 @@ async function insertCheckpoint(client: SqlClient, context: RepositoryContext, r
 async function succeedRun(client: SqlClient, context: RepositoryContext, releaseId: string): Promise<void> {
   await client.query(
     `UPDATE navocms.workflow_runs SET status = 'succeeded', current_step = 'live.verified', completed_at = now(), updated_at = now()
-      WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'`,
+      WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'
+        AND workflow_key = (SELECT c.workflow_key FROM navocms.release_candidates c
+                             WHERE c.tenant_id = $1 AND c.site_id = $2 AND c.id = $3)`,
     [context.site.tenantId, context.site.siteId, releaseId]
   );
 }
@@ -664,7 +684,9 @@ async function failRun(client: SqlClient, context: RepositoryContext, releaseId:
   await client.query(
     `UPDATE navocms.workflow_runs SET status = 'failed', current_step = 'live.verification_failed',
             last_error_code = $4, completed_at = now(), updated_at = now()
-      WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'`,
+      WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND status = 'running'
+        AND workflow_key = (SELECT c.workflow_key FROM navocms.release_candidates c
+                             WHERE c.tenant_id = $1 AND c.site_id = $2 AND c.id = $3)`,
     [context.site.tenantId, context.site.siteId, releaseId, errorCode]
   );
 }

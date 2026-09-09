@@ -55,6 +55,8 @@ export interface ConfirmationRecord {
   readonly outputManifestDigest?: string;
   readonly receiptHash?: string;
   readonly receiptExpiresAt?: string;
+  readonly decidedByPrincipalId?: string;
+  readonly decidedByReference?: string;
   readonly revokedAt?: string;
 }
 
@@ -63,6 +65,9 @@ export interface ConfirmationDecision {
   readonly outputManifestDigest: string;
   readonly receiptHash: string;
   readonly receiptExpiresAt: string;
+  /** Hash-only reference of the verified human session that decided. */
+  readonly decidedByPrincipalId?: string;
+  readonly decidedByReference: string;
 }
 
 export interface PublicationRecord extends ReleaseProviderPublication {
@@ -213,6 +218,8 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     confirmation.outputManifestDigest = decision.outputManifestDigest;
     confirmation.receiptHash = decision.receiptHash;
     confirmation.receiptExpiresAt = decision.receiptExpiresAt;
+    if (decision.decidedByPrincipalId) confirmation.decidedByPrincipalId = decision.decidedByPrincipalId;
+    confirmation.decidedByReference = decision.decidedByReference;
     return Object.freeze({ record: freezeConfirmation(confirmation), recorded: true });
   }
 
@@ -367,6 +374,7 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
         confirmation.receiptHash === approval.confirmation!.receiptHash);
       if (!receipt || !receipt.decisionAt || receipt.revokedAt ||
         receipt.outputManifestDigest !== approval.confirmation.outputManifestDigest ||
+        approval.policyVersion !== receipt.policyVersion ||
         new Date(receipt.receiptExpiresAt ?? 0).getTime() <= Date.now()) {
         throw new McpEditingError("HUMAN_CONFIRMATION_REQUIRED", "A current independent human confirmation receipt is required for this release");
       }
@@ -385,6 +393,8 @@ interface MutableConfirmation {
   outputManifestDigest?: string;
   receiptHash?: string;
   receiptExpiresAt?: string;
+  decidedByPrincipalId?: string;
+  decidedByReference?: string;
   revokedAt?: string;
 }
 
@@ -400,6 +410,8 @@ function freezeConfirmation(confirmation: MutableConfirmation): ConfirmationReco
     ...(confirmation.outputManifestDigest ? { outputManifestDigest: confirmation.outputManifestDigest } : {}),
     ...(confirmation.receiptHash ? { receiptHash: confirmation.receiptHash } : {}),
     ...(confirmation.receiptExpiresAt ? { receiptExpiresAt: confirmation.receiptExpiresAt } : {}),
+    ...(confirmation.decidedByPrincipalId ? { decidedByPrincipalId: confirmation.decidedByPrincipalId } : {}),
+    ...(confirmation.decidedByReference ? { decidedByReference: confirmation.decidedByReference } : {}),
     ...(confirmation.revokedAt ? { revokedAt: confirmation.revokedAt } : {})
   });
 }
