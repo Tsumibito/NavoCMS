@@ -100,6 +100,9 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
    * re-execution a safe recomputation.
    */
   public async startBuild(repository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): Promise<PreviewBuildStatus> {
+    // A repeated start while this instance already executes the job is a
+    // no-op; the lease renewal keeps the ownership alive meanwhile.
+    if (this.#buildExecutors.has(release.id)) return { releaseId: release.id, status: "building" };
     const owned = await this.#acquireJob(repository, release);
     if (!owned) return { releaseId: release.id, status: "building" };
     this.#launchBuild(repository, release);
@@ -132,13 +135,27 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
   }
 
   /**
-   * Atomically claims the build job: inside one transaction, an active
-   * foreign lease returns false without writing anything; otherwise the
-   * running workflow row (with its durable checkpoint) and the lease are
-   * written together, closing the lost-job window before any build work.
+   * Atomically claims the build job. A transaction advisory lock on the job
+   * key serializes every claimant — including the very first one, where
+   * neither a lease nor a workflow row exists yet — so only one instance can
+   * observe "unclaimed". The unique partial index on workflow_runs is the
+   * database-level backstop: one build run per release, ever. An active
+   * foreign lease returns false without writing anything; an expired lease
+   * (or our own) is re-claimed together with the running workflow row and its
+   * durable checkpoint.
    */
   async #acquireJob(repository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): Promise<boolean> {
     return this.#database.withScope(serviceScope(repository), async (client) => {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`${repository.site.tenantId}:${repository.site.siteId}:${release.id}:${STAGING_ASTRO_BUILD_WORKFLOW}`]
+      );
+      const succeeded = (await client.query<{ id: string }>(
+        `SELECT id FROM navocms.workflow_runs
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4 AND status = 'succeeded'`,
+        [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
+      )).rows[0];
+      if (succeeded) return false;
       const lease = (await client.query<{ owner_token: string; leased_until: Date | string }>(
         `SELECT owner_token, leased_until FROM navocms.build_job_leases
           WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4 FOR UPDATE`,
@@ -147,12 +164,6 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
       if (lease && lease.owner_token !== this.#ownerToken && new Date(lease.leased_until).getTime() > Date.now()) {
         return false;
       }
-      const succeeded = (await client.query<{ id: string }>(
-        `SELECT id FROM navocms.workflow_runs
-          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4 AND status = 'succeeded'`,
-        [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
-      )).rows[0];
-      if (succeeded) return false;
       const existing = (await client.query<{ id: string }>(
         `SELECT id FROM navocms.workflow_runs
           WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4
@@ -185,6 +196,27 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
       );
       return true;
     });
+  }
+
+  /** Refreshes our lease while the executor is alive; a no-op once lost. */
+  async #renewLease(repository: RepositoryContext, releaseId: string): Promise<void> {
+    await this.#database.withScope(serviceScope(repository), (client) => client.query(
+      `UPDATE navocms.build_job_leases SET leased_until = $4, updated_at = now()
+        WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $5 AND owner_token = $6`,
+      [repository.site.tenantId, repository.site.siteId, releaseId,
+        new Date(Date.now() + this.#leaseTtlMs).toISOString(), STAGING_ASTRO_BUILD_WORKFLOW, this.#ownerToken]
+    )).catch(() => undefined);
+  }
+
+  /** True while this instance still owns the job's lease. */
+  async #stillOwns(repository: RepositoryContext, releaseId: string): Promise<boolean> {
+    const row = await this.#database.withScope(serviceScope(repository), async (client) => (
+      await client.query<{ owner_token: string }>(
+        `SELECT owner_token FROM navocms.build_job_leases
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4`,
+        [repository.site.tenantId, repository.site.siteId, releaseId, STAGING_ASTRO_BUILD_WORKFLOW]
+      )).rows[0]);
+    return row?.owner_token === this.#ownerToken;
   }
 
   async #releaseJob(repository: RepositoryContext, releaseId: string): Promise<void> {
@@ -234,16 +266,23 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
 
   #launchBuild(repository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): void {
     const executor = (async () => {
+      // Keep renewing the lease while this executor is alive so a long, live
+      // build is never mistaken for a crashed one and never runs twice.
+      const renewal = setInterval(() => { void this.#renewLease(repository, release.id); }, Math.max(1_000, Math.floor(this.#leaseTtlMs / 3)));
+      renewal.unref?.();
       try {
         const artifacts = this.#artifactStore(repository);
         const inputs = new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey);
         const builder = new TrustedAstroBuilder({ inputs, registrations: artifacts, context: repository, environmentKey: this.#environmentKey, runner: this.#runner });
+        // Registration is idempotent and drift-checked, so even a stale owner
+        // can only ever re-register the identical artifact.
         const record = await builder.buildAndRegister(this.#serviceContext(repository), {
           releaseId: release.id,
           releaseHash: release.releaseHash,
           releaseArtifactHash: release.artifactHash,
           idempotencyKey: `astro-build:${release.releaseHash}`
         });
+        if (!await this.#stillOwns(repository, release.id)) return;
         const summary = artifactSummaryFields(record);
         await this.#database.withScope(serviceScope(repository), async (client) => {
           await client.query(
@@ -262,6 +301,10 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         });
       } catch (error) {
         const errorCode = error instanceof McpEditingError ? error.code : "REVIEWED_ASTRO_BUILD_FAILED";
+        // A stale owner whose job was re-homed must never overwrite the new
+        // owner's outcome; the ownership check makes the terminal write a
+        // no-op for it.
+        if (!await this.#stillOwns(repository, release.id).catch(() => false)) return;
         await this.#database.withScope(serviceScope(repository), async (client) => {
           await client.query(
             `UPDATE navocms.workflow_runs SET status = 'failed', current_step = 'build.failed', last_error_code = $4, completed_at = now(), updated_at = now()
@@ -270,7 +313,9 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
           );
         }).catch(() => undefined);
       } finally {
+        clearInterval(renewal);
         this.#buildExecutors.delete(release.id);
+        // Only our own lease row is ever removed.
         await this.#releaseJob(repository, release.id);
       }
     })();

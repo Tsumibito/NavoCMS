@@ -34,14 +34,18 @@ store. Job state lives in `workflow_runs`/`workflow_checkpoints` (`build.request
 server resumes a `running` build job it finds without a live executor instead of creating a
 second job. *(Corrected after independent acceptance: "no live executor" must be judged against
 durable state, not a per-process map — two server instances share the database and would
-otherwise both resume one job.)* Job ownership is therefore leased in the database: acquiring a
-job atomically inserts the `running` run and a lease row (unique per release, TTL) in one
-transaction, so the durable checkpoint exists before any build work starts and a second instance
-sees a foreign active lease and stays idle. A crashed owner's lease expires, after which another
-instance may re-execute; re-execution is a safe recomputation (registration idempotency
-`astro-build:<releaseHash>`), never a duplicated publication. Publication workflow helpers filter
-by the release's own `workflow_key` so build-job rows are never advanced by publication
-checkpoints. Both deterministic builds complete before any review or approval.
+otherwise both resume one job.)* Job ownership is therefore leased in the database under a transaction advisory lock on the job
+key: the lock serializes every claimant — including the first two racers, where neither a lease
+nor a workflow row exists — and the running row (with its durable checkpoint) plus the lease
+row commit together inside the lock. A unique partial index on `workflow_runs` makes "one build
+run per release" a database invariant rather than a hope. A second live instance sees a foreign
+active lease and stays idle; a repeated start on the owning instance is a local no-op. While an
+executor is alive its lease is renewed, so a long live build is never mistaken for a crashed
+one; if ownership is still lost, a stale owner's terminal write is skipped by an
+ownership check, and re-execution after a genuine crash is a safe recomputation (registration
+idempotency `astro-build:<releaseHash>`), never a duplicated publication. Publication workflow
+helpers filter by the release's own `workflow_key` so build-job rows are never advanced by
+publication checkpoints. Both deterministic builds complete before any review or approval.
 
 Registration authority for runtime-initiated builds is the service principal. There is no MCP
 tool that registers reviewed artifacts; the path is reachable only in-process, so widening
@@ -51,16 +55,17 @@ tool that registers reviewed artifacts; the path is reachable only in-process, s
 
 `GET /previews/:token` keeps serving the Markdown proof artifact while the build runs; once the
 release has a registered reviewed artifact it serves the built `index` page instead. The
-response also issues a short-lived `HttpOnly` preview cookie that a same-origin asset relay
-(`/_astro/*`, plus any other absolute output path) uses to stream the remaining built files for
-that token. *(Corrected after independent acceptance: the original CSP forbade the page's own
-stylesheets and images, so the "real preview" rendered without design.)* The preview CSP now
-allows same-origin styles, images, and fonts (`style-src 'self' 'unsafe-inline'`,
-`img-src 'self' data:`, `font-src 'self' data:`) while keeping `default-src 'none'` — scripts
-and any foreign origin stay blocked. Asset relay requests resolve the token primarily from the
-`Referer` of the subresource (same-origin requests carry the full page path, so two previews in
-one browser stay isolated) and fall back to the preview cookie; HTML documents are never served
-through the relay, assets carry the same noindex/no-store headers, and traversal stays closed.
+response also serves the **entire built tree under the token's namespace**
+(`/previews/<token>/...`), and every root-relative URL in served HTML and CSS is rewritten at
+serve time to point into that namespace. *(Corrected after the second acceptance round: a
+shared preview cookie mixed two previews opened in one browser — the first page received the
+second page's stylesheet. A capability in the URL path needs no cookie and no Referer, both of
+which the preview's own `no-referrer`/cookie-sharing semantics defeat.)* The stored output
+bytes remain untouched — binding happens only at serve time — so publication still promotes
+the exact reviewed files. The preview CSP allows same-origin styles, images, and fonts
+(`style-src 'self' 'unsafe-inline'`, `img-src 'self' data:`, `font-src 'self' data:`) while
+keeping `default-src 'none'`; traversal and ascending paths 404, and assets carry the same
+noindex/no-store headers.
 
 ### 3. The human decision is an authorized independent session receipt
 
@@ -68,22 +73,30 @@ through the relay, assets carry the same noindex/no-store headers, and traversal
 URL as authority — a plain HTTP client could record the "human decision". A capability
 identifies the request; it never grants the authority to approve.)*
 
+*(Corrected again in the second acceptance round: accepting a bearer on the confirmation
+endpoints still let the agent's own MCP token record the "human decision" — the same bearer
+worked on `/mcp` and on the decision POST. A bearer proves nothing about a separate browser
+session; the login must be its own interactive flow.)*
+
 Preparing a release also mints a second, separate **confirmation capability** (256-bit, stored
 hashed) whose URL the agent hands to the human alongside the preview URL. The capability routes
-and identifies the confirmation; it grants nothing on its own. Recording a decision requires an
-**authenticated human session through the existing identity system**: the confirmation endpoints
-demand a verified bearer access token (`Authorization`), resolved exactly like an MCP request
-(same verifier and identity resolver), and accept it only when the resolved principal kind is
-`human` — a delegated agent session (`kind: "agent"`) is rejected even when it carries a human
-subject or publish permission — and the principal holds `content:publish` for the release's
-exact tenant/site (foreign sites are rejected before any form is served).
+and identifies the confirmation; it grants nothing on its own. Recording a decision requires a
+**server-side browser session that exists only after an interactive OIDC authorization-code
+login through the existing identity provider**: anonymous navigation redirects into the
+provider's authorization endpoint (PKCE S256, single-use state bound to a short-lived cookie);
+the callback exchanges the code (client credentials + verifier), verifies the returned token
+through the same verifier and identity resolver as MCP, rejects non-human identities, and
+creates an `HttpOnly`/`SameSite=Lax` session cookie whose credential never appears in any MCP
+output. Authorization bearers are not accepted on confirmation endpoints and cannot be
+exchanged for a session, so an agent's working token cannot record the decision. At decision
+time the session must still resolve to a `human` principal holding `content:publish` for the
+release's exact tenant/site. This is not a second identity platform: the provider, its client
+registration, and its login UI stay as-is — the deployment only registers one extra
+confidential client (settings in the submission runbook).
 
 The confirmation page is rendered by NavoCMS (not part of the built output): it shows the release
 hash, the output manifest digest, file count/bytes, policy version, expiry, and the decided-by
-reference, and contains one form. Without a bearer the page renders a login instruction instead
-of a form; interactive browser login against the authorization server is the operator-side
-prerequisite (a runbook item for the accepting architect). This design deliberately does not
-implement a second identity platform.
+reference, and contains one CSRF-protected form.
 
 Submitting that form is the decision. The server computes the output manifest digest itself
 from the registered artifact — the form never carries trust-bearing values — and records an

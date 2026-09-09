@@ -74,6 +74,13 @@ CREATE POLICY site_scope ON navocms.build_job_leases TO navocms_app
 REVOKE ALL ON navocms.build_job_leases FROM PUBLIC, navocms_plugin;
 GRANT SELECT, INSERT, UPDATE, DELETE ON navocms.build_job_leases TO navocms_app;
 
+-- One build job per release is a database-level invariant: without this
+-- partial unique index two racing claimants could each insert their own
+-- running workflow row before either lease existed.
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_runs_single_build_run_idx
+  ON navocms.workflow_runs (tenant_id, site_id, release_id)
+  WHERE workflow_key = 'navocms.staging-astro.build.v1';
+
 CREATE INDEX IF NOT EXISTS release_confirmations_open_idx
   ON navocms.release_confirmations (tenant_id, site_id, release_id, release_hash)
   WHERE decision_at IS NOT NULL AND revoked_at IS NULL;

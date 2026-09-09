@@ -1,8 +1,21 @@
 # Sprint 8.2 submission — Настоящий preview и проверяемое подтверждение
 
-Исполнитель: субагент Sprint 8.2. Статус: `submitted` после корректирующего цикла (первая сдача
-вернула три блокера и одно замечание по коду; все закрыты) — приёмка, staging-деплой, реальное
-решение владельца и обновление статуса остаются за принимающим архитектором.
+Исполнитель: субагент Sprint 8.2. Статус: `submitted` после второго корректирующего цикла
+(первая приёмка: три блокера + замечание по коду; вторая приёмка head `9b4f49e`: три оставшихся
+P1 — все закрыты) — приёмка, staging-деплой, реальное решение владельца и обновление статуса
+остаются за принимающим архитектором.
+
+## Второй корректирующий цикл (head `9b4f49e` → текущий)
+
+| # | Дефект повторной приёмки | Корень | Исправление | Evidence |
+| --- | --- | --- | --- | --- |
+| P1-A | Один и тот же MCP bearer работал на `/mcp` и записывал «Decision recorded»; реального входа не было — тест подставлял Authorization вручную; отсутствие `principal_kind` в токене по умолчанию считалось human | Bearer на confirmation-эндпоинтах не отличим от MCP-токена; «войти в IdP» сам по себе не добавляет заголовок в навигацию/form POST | Минимальный **самостоятельный OIDC authorization-code flow** через существующий провайдер: анонимная навигация → 302 в `/authorize` (PKCE S256, одноразовый state в short-lived cookie) → callback обменивает code (client credentials + verifier) → токен проверяется тем же verifier/identity resolver, что и MCP → отклонение не-human identity → server-side session (`HttpOnly`, `SameSite=Lax`, credential никогда не в MCP-выводе). **Bearer на confirmation-эндпоинтах не принимается и не обменивается на сессию.** На момент решения сессия должна резолвиться в `human` principal с `content:publish` на точном tenant/site. Новая identity platform не создаётся — деплой регистрирует один confidential client (настройки в runbook) | confirmation.spec.ts: анонимная навигация ведёт в `/authorize` c PKCE (проверен redirect-chain); полный браузерный login → форма → клик → «Decision recorded» **без инъекции заголовков и setExtraHTTPHeaders**; агентная identity отклоняется на login («Sign-in rejected», ноль форм); повторная доставка безопасна; http.test.ts: bearer работает на `/mcp` (200) но form → 302/503, decision POST → 401; state replay → 400; PKCE verifier проверяется fake-IdP |
+| P1-B | Два preview в одном контексте смешивали CSS: `Referrer-Policy: no-referrer` ломал Referer-механику, общий cookie указывал на последний preview | Адресация ресурсов через cookie/Referer ненадёжна по построению | Весь built-вывод обслуживается **в namespace `/previews/<token>/...`**, а корень-относительные URL в отдаваемых HTML и CSS (`href`, `src`, `srcset`, `url(...)`) переписываются на лету в этот namespace. Общий preview-cookie удалён полностью; stored-байты не меняются — публикация продвигает точные файлы. `no-referrer` сохранён | preview-render.spec.ts: точный repro приёмки — **один context, две страницы, задержанный CSS первой** — alpha `rgb(1,2,3)`, beta `rgb(4,5,6)`; прямой запрос ассета по namespace отдаёт байты своего manifest; srcset и css `url()` биндятся; `../` → 404; http.test.ts: отсутствует `set-cookie`, не-uuid токены → 404 |
+| P1-C | Гонка первого захвата lease: `SELECT FOR UPDATE` не блокирует отсутствующую строку; две транзакции вставляли по workflow run; `ON CONFLICT` перезаписывал первого владельца; повторный start дублировал executor; stale owner мог перезаписать результат | Сериализация только по существующим строкам | `pg_advisory_xact_lock(hashtextextended(job-key))` сериализует всех претендентов, включая первый захват; **unique partial index** на `workflow_runs (tenant, site, release) WHERE workflow_key = 'navocms.staging-astro.build.v1'` делает «один build-run на релиз» инвариантом БД (0013 ещё не выпущена — индекс добавлен в неё); повторный start при живом локальном executor — no-op; lease renewals (TTL/3) держат живую сборку; терминальная запись и `releaseJob` проверяют owner_token — stale owner не может перезаписать результат нового владельца | postgres-repository.integration.test.ts: **два экземпляра стартуют ранее отсутствующий job одновременно** (`Promise.all`) — ровно один run, один lease, runner второго экземпляра ни разу не вызван; повторный start ×3 → runner вызван 1 раз; после reclaim stale-owner не меняет `last_error_code` нового владельца; существующий re-home тест сохранён |
+
+Модель доверия ADR 0026 уточнена в третий раз: сессия существует только после интерактивного
+OIDC-логина; bearer никогда не принимается и не обменивается; receipt доказывает сессию с
+verified human identity данного сайта в окне действия, не физический клик.
 
 ## Корректирующий цикл (changes required → resubmitted)
 
@@ -94,8 +107,8 @@ secrets/roles/WorkOS/Coolify/Pages/R2 — у принимающего.
 | Проверка | Команда / место | Результат |
 | --- | --- | --- |
 | Полный гейт | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` — полный чистый прогон корректирующего head (fresh install 0001→0013; upgrade-шаг 0012→0013 выполняется внутри той же последовательности) | PASS (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удалена. Два промежуточных не-зелёных прогона в этой итерации — гонка самого нового lease-теста на удалённой БД (TTL 400 мс короче сетевых round trips); тест переписан детерминированно (истечение lease имитируется SQL-UPDATE), prod-код не менялся |
-| Vitest unit+integration | входит в Neon-прогон (`NAVOCMS_NEON_TEST_RUN=true`) | **237/237 passed, 39 files, 0 skipped, 0 failed** в чистом прогоне — включая новые session/policy/lease regression-тесты и двухэкземплярный PostgreSQL lease-тест |
-| Playwright + axe | входит в `pnpm check` | **9/9 passed** (новые: реальный рендеринг preview с computed style/натуральной шириной изображения/блокировкой скриптов; изоляция двух preview; human-session guard на confirmation flow) |
+| Vitest unit+integration | входит в Neon-прогон (`NAVOCMS_NEON_TEST_RUN=true`) | счётчики чистого прогона фиксируются ниже; включает новые session/namespace/lease regression-тесты и двухэкземплярные PostgreSQL lease-тесты (гонка первого захвата, no-op повтор, stale-owner guard) |
+| Playwright + axe | входит в `pnpm check` | **10/10 passed**: браузерный OIDC login без инъекций заголовков (аноним → `/authorize` с PKCE → callback → форма → клик → «Decision recorded»), агентная identity отклоняется на login, точный repro изоляции preview (один context, две страницы, задержанный CSS), srcset/css-url биндинг, computed style/натуральная ширина/блокировка скриптов |
 | SQL isolation | 5 suites внутри помощника | 5/5 «Isolation passed» в каждом прогоне |
 | CI GitHub Actions | автоматически на PR; итоговый зелёный run на финальном SHA приводится в финальном ответе исполнителя | принимающий подтверждает CI на merge/head SHA |
 
@@ -150,22 +163,31 @@ REPLACE не может изменить тип возврата `resolve_releas
    `confirmationUrl` + `build: {status}`; `preview_build_status` до готовности → `building`,
    после → `ready` c `outputManifestDigest`; `GET previewUrl` — настоящая страница с CSS;
    `GET confirmationUrl` — сводка сборки.
-4. **Реальное решение владельца:** владелец входит в authorization server в своём браузере
-   (interactive login; нужен провайдер, выпускающий человеку bearer со scope `content:publish` —
-   настройка на стороне архитектора), открывает confirmation-ссылку, проверяет digest и нажимает
-   «Confirm this build». Без входа страница показывает инструкцию логина и не содержит формы;
-   ссылка, открытая агентом или обычным fetch, решение записать не может. Агент видит
-   `release_confirm_status: confirmed` с `decidedByReference`.
-5. **Approval + publish:** `release_approve` (human bearer) — без решения владельца падает
+4. **Внешние настройки для браузерного логина (выполняет архитектор до приёмки):** в identity
+   provider зарегистрировать confidential client (например `navocms-confirmation`) с
+   `redirect_uri = <public CMS origin>/confirmations/callback` (точный origin, без trailing
+   slash) и grant `authorization_code` + PKCE S256; провайдер должен выпускать id/access токен,
+   в котором резолвится `principal_kind: human` и права `content:publish` на staging-site.
+   Затем задать переменные окружения деплоя (значения — в секретах, не в чате):
+   `NAVOCMS_CONFIRMATION_CLIENT_ID`, `NAVOCMS_CONFIRMATION_CLIENT_SECRET`,
+   `NAVOCMS_CONFIRMATION_AUTHORIZATION_ENDPOINT` (`<issuer>/authorize`),
+   `NAVOCMS_CONFIRMATION_TOKEN_ENDPOINT` (`<issuer>/token`) и перезапустить контейнер. Без этих
+   переменных confirmation-страница честно показывает «Login unavailable» (503).
+5. **Реальное решение владельца:** владелец открывает confirmation-ссылку в своём браузере —
+   анонимная навигация уводит в логин провайдера; после входа и проверки digest он нажимает
+   «Confirm this build». Ссылка, открытая агентом или обычным fetch, решение записать не может:
+   bearer не принимается, сессии нет. Агент видит `release_confirm_status: confirmed` с
+   `decidedByReference`.
+6. **Approval + publish:** `release_approve` (human bearer) — без решения владельца падает
    `HUMAN_CONFIRMATION_REQUIRED`; после решения — approval, затем `release_publish` →
    `published`; build runner не вызывается (в логах деплоя нет новых сборок Pages до публикации —
    deployment создаётся один раз и находится по маркеру).
-6. **Restart/reconcile:** перезапустить контейнер между шагами; `preview_build_status` возобновляет
+7. **Restart/reconcile:** перезапустить контейнер между шагами; `preview_build_status` возобновляет
    job; `release_reconcile` после interruption публикации доводит до `published` без второго
    provider-эффекта.
-7. **Rollback:** `release_rollback` возвращает предыдущую верифицированную публикацию, обе истории
+8. **Rollback:** `release_rollback` возвращает предыдущую верифицированную публикацию, обе истории
    сохраняются.
-8. **Ожидаемые отказы:** чужой/просроченный/поддельный confirmation токен — 404/410; digest
+9. **Ожидаемые отказы:** чужой/просроченный/поддельный confirmation токен — 404/410; digest
    изменение сборки после решения — `RELEASE_DECISION_STALE`; публикация без зарегистрированного
    артефакта — `REVIEWED_ASTRO_ARTIFACT_NOT_BUILT`.
 

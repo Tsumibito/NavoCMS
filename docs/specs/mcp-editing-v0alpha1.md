@@ -132,32 +132,35 @@ Astro build — a job under the service principal, checkpointed in `workflow_run
 digest, or `failed` with its error code; a restarted server resumes a running job without creating a
 second one, and both deterministic builds finish before any review.
 
-`GET /previews/:token` serves the Markdown proof artifact while the build runs and the exact built
-page afterwards, with a short-lived `HttpOnly` capability cookie that lets same-origin absolute
-asset URLs (for example `/_astro/*`) stream the remaining immutable files of the same token. The
-preview CSP permits same-origin styles, images, and fonts (`style-src 'self' 'unsafe-inline'`,
-`img-src 'self' data:`, `font-src 'self' data:'`) so the real design renders, while
-`default-src 'none'` keeps scripts and foreign origins blocked. Asset requests resolve the token
-primarily from the same-origin `Referer` of the subresource, so two previews open in one browser
-profile stay isolated; the cookie is only the fallback. The relay never serves HTML documents,
-and asset responses carry the same noindex/no-store headers.
+`GET /previews/:token` serves the Markdown proof artifact while the build runs and the exact
+built tree afterwards: the whole output lives under the token's namespace
+(`/previews/<token>/...`), and root-relative URLs in served HTML and CSS (`href`, `src`,
+`srcset`, `url(...)`) are rewritten at serve time into that namespace, so every resource is
+addressed by the same capability and two previews in one browser profile can never borrow each
+other's files. Stored output bytes are untouched; publication promotes the exact reviewed
+files. The preview CSP permits same-origin styles, images, and fonts
+(`style-src 'self' 'unsafe-inline'`, `img-src 'self' data:`, `font-src 'self' data:`) so the
+real design renders, while `default-src 'none'` keeps scripts and foreign origins blocked;
+traversal and ascending paths 404; asset responses carry the same noindex/no-store headers.
 
 The human decision is recorded through the separate confirmation capability in an authenticated
-independent session. The capability URL routes and identifies the confirmation but grants
-nothing: both the confirmation page and the decision endpoint require a verified bearer access
-token resolved through the same identity system as MCP requests, and accept it only when the
-resolved principal kind is `human` (a delegated agent session is rejected even with a human
-subject), the session belongs to the release's exact tenant/site, and it holds
-`content:publish`. Without such a session the page renders a login instruction instead of a
-form; interactive browser login against the authorization server is the operator-side
-prerequisite. The page renders the release hash, the output manifest digest, file count, byte
-total, policy version, expiry, and the decided-by reference; the server derives the digest from
-the registered artifact, never from the browser request. The receipt (`release_confirmations`,
-ordered migration 0013) is append-once, bound to tenant, site, release, release hash, output
-manifest digest, policy version, **decided-by principal reference**, decision time, and expiry,
-and is CSRF-protected (double-submit cookie, `SameSite=Strict`, cross-origin `Origin`
-rejection). Re-delivering an accepted decision is a safe no-op. The MCP bearer can read the
-outcome via `release_confirm_status` but can never record it.
+independent session created by an interactive OIDC authorization-code login (PKCE S256,
+single-use state, dedicated confidential client on the existing identity provider). Anonymous
+navigation redirects into the provider's authorization endpoint; the callback exchanges the
+code, verifies the returned token through the same verifier and identity resolver as MCP,
+rejects non-human identities, and creates an `HttpOnly` server-side session cookie whose
+credential never appears in MCP output. Authorization bearers are not accepted on confirmation
+endpoints — the same token that works on `/mcp` cannot read the form or record a decision. At
+decision time the session must still resolve to a `human` principal with `content:publish` on
+the release's exact tenant/site. The page renders the release hash, the output manifest digest,
+file count, byte total, policy version, expiry, and the decided-by reference; the server derives
+the digest from the registered artifact, never from the browser request. The receipt
+(`release_confirmations`, ordered migration 0013) is append-once, bound to tenant, site,
+release, release hash, output manifest digest, policy version, **decided-by principal
+reference**, decision time, and expiry, and is CSRF-protected (double-submit cookie,
+`SameSite=Strict`, cross-origin `Origin` rejection). Re-delivering an accepted decision is a
+safe no-op. The MCP bearer can read the outcome via `release_confirm_status` but can never
+record it.
 
 Approval stores the exact release hash **and copies the confirmation receipt** (its hash, the
 output manifest digest, and the policy version) into the durable approval evidence. A built
@@ -203,15 +206,17 @@ new bounds.
 
 Sprint 8.2 (same v0alpha1 boundary): `release_approve` no longer accepts the MCP bearer's
 `kind: "human"` claim as the human decision. A built release requires a receipt recorded by an
-authenticated independent human session (capability URL + verified bearer of a `human` principal
-with publication authority on the release's site), and publication promotes the registered
-immutable output without any build invocation. A policy-version change after the decision makes
-it stale. Clients that previously approved directly now receive `HUMAN_CONFIRMATION_REQUIRED`
-and must hand the confirmation capability URL to the human. `preview_build_status` and
-`release_confirm_status` are additive. Proof-only pipelines without a staging runtime keep the
-previous behavior. Pre-review build jobs are owned through a durable database lease, so multiple
-server instances never duplicate a job and a crashed owner's job is re-homed only after its
-lease expires.
+interactive browser session that exists only after an OIDC authorization-code login on the
+existing identity provider; MCP bearer tokens are not accepted on confirmation endpoints and
+cannot be exchanged for a session. Publication promotes the registered immutable output without
+any build invocation. A policy-version change after the decision makes it stale. Clients that
+previously approved directly now receive `HUMAN_CONFIRMATION_REQUIRED` and must hand the
+confirmation capability URL to the human. `preview_build_status` and `release_confirm_status`
+are additive. Proof-only pipelines without a staging runtime keep the previous behavior.
+Pre-review build jobs are owned through a durable database lease acquired under a transaction
+advisory lock with a unique per-release build run, so multiple server instances never duplicate
+a job — including on the first concurrent claim — and a crashed owner's job is re-homed only
+after its lease expires; a stale owner cannot overwrite the new owner's recorded outcome.
 
 Post-acceptance corrections to the same sprint: `content_get` additionally bounds its metadata
 projection to 4,000 serialized characters (reporting omissions instead of truncating values

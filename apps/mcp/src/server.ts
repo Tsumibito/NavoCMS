@@ -172,6 +172,16 @@ const verifier = new OidcJwtVerifier({
   ...(organizationId ? { organizationId } : {}),
   jwks: createRemoteJwksProvider(jwksUrl)
 });
+// Confirmation browser login: a dedicated confidential OIDC client used only
+// by the independent human-confirmation session. Never used by MCP clients.
+const confirmationLogin = process.env.NAVOCMS_CONFIRMATION_CLIENT_ID && process.env.NAVOCMS_CONFIRMATION_CLIENT_SECRET
+  ? {
+    clientId: process.env.NAVOCMS_CONFIRMATION_CLIENT_ID,
+    clientSecret: process.env.NAVOCMS_CONFIRMATION_CLIENT_SECRET,
+    authorizationEndpoint: required("NAVOCMS_CONFIRMATION_AUTHORIZATION_ENDPOINT"),
+    tokenEndpoint: required("NAVOCMS_CONFIRMATION_TOKEN_ENDPOINT")
+  }
+  : undefined;
 const server = createMcpHttpServer({
   service,
   ...(media ? { media } : {}),
@@ -179,6 +189,7 @@ const server = createMcpHttpServer({
   resource,
   authorizationServers: [issuer],
   scopes: ["openid"],
+  ...(confirmationLogin ? { confirmationLogin } : {}),
   ...(identityResolver ? { resolveAuthorization: (token) => identityResolver.resolve(token) } : {}),
   ...(database ? {
     readiness: async () => {

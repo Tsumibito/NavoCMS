@@ -156,6 +156,10 @@ class RenderOperations implements StagingAstroOperations {
   readonly #outputs = new Map<string, Readonly<Record<string, string>>>();
   readonly #css = new Map<string, string>();
   public setCss(slug: string, css: string): void { this.#css.set(slug, css); }
+  public appendOutput(releaseId: string, extra: Readonly<Record<string, string>>): void {
+    const base = this.#outputs.get(releaseId) ?? {};
+    this.#outputs.set(releaseId, Object.freeze({ ...base, ...extra }));
+  }
   public async prepare(): Promise<AstroRenderInput> {
     return { anchors: { content: `sha256:${"a".repeat(64)}`, design: `sha256:${"b".repeat(64)}`, delivery: `sha256:${"c".repeat(64)}`, governance: `sha256:${"d".repeat(64)}` } } as AstroRenderInput;
   }

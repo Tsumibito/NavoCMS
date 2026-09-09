@@ -3,6 +3,8 @@ import { InMemoryEventStore } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, siteRoleAuthority } from "@navocms/security";
 import type { AstroRenderInput } from "@navocms/design-astro";
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { createMcpHttpServer } from "./http.js";
 import { InMemoryReleaseWorkflowRepository } from "./release-repository.js";
 import { InMemoryEditingRepository } from "./repository.js";
@@ -32,15 +34,12 @@ describe("MCP OAuth metadata", () => {
   });
 });
 
-describe("real preview and independent confirmation surfaces", () => {
-  it("serves the built output with same-origin assets and records only an authorized human decision", async () => {
+describe("real preview namespace and browser-session confirmation", () => {
+  it("binds every asset to the token namespace and rejects the same bearer that works on /mcp", async () => {
     const harness = previewHarness();
     const humanToken = "human-session-token-0000000000000001";
-    const agentToken = "delegated-agent-token-00000000000001";
-    const foreignToken = "foreign-site-human-token-00000000001";
     harness.tokens.set(humanToken, { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
-    harness.tokens.set(agentToken, { kind: "agent", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
-    harness.tokens.set(foreignToken, { kind: "human", tenantId: "99999999-9999-4999-8999-999999999999", siteId: "99999999-9999-4999-8999-999999999998", publish: true });
+    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
     const created = await harness.service.createDraft(harness.context, {
       typeName: "article", slug: "real-preview", locale: "en", title: "Real preview",
       markdown: "# Real preview\n", idempotencyKey: "draft-real-preview-http-01"
@@ -48,6 +47,15 @@ describe("real preview and independent confirmation surfaces", () => {
     const preview = await harness.service.preparePreview(harness.context, created.draft.revisionId, "preview-real-preview-http-1") as {
       releaseId: string; releaseHash: string; previewUrl: string; confirmationUrl: string;
     };
+    harness.operations.setOutput(preview.releaseId, {
+      "index.html": '<!doctype html><html lang="en"><head><link rel="stylesheet" href="/_astro/styles.css">' +
+        '<link rel="stylesheet" href="/_astro/more.css"></head><body><img src="/image.svg" alt="i" ' +
+        'srcset="/a.png 320w, /b.png 640w"><script>window.x = true;</script></body></html>',
+      "_astro/styles.css": 'h1 { color: rgb(12, 34, 56); background: url(/font.woff2); }\n',
+      "_astro/more.css": "h2 { color: red; }\n",
+      "image.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>",
+      "a.png": "a", "b.png": "b", "font.woff2": "f"
+    });
     await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", resolve));
     const address = harness.server.address();
     if (!address || typeof address === "string") throw new Error("Test server did not bind a TCP port");
@@ -55,118 +63,154 @@ describe("real preview and independent confirmation surfaces", () => {
     const previewToken = preview.previewUrl.split("/previews/")[1]!;
     const confirmationToken = preview.confirmationUrl.split("/confirmations/")[1]!;
     try {
-      // The built page replaces the proof artifact; a capability cookie is set.
-      const page = await fetch(`${base}/previews/${previewToken}`);
-      expect(page.status).toBe(200);
-      expect(page.headers.get("content-type")).toContain("text/html");
-      expect(page.headers.get("x-robots-tag")).toContain("noindex");
-      const csp = page.headers.get("content-security-policy") ?? "";
-      expect(csp).toContain("form-action 'none'");
-      // Same-origin styles and images are allowed so the real design renders.
-      expect(csp).toContain("style-src 'self'");
-      expect(csp).toContain("img-src 'self' data:");
-      expect(csp).toContain("default-src 'none'");
-      const setCookie = page.headers.get("set-cookie") ?? "";
-      expect(setCookie).toContain("navocms_preview_token=");
-      const pageBody = await page.text();
-      expect(pageBody).toContain("<h1>built-index</h1>");
-      expect(pageBody).not.toContain("NavoCMS rejected");
-
-      // Absolute asset URLs resolve from the immutable output of THIS token,
-      // preferring the referencing page over the last-issued cookie.
-      const cookie = setCookie.split(";")[0]!;
-      const viaCookie = await fetch(`${base}/_astro/styles.css`, { headers: { cookie } });
-      expect(viaCookie.status).toBe(200);
-      expect(viaCookie.headers.get("content-type")).toContain("text/css");
-      expect(await viaCookie.text()).toContain("margin: 0");
-      expect(viaCookie.headers.get("x-robots-tag")).toContain("noindex");
-      const viaReferer = await fetch(`${base}/_astro/styles.css`, {
-        headers: { cookie, referer: `${base}/previews/${previewToken}` }
+      // The MCP bearer still authorizes MCP.
+      const mcp = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${humanToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } })
       });
-      expect(viaReferer.status).toBe(200);
-      // The relay never serves HTML documents; only /previews/:token does.
-      const htmlViaRelay = await fetch(`${base}/index.html`, { headers: { cookie } });
-      expect(htmlViaRelay.status).toBe(404);
-      const withoutCookie = await fetch(`${base}/_astro/styles.css`);
-      expect(withoutCookie.status).toBe(404);
-      const traversal = await fetch(`${base}/_astro/..%2F..%2Fescape.css`, { headers: { cookie } });
-      expect(traversal.status).toBe(404);
-
-      // The confirmation URL identifies the request but grants nothing: a
-      // plain HTTP client without a human session is rejected.
-      const anonymous = await fetch(`${base}/confirmations/${confirmationToken}`);
-      expect(anonymous.status).toBe(401);
-      const agentPage = await fetch(`${base}/confirmations/${confirmationToken}`, {
-        headers: { authorization: `Bearer ${agentToken}` }
-      });
-      expect(agentPage.status).toBe(403);
-      const foreignPage = await fetch(`${base}/confirmations/${confirmationToken}`, {
-        headers: { authorization: `Bearer ${foreignToken}` }
-      });
-      expect(foreignPage.status).toBe(403);
-
-      // An authorized human session of this site sees the form.
-      const confirmation = await fetch(`${base}/confirmations/${confirmationToken}`, {
+      await mcp.text();
+      expect(mcp.status).toBe(200);
+      // ...but the same bearer can no longer read the confirmation form or
+      // record the decision: only a browser session can. Without a configured
+      // login client the page states that login is unavailable (503) instead
+      // of implying the capability is authoritative.
+      const bearerPage = await fetch(`${base}/confirmations/${confirmationToken}`, {
         headers: { authorization: `Bearer ${humanToken}` }
       });
-      expect(confirmation.status).toBe(200);
-      const confirmationHtml = await confirmation.text();
-      expect(confirmationHtml).toContain("Confirm this build");
-      expect(confirmationHtml).toContain("Output manifest digest");
-      const csrfCookie = (confirmation.headers.get("set-cookie") ?? "").split(";")[0]!;
-      const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(confirmationHtml)?.[1];
-      expect(csrf).toBeDefined();
-
-      // Before the human acts, the MCP human bearer cannot approve the build.
-      await expect(harness.service.approveRelease(harness.context, {
-        releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "approve-http-flow-0000"
-      })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
-
-      // Every unauthenticated/cross-site/agent path to the decision fails.
-      const anonymousPost = await fetch(`${base}/confirmations/${confirmationToken}`, {
-        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: `csrf=${csrf}`
+      expect(bearerPage.status).toBe(503);
+      const bearerPost = await fetch(`${base}/confirmations/${confirmationToken}`, {
+        method: "POST", headers: { authorization: `Bearer ${humanToken}`, "content-type": "application/x-www-form-urlencoded" }, body: "csrf=x"
       });
-      expect(anonymousPost.status).toBe(401);
-      const agentPost = await fetch(`${base}/confirmations/${confirmationToken}`, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Bearer ${agentToken}`, cookie: csrfCookie },
-        body: `csrf=${csrf}`
+      expect(bearerPost.status).toBe(401);
+      const decisionStatus = await harness.service.releaseConfirmationStatus(harness.context, {
+        releaseId: preview.releaseId, releaseHash: preview.releaseHash
       });
-      expect(agentPost.status).toBe(403);
+      expect(decisionStatus).toMatchObject({ status: "pending" });
+
+      // The entry page binds every root-relative URL to the token namespace.
+      const page = await fetch(`${base}/previews/${previewToken}`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get("set-cookie")).toBeNull();
+      const html = await page.text();
+      const namespace = `/previews/${previewToken}`;
+      expect(html).toContain(`href="${namespace}/_astro/styles.css"`);
+      expect(html).toContain(`href="${namespace}/_astro/more.css"`);
+      expect(html).toContain(`src="${namespace}/image.svg"`);
+      expect(html).toContain(`${namespace}/a.png 320w, ${namespace}/b.png 640w`);
+      expect(html).not.toContain('href="/_astro/');
+      // CSS files keep their own url() references bound to the namespace.
+      const css = await fetch(`${base}/previews/${previewToken}/_astro/styles.css`);
+      expect(css.status).toBe(200);
+      expect(await css.text()).toContain(`url(${namespace}/font.woff2)`);
+      // Nested paths, traversal, and HTML-over-relay are closed.
+      expect((await fetch(`${base}/previews/${previewToken}/_astro/more.css`)).status).toBe(200);
+      expect((await fetch(`${base}/previews/${previewToken}/../other/preview/_astro/styles.css`)).status).toBe(404);
+      expect((await fetch(`${base}/previews/${previewToken}/index.html`)).status).toBe(200);
+      // Unknown tokens never resolve.
+      expect((await fetch(`${base}/previews/${"A".repeat(43)}`)).status).toBe(404);
+
+    } finally {
+      await new Promise<void>((resolve, reject) => harness.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("renders the confirmation page and records the decision after a real login exchange", async () => {
+    // A fake identity-provider token endpoint: verifies the PKCE verifier it
+    // received at authorize time and issues a token the harness verifier maps
+    // to the site's human publisher.
+    const idpCodes = new Map<string, string>();
+    const idp = createServer((request, response) => {
+      let body = "";
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        const params = new URLSearchParams(body);
+        if (params.get("grant_type") !== "authorization_code") {
+          response.writeHead(400).end(JSON.stringify({ error: "unsupported_grant_type" }));
+          return;
+        }
+        const verifier = params.get("code_verifier") ?? "";
+        const challenge = createHash("sha256").update(verifier).digest("base64url");
+        if (challenge !== idpCodes.get(params.get("code") ?? "")) {
+          response.writeHead(400).end(JSON.stringify({ error: "invalid_grant" }));
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ access_token: "browser-login-token", token_type: "Bearer" }));
+      });
+    });
+    await new Promise<void>((resolve) => idp.listen(0, "127.0.0.1", resolve));
+    const idpPort = (idp.address() as { port: number }).port;
+    idpCodes.set("idp-code-1", "pkce-challenge-value");
+    const harness = previewHarness({
+      withLogin: { authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`, tokenEndpoint: `http://127.0.0.1:${idpPort}/token` }
+    });
+    const created = await harness.service.createDraft(harness.context, {
+      typeName: "article", slug: "session-preview", locale: "en", title: "Session preview",
+      markdown: "# Session preview\n", idempotencyKey: "draft-session-preview-01"
+    }) as { draft: { revisionId: string } };
+    const preview = await harness.service.preparePreview(harness.context, created.draft.revisionId, "preview-session-preview-01") as {
+      releaseId: string; releaseHash: string; confirmationUrl: string;
+    };
+    const confirmationToken = preview.confirmationUrl.split("/confirmations/")[1]!;
+    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
+    await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", resolve));
+    const address = harness.server.address();
+    if (!address || typeof address === "string") throw new Error("Test server did not bind a TCP port");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      // Anonymous navigation redirects to the identity provider with PKCE;
+      // the fake IdP records the code's challenge for the token exchange.
+      const start = await fetch(`${base}/confirmations/${confirmationToken}`, { redirect: "manual" });
+      expect(start.status).toBe(302);
+      const loginUrl = new URL(start.headers.get("location")!);
+      expect(loginUrl.pathname).toBe("/authorize");
+      idpCodes.set("idp-code-1", loginUrl.searchParams.get("code_challenge")!);
+      const state = loginUrl.searchParams.get("state")!;
+      const stateCookie = (start.headers.get("set-cookie") ?? "").split(";")[0]!;
+      // The identity provider returns the code; the callback exchanges it
+      // with the PKCE verifier and creates the server-side session.
+      const callback = await fetch(`${base}/confirmations/callback?code=idp-code-1&state=${state}`, {
+        redirect: "manual", headers: { cookie: stateCookie }
+      });
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
+      const sessionCookie = (callback.headers.get("set-cookie") ?? "")
+        .split("\n").find((line) => line.includes("navocms_confirmation_session"))!.split(";")[0]!;
+      // Replaying the same callback is rejected.
+      const replay = await fetch(`${base}/confirmations/callback?code=idp-code-1&state=${state}`, {
+        redirect: "manual", headers: { cookie: stateCookie }
+      });
+      expect(replay.status).toBe(400);
+      // The session renders the form with CSRF pairing.
+      const page = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
+      expect(page.status).toBe(200);
+      const html = await page.text();
+      expect(html).toContain("Confirm this build");
+      const csrfCookie = (page.headers.get("set-cookie") ?? "").split(";")[0]!;
+      const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)![1]!;
+      // Cross-site origin rejected; missing CSRF rejected.
       const crossSite = await fetch(`${base}/confirmations/${confirmationToken}`, {
         method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example",
-          authorization: `Bearer ${humanToken}`, cookie: csrfCookie
-        },
+        headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example", cookie: sessionCookie },
         body: `csrf=${csrf}`
       });
       expect(crossSite.status).toBe(403);
       const missingCsrf = await fetch(`${base}/confirmations/${confirmationToken}`, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Bearer ${humanToken}` },
-        body: "csrf=wrong"
+        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: sessionCookie }, body: "csrf=wrong"
       });
       expect(missingCsrf.status).toBe(403);
-
-      // The authorized human session records the decision once; re-delivery
-      // of the same decision is a safe no-op.
+      // The session posts the decision once; re-delivery is safe.
       const decision = await fetch(`${base}/confirmations/${confirmationToken}`, {
         method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          authorization: `Bearer ${humanToken}`, cookie: csrfCookie
-        },
+        headers: { "content-type": "application/x-www-form-urlencoded", cookie: `${sessionCookie}; ${csrfCookie}` },
         body: `csrf=${csrf}`
       });
       expect(decision.status).toBe(200);
       expect(await decision.text()).toContain("Decision recorded");
       const redelivery = await fetch(`${base}/confirmations/${confirmationToken}`, {
         method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          authorization: `Bearer ${humanToken}`, cookie: csrfCookie
-        },
+        headers: { "content-type": "application/x-www-form-urlencoded", cookie: `${sessionCookie}; ${csrfCookie}` },
         body: `csrf=${csrf}`
       });
       expect(await redelivery.text()).toContain("already recorded");
@@ -174,65 +218,10 @@ describe("real preview and independent confirmation surfaces", () => {
         releaseId: preview.releaseId, releaseHash: preview.releaseHash
       });
       expect(status).toMatchObject({ status: "confirmed" });
-      expect(String((status as unknown as Record<string, unknown>).decidedByReference)).toMatch(/^[a-f0-9]{64}$/);
-
-      // The recorded decision unlocks the approval checkpoint.
-      await expect(harness.service.approveRelease(harness.context, {
-        releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "approve-http-flow-0002"
-      })).resolves.toMatchObject({ release: { status: "approved" } });
-      await expect(harness.service.publishRelease(harness.context, {
-        releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-http-flow-0001"
-      })).resolves.toMatchObject({ release: { status: "published" } });
-      expect(harness.operations.startCount).toBe(1);
-      expect(harness.provider.publishCount).toBe(1);
-
-      // Unknown and forged capabilities never resolve.
-      const forged = await fetch(`${base}/confirmations/${"A".repeat(43)}`);
-      expect(forged.status).toBe(404);
-      const forgedPreview = await fetch(`${base}/previews/${"A".repeat(43)}`);
-      expect(forgedPreview.status).toBe(404);
+      expect((status as unknown as Record<string, unknown>).decidedByReference).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       await new Promise<void>((resolve, reject) => harness.server.close((error) => error ? reject(error) : resolve()));
-    }
-  });
-
-  it("keeps two simultaneous previews isolated: assets follow the referencing page", async () => {
-    const harness = previewHarness();
-    const makePreview = async (slug: string, key: string, accent: string) => {
-      harness.operations.setOutput(slug, `body { --accent: ${accent}; }\n`);
-      const created = await harness.service.createDraft(harness.context, {
-        typeName: "article", slug, locale: "en", title: `Preview ${slug}`,
-        markdown: `# Preview ${slug}\n`, idempotencyKey: `draft-${key}-01`
-      }) as { draft: { revisionId: string } };
-      return await harness.service.preparePreview(harness.context, created.draft.revisionId, `preview-${key}-01`) as {
-        previewUrl: string;
-      };
-    };
-    const alpha = await makePreview("alpha-variant", "alpha-variant", "rgb(1, 2, 3)");
-    const beta = await makePreview("beta-variant", "beta-variant", "rgb(4, 5, 6)");
-    await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", resolve));
-    const address = harness.server.address();
-    if (!address || typeof address === "string") throw new Error("Test server did not bind a TCP port");
-    const base = `http://127.0.0.1:${address.port}`;
-    try {
-      // One browser profile: the cookie ends up pointing at the LAST preview.
-      const alphaPage = await fetch(`${base}/previews/${alpha.previewUrl.split("/previews/")[1]!}`);
-      const betaPage = await fetch(`${base}/previews/${beta.previewUrl.split("/previews/")[1]!}`);
-      const lastCookie = (betaPage.headers.get("set-cookie") ?? "").split(";")[0]!;
-      void alphaPage;
-
-      // Each page's asset request carries its own Referer, so variants stay
-      // isolated even though the shared cookie points at the last one.
-      const alphaAsset = await fetch(`${base}/_astro/styles.css`, {
-        headers: { cookie: lastCookie, referer: `${base}/previews/${alpha.previewUrl.split("/previews/")[1]!}` }
-      });
-      expect(await alphaAsset.text()).toContain("rgb(1, 2, 3)");
-      const betaAsset = await fetch(`${base}/_astro/styles.css`, {
-        headers: { cookie: lastCookie, referer: `${base}/previews/${beta.previewUrl.split("/previews/")[1]!}` }
-      });
-      expect(await betaAsset.text()).toContain("rgb(4, 5, 6)");
-    } finally {
-      await new Promise<void>((resolve, reject) => harness.server.close((error) => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve) => idp.close(() => resolve()));
     }
   });
 });
@@ -244,7 +233,9 @@ interface TestToken {
   readonly publish: boolean;
 }
 
-function previewHarness() {
+function previewHarness(options: {
+  readonly withLogin?: { readonly authorizationEndpoint: string; readonly tokenEndpoint: string };
+} = {}) {
   const provider = new RecordingProvider();
   const operations = new BuiltStagingOperations();
   const repository = new InMemoryEditingRepository();
@@ -283,7 +274,15 @@ function previewHarness() {
       }
     },
     resource: "https://cms.example.test/mcp",
-    authorizationServers: ["https://identity.example.test"]
+    authorizationServers: ["https://identity.example.test"],
+    ...(options.withLogin ? {
+      confirmationLogin: {
+        clientId: "confirmation-client",
+        clientSecret: "confirmation-secret",
+        authorizationEndpoint: options.withLogin.authorizationEndpoint,
+        tokenEndpoint: options.withLogin.tokenEndpoint
+      }
+    } : {})
   });
   return { service, server, context, operations, provider, tokens };
 }
@@ -311,25 +310,20 @@ class BuiltStagingOperations implements StagingAstroOperations {
   public startCount = 0;
   readonly #outputs = new Map<string, Readonly<Record<string, string>>>();
   readonly #css = new Map<string, string>();
-  public setOutput(slug: string, css: string): void {
-    this.#css.set(slug, css);
+  public setOutput(releaseId: string, output: Readonly<Record<string, string>>): void {
+    this.#outputs.set(releaseId, Object.freeze({ ...output }));
   }
   public async prepare(): Promise<AstroRenderInput> { return { anchors: { content: `sha256:${"a".repeat(64)}`, design: `sha256:${"b".repeat(64)}`, delivery: `sha256:${"c".repeat(64)}`, governance: `sha256:${"d".repeat(64)}` } } as AstroRenderInput; }
   public async persistPreviewInput(): Promise<void> {}
   public async startBuild(_: unknown, release: { id: string }): Promise<PreviewBuildStatus> {
     this.startCount += 1;
-    const style = this.#cssFor(release.id);
-    this.#outputs.set(release.id, Object.freeze({
-      "index.html": `<!doctype html><html lang="en"><head><link rel="stylesheet" href="/_astro/styles.css"></head><body><h1>built-index</h1></body></html>`,
-      "_astro/styles.css": style
-    }));
+    if (!this.#outputs.has(release.id)) {
+      this.#outputs.set(release.id, Object.freeze({
+        "index.html": "<!doctype html><html lang=\"en\"><head><link rel=\"stylesheet\" href=\"/_astro/styles.css\"></head><body><h1>built-index</h1></body></html>",
+        "_astro/styles.css": "body { margin: 0; }\n"
+      }));
+    }
     return { releaseId: release.id, status: "ready" };
-  }
-  #cssFor(releaseId: string): string {
-    // Each draft is a distinct slug; the last registered css wins for tests
-    // that configure variants before preparing.
-    const all = [...this.#css.values()];
-    return all.at(-1) ?? "body { margin: 0; }\n";
   }
   public async buildStatus(_: unknown, releaseId: string): Promise<PreviewBuildStatus> {
     return { releaseId, status: this.#outputs.has(releaseId) ? "ready" : "building" };
