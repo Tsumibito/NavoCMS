@@ -93,8 +93,8 @@ secrets/roles/WorkOS/Coolify/Pages/R2 — у принимающего.
 
 | Проверка | Команда / место | Результат |
 | --- | --- | --- |
-| Полный гейт | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` — один полный чистый прогон корректирующего head (покрывает fresh install 0001→0013; upgrade-шаг 0012→0013 выполняется внутри той же последовательности) | PASS (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удаляется после запуска |
-| Vitest unit+integration | входит в Neon-прогон (`NAVOCMS_NEON_TEST_RUN=true`) | **237/237 passed, 39 files, 0 skipped, 0 failed** — включая новые session/policy/lease regression-тесты (188 локально без БД + 49 PostgreSQL integration) |
+| Полный гейт | `dotenvx run --quiet -f .env.test -- node scripts/test-neon.mjs` — полный чистый прогон корректирующего head (fresh install 0001→0013; upgrade-шаг 0012→0013 выполняется внутри той же последовательности) | PASS (exit 0): build, contracts, boundaries, secrets, docs, links, typecheck, build smoke, catalogue, vitest, playwright + 5 isolation suites; временная БД удалена. Два промежуточных не-зелёных прогона в этой итерации — гонка самого нового lease-теста на удалённой БД (TTL 400 мс короче сетевых round trips); тест переписан детерминированно (истечение lease имитируется SQL-UPDATE), prod-код не менялся |
+| Vitest unit+integration | входит в Neon-прогон (`NAVOCMS_NEON_TEST_RUN=true`) | **237/237 passed, 39 files, 0 skipped, 0 failed** в чистом прогоне — включая новые session/policy/lease regression-тесты и двухэкземплярный PostgreSQL lease-тест |
 | Playwright + axe | входит в `pnpm check` | **9/9 passed** (новые: реальный рендеринг preview с computed style/натуральной шириной изображения/блокировкой скриптов; изоляция двух preview; human-session guard на confirmation flow) |
 | SQL isolation | 5 suites внутри помощника | 5/5 «Isolation passed» в каждом прогоне |
 | CI GitHub Actions | автоматически на PR; итоговый зелёный run на финальном SHA приводится в финальном ответе исполнителя | принимающий подтверждает CI на merge/head SHA |

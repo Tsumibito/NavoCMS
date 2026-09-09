@@ -10,8 +10,10 @@ import { randomUUID } from "node:crypto";
 import { NAVOCMS_PERMISSIONS, effectivePermissions, type AuthorizationContext } from "@navocms/security";
 import { afterAll, describe, expect, it } from "vitest";
 
+import { McpEditingError } from "./errors.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
 import { StagingOperationalRuntime } from "./staging-operational-runtime.js";
+import type { TrustedAstroBuildRunner } from "./trusted-astro-builder.js";
 import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
@@ -208,32 +210,46 @@ integration("Neon production persistence", () => {
     const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-lease-preview-${suffix}`) as { releaseId: string; releaseHash: string };
     const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
 
+    // The owner's runner blocks until the test releases it, so the lease is
+    // deterministically held while the second instance checks.
+    let releaseOwner = () => {};
+    const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    const blockingRunner: TrustedAstroBuildRunner = {
+      attest: async () => {
+        await ownerGate;
+        throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "blocked owner stopped");
+      },
+      build: async () => { throw new Error("not reached"); }
+    };
     const owner = new StagingOperationalRuntime({
       database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
       toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
-      runtimePrincipalId: principalId, leaseTtlMs: 400
+      runtimePrincipalId: principalId, runner: blockingRunner
     });
     const second = new StagingOperationalRuntime({
       database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
       toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
-      runtimePrincipalId: principalId, leaseTtlMs: 400
+      runtimePrincipalId: principalId
     });
 
-    // The first instance acquires ownership; its durable job row exists
-    // before the executor starts.
+    // The first instance acquires ownership; its durable job row and lease
+    // exist before any build work starts.
     await expect(owner.startBuild(repositoryContext, { id: preview.releaseId, releaseHash: preview.releaseHash, artifactHash: "0".repeat(64) }))
       .resolves.toMatchObject({ releaseId: preview.releaseId, status: "building" });
-    const leases = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
-      await client.query<{ owner_token: string }>(
-        `SELECT owner_token FROM navocms.build_job_leases
-          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
-        [tenantId, siteId, preview.releaseId]
-      )).rows
-    );
-    expect(leases).toHaveLength(1);
+    const leaseOf = async () => {
+      const rows = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+        await client.query<{ owner_token: string }>(
+          `SELECT owner_token FROM navocms.build_job_leases
+            WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+          [tenantId, siteId, preview.releaseId]
+        )).rows);
+      return rows;
+    };
+    const ownerLease = await leaseOf();
+    expect(ownerLease).toHaveLength(1);
 
-    // A second live instance sees the foreign lease, does not execute the
-    // job, and does not create a second workflow run.
+    // A second live instance sees the foreign active lease, does not execute
+    // the job, and does not create a second workflow run.
     await expect(second.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
       releaseId: preview.releaseId, status: "building"
     });
@@ -247,24 +263,29 @@ integration("Neon production persistence", () => {
       return Number(rows[0]!.count);
     };
     expect(await runCount()).toBe(1);
+    expect((await leaseOf())[0]!.owner_token).toBe(ownerLease[0]!.owner_token);
 
-    // After the owner's lease expires without completion, the second
-    // instance may re-home the job; re-execution is a safe recomputation.
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    // The owner's lease expires while it is still (simulated) alive — the
+    // expiry is forced via SQL so the test is deterministic on remote
+    // databases — and the second instance then re-homes the job: same single
+    // run, new owner.
+    await database!.withScope({ tenantId, siteId, principalId }, (client) => client.query(
+      `UPDATE navocms.build_job_leases SET leased_until = now() - interval '1 second'
+        WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3
+          AND workflow_key = 'navocms.staging-astro.build.v1'`,
+      [tenantId, siteId, preview.releaseId]
+    ));
     await expect(second.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
       releaseId: preview.releaseId, status: "building"
     });
-    const rehomedLease = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
-      await client.query<{ owner_token: string }>(
-        `SELECT owner_token FROM navocms.build_job_leases
-          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
-        [tenantId, siteId, preview.releaseId]
-      )).rows[0]!.owner_token);
-    expect(rehomedLease).not.toBe(leases[0]!.owner_token);
     expect(await runCount()).toBe(1);
+    const rehomedLease = await leaseOf();
+    expect(rehomedLease).toHaveLength(1);
+    expect(rehomedLease[0]!.owner_token).not.toBe(ownerLease[0]!.owner_token);
 
     // The re-homed executor fails closed on the unattestable toolchain and
-    // releases its lease; the durable failure is the recovered status.
+    // its durable failure is the recovered status; the original owner's
+    // eventual stop does not corrupt the terminal state.
     let runs: ReadonlyArray<{ status: string; last_error_code: string | null }> = [];
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -283,6 +304,7 @@ integration("Neon production persistence", () => {
     await expect(second.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
       releaseId: preview.releaseId, status: "failed", errorCode: "REVIEWED_ASTRO_TOOLCHAIN_INVALID"
     });
+    releaseOwner();
   });
 
   it("never lets publication workflow helpers advance a running build job", async () => {
@@ -297,7 +319,7 @@ integration("Neon production persistence", () => {
     const runtime = new StagingOperationalRuntime({
       database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
       toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
-      runtimePrincipalId: principalId, leaseTtlMs: 400
+      runtimePrincipalId: principalId
     });
     await expect(runtime.startBuild(repositoryContext, { id: preview.releaseId, releaseHash: preview.releaseHash, artifactHash: "0".repeat(64) }))
       .resolves.toMatchObject({ status: "building" });
