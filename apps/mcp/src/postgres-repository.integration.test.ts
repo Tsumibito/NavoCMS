@@ -327,16 +327,17 @@ integration("Neon production persistence", () => {
     }) as { draft: { revisionId: string } };
     const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-race-preview-${suffix}`) as { releaseId: string; releaseHash: string };
     const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
-    const releaseFirst = () => {};
     let firstRunnerCalls = 0;
     let secondRunnerCalls = 0;
-    const firstGate = new Promise<void>(() => {});
+    // Both runners block forever once started: whichever instance loses the
+    // claim must never even reach its runner, so the total invocation count
+    // is exactly one no matter how the network orders the two claims.
     const first: StagingOperationalRuntime = new StagingOperationalRuntime({
       database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
       toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
       runtimePrincipalId: principalId,
       runner: {
-        attest: async () => { firstRunnerCalls += 1; await firstGate; throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "first blocked"); },
+        attest: async () => { firstRunnerCalls += 1; await new Promise<void>(() => {}); throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "first blocked"); },
         build: async () => { throw new Error("not reached"); }
       }
     });
@@ -345,7 +346,7 @@ integration("Neon production persistence", () => {
       toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
       runtimePrincipalId: principalId,
       runner: {
-        attest: async () => { secondRunnerCalls += 1; throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "second must not run"); },
+        attest: async () => { secondRunnerCalls += 1; await new Promise<void>(() => {}); throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "second blocked"); },
         build: async () => { throw new Error("not reached"); }
       }
     });
@@ -363,9 +364,7 @@ integration("Neon production persistence", () => {
         [tenantId, siteId, preview.releaseId]
       )).rows);
     expect(runs).toHaveLength(1);
-    expect(secondRunnerCalls).toBe(0);
-    expect(firstRunnerCalls).toBe(1);
-    void releaseFirst;
+    expect(firstRunnerCalls + secondRunnerCalls).toBe(1);
   });
 
   it("treats a repeated startBuild on the owning instance as a no-op", async () => {
