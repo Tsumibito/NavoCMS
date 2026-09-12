@@ -264,8 +264,11 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
       )).rows[0]);
   }
 
-  #launchBuild(repository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): void {
+  #launchBuild(requestRepository: RepositoryContext, release: Readonly<{ id: string; releaseHash: string; artifactHash: string }>): void {
     if (this.#buildExecutors.has(release.id)) return;
+    // The request selects the site; the trusted executor owns registration.
+    // Its database scope and registration authority must name the same actor.
+    const repository = { ...requestRepository, principalId: this.#runtimePrincipalId };
     const executor = (async () => {
       // Keep renewing the lease while this executor is alive so a long, live
       // build is never mistaken for a crashed one and never runs twice.

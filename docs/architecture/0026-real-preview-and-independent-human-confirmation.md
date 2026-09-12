@@ -177,3 +177,10 @@ Browser authorization-code tokens are verified against the dedicated confidentia
 MCP tokens continue to require the MCP resource audience. Both verifiers check the same issuer,
 signing keys, organization, expiry and deployment scope; both use the existing identity and
 permission resolver. A token issued for either audience cannot substitute for the other.
+
+The live build exposed a second boundary: asynchronous executors must not inherit the request's
+open database transaction or principal. Preview creation commits the immutable release, input,
+event and idempotency result first. Scheduling then acquires its durable job lease; the executor
+uses the configured service principal consistently for database scope and artifact registration.
+A repeated preview request can resume scheduling after an interruption and reports current build
+status without creating another preview. A completed build is reused.
