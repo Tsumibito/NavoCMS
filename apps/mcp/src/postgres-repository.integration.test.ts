@@ -387,9 +387,8 @@ integration("Neon production persistence", () => {
       }
     });
     const claim = { id: preview.releaseId, releaseHash: preview.releaseHash, artifactHash: "0".repeat(64) };
-    await expect(runtime.startBuild(repositoryContext, claim)).resolves.toMatchObject({ status: "building" });
-    await expect(runtime.startBuild(repositoryContext, claim)).resolves.toMatchObject({ status: "building" });
-    await expect(runtime.startBuild(repositoryContext, claim)).resolves.toMatchObject({ status: "building" });
+    const starts = await Promise.all([runtime.startBuild(repositoryContext, claim), runtime.startBuild(repositoryContext, claim), runtime.startBuild(repositoryContext, claim)]);
+    expect(starts).toEqual(expect.arrayContaining([expect.objectContaining({ status: "building" })]));
     expect(runnerCalls).toBe(1);
   });
 

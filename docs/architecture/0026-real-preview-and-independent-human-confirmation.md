@@ -42,7 +42,7 @@ run per release" a database invariant rather than a hope. A second live instance
 active lease and stays idle; a repeated start on the owning instance is a local no-op. While an
 executor is alive its lease is renewed, so a long live build is never mistaken for a crashed
 one; if ownership is still lost, a stale owner's terminal write is skipped by an
-ownership check, and re-execution after a genuine crash is a safe recomputation (registration
+ownership check locked in the same transaction as the terminal write, and re-execution after a genuine crash is a safe recomputation (registration
 idempotency `astro-build:<releaseHash>`), never a duplicated publication. Publication workflow
 helpers filter by the release's own `workflow_key` so build-job rows are never advanced by
 publication checkpoints. Both deterministic builds complete before any review or approval.
@@ -56,7 +56,7 @@ tool that registers reviewed artifacts; the path is reachable only in-process, s
 `GET /previews/:token` keeps serving the Markdown proof artifact while the build runs; once the
 release has a registered reviewed artifact it serves the built `index` page instead. The
 response also serves the **entire built tree under the token's namespace**
-(`/previews/<token>/...`), and every root-relative URL in served HTML and CSS is rewritten at
+(`/previews/<token>/...`), and relative and root-relative resource URLs in served HTML and CSS is rewritten at
 serve time to point into that namespace. *(Corrected after the second acceptance round: a
 shared preview cookie mixed two previews opened in one browser — the first page received the
 second page's stylesheet. A capability in the URL path needs no cookie and no Referer, both of
@@ -152,3 +152,21 @@ manifest digest and fail publication closed; preparing a new release is the upgr
   semantics.
 - One staging-only constraint exists (shared preview cookie across concurrently open previews)
   and is explicit in the spec.
+
+## Maintainer review, 2026-09-12
+
+The callback enforces the ten-minute login-state deadline itself. Browser sessions expire no
+later than their verified access token and resolved authorization, and membership is re-resolved
+when the production authorization resolver is configured. Session loss on restart requires a
+new login; durable confirmation receipts remain in PostgreSQL. Token exchange has a bounded
+network timeout. Expired in-memory session records are pruned during new logins.
+
+Preview URL binding resolves relative paths against the original output document, including
+nested HTML and CSS resources. Malformed percent encoding returns a controlled HTTP error.
+Served preview HTML/CSS are a URL-bound projection, not byte-identical HTTP responses to the
+stored manifest; publication retains the unmodified stored bytes. Hash verification applies to
+those stored/published files, while browser checks verify the preview projection.
+
+The local executor guard is repeated after asynchronous job acquisition. Terminal writes hold
+the lease row lock, check the current owner and lease expiry, and commit the workflow update
+before releasing that lock; reclaim cannot interleave between validation and the terminal write.

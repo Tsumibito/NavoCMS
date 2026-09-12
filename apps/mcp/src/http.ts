@@ -126,7 +126,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
           const entry = pickEntryHtml(surface.built.output);
           const entryBody = entry !== undefined ? surface.built.output[entry] : undefined;
           response.end(entryBody !== undefined
-            ? bindCapabilityUrls(entryBody, `/previews/${token}`, "html")
+            ? bindCapabilityUrls(entryBody, `/previews/${token}`, "html", entry!)
             : surface.proof.body);
         } else {
           response.setHeader("content-type", surface.proof.mediaType);
@@ -136,16 +136,18 @@ export function createMcpHttpServer(options: McpHttpOptions) {
       }
       // The whole built tree is served under the token's namespace: the path
       // addresses exactly this preview, so no shared cookie can mix releases.
-      const path = decodeURIComponent(rest.split("?")[0] ?? "");
+      let path: string;
+      try { path = decodeURIComponent(rest.split("?")[0] ?? ""); }
+      catch { return sendJson(response, 400, { error: "INVALID_PREVIEW_PATH" }); }
       const body = surface.built?.output[path];
       if (!safeOutputPath(path) || body === undefined) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
       response.setHeader("content-type", outputContentType(path));
       if (path.endsWith(".html")) {
         response.setHeader("content-type", "text/html; charset=utf-8");
-        response.end(bindCapabilityUrls(body, `/previews/${token}`, "html"));
+        response.end(bindCapabilityUrls(body, `/previews/${token}`, "html", path));
       } else if (path.endsWith(".css")) {
         response.setHeader("content-security-policy", "default-src 'none'");
-        response.end(bindCapabilityUrls(body, `/previews/${token}`, "css"));
+        response.end(bindCapabilityUrls(body, `/previews/${token}`, "css", path));
       } else {
         response.setHeader("content-security-policy", "default-src 'none'");
         response.end(body);
@@ -250,25 +252,29 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
 }
 
 /**
- * Rewrites root-relative URLs in served preview content so they address this
+ * Resolves relative URLs in served preview content so they address this
  * token's namespace (`/previews/<token>/...`). The stored output bytes stay
- * untouched; binding happens at serve time. `data:` URIs, protocol-relative
- * URLs, and already-bound paths are left as-is.
+ * untouched; binding happens at serve time against each original output path.
+ * Absolute external URLs, fragments and data URIs are left as-is.
  */
-function bindCapabilityUrls(text: string, basePath: string, kind: "html" | "css"): string {
-  if (kind === "css") {
-    return text.replace(/url\(\s*(["']?)\/(?!\/|previews\/)/g, `url($1${basePath}/`);
+function bindCapabilityUrls(text: string, basePath: string, kind: "html" | "css", documentPath = "index.html"): string {
+  const bind = (value: string): string => {
+    if (!value || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(value)) return value;
+    const url = new URL(value, `https://preview.invalid/${documentPath}`);
+    return `${basePath}${url.pathname}${url.search}${url.hash}`;
+  };
+  let bound = text;
+  if (kind === "html") {
+    bound = bound.replace(/(\s(?:src|href|poster|action)\s*=\s*)(["'])([^"']*)\2/gi,
+      (_match, attribute: string, quote: string, value: string) => `${attribute}${quote}${bind(value)}${quote}`);
+    bound = bound.replace(/(srcset\s*=\s*)(["'])([^"']*)\2/gi,
+      (_match, attribute: string, quote: string, value: string) =>
+        `${attribute}${quote}${value.replace(/(^|,\s*)(data:[^\s]+|[^\s,]+)([^,]*)/g,
+          (_candidate: string, separator: string, url: string, descriptor: string) =>
+            `${separator}${bind(url)}${descriptor}`)}${quote}`);
   }
-  let bound = text.replace(
-    /(\s(?:src|href|poster|action)\s*=\s*)(["'])\/(?!\/|previews\/)/g,
-    (_match, attribute: string, quote: string) => `${attribute}${quote}${basePath}/`
-  );
-  bound = bound.replace(
-    /(srcset\s*=\s*)(["'])([^"']*)(["'])/g,
-    (_match, attribute: string, open: string, value: string, close: string) =>
-      `${attribute}${open}${value.replace(/(^|[\s,])\/(?!\/|previews\/)/g, `$1${basePath}/`)}${close}`
-  );
-  return bound.replace(/url\(\s*(["']?)\/(?!\/|previews\/)/g, `url($1${basePath}/`);
+  return bound.replace(/url\(\s*(["']?)([^)'"\s]+)\1\s*\)/gi,
+    (_match, quote: string, value: string) => `url(${quote}${bind(value)}${quote})`);
 }
 
 function sendHtml(response: ServerResponse, status: number, body: string): void {
@@ -296,7 +302,7 @@ async function readBody(request: IncomingMessage, maximumBytes: number): Promise
 async function confirmationPage(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean): Promise<void> {
   const view = await options.service.resolveConfirmationView(token);
   if (!view) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "This confirmation link is invalid or has expired. Ask the agent for a fresh preview."));
-  const session = resolveBrowserSession(browserAuth, request, view);
+  const session = await resolveBrowserSession(options, browserAuth, request, view);
   if (session.error) {
     if (session.error.status === 401) return startLogin(response, options, browserAuth, token, request, secure);
     return sendHtml(response, session.error.status, confirmationShell(session.error.title, escapeHtml(session.error.body)));
@@ -312,7 +318,7 @@ async function confirmationPage(response: ServerResponse, options: McpHttpOption
     return sendHtml(response, 409, confirmationShell("Build not finished", escapeHtml(`The trusted build for release ${shortHash(view.releaseHash)} has not completed yet. Ask the agent for the build status, then reopen this page to confirm.`)));
   }
   const csrf = randomBytes(32).toString("hex");
-  response.setHeader("set-cookie", `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=900${request.socket instanceof TLSSocket ? "; Secure" : ""}`);
+  response.setHeader("set-cookie", `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=900${secure ? "; Secure" : ""}`);
   const summaryRows: readonly (readonly [string, string])[] = [
     ["Release hash", view.releaseHash],
     ["Output manifest digest", view.build.outputManifestDigest ?? "—"],
@@ -334,7 +340,7 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
   // sessions get a clear rejection regardless of form contents.
   const view = await options.service.resolveConfirmationView(token);
   if (!view) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "This confirmation link is invalid or has expired."));
-  const session = resolveBrowserSession(browserAuth, request, view);
+  const session = await resolveBrowserSession(options, browserAuth, request, view);
   if (session.error) return sendHtml(response, session.error.status, confirmationShell(session.error.title, escapeHtml(session.error.body)));
   // Cross-origin form posts are rejected: a known foreign Origin never
   // matches the host that served the confirmation page (scheme-agnostic
@@ -372,7 +378,7 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
 }
 
 interface BrowserAuth {
-  readonly sessions: Map<string, { readonly context: AuthorizationContext; readonly expiresAt: number }>;
+  readonly sessions: Map<string, { readonly context: AuthorizationContext; readonly verified: VerifiedAccessToken; readonly expiresAt: number }>;
   readonly pendingLogins: Map<string, { readonly verifier: string; readonly returnUrl: string; readonly createdAt: number }>;
 }
 
@@ -392,14 +398,22 @@ function sessionKey(cookieValue: string): string {
  * delegated agent identities, foreign sites, and read-only principals are
  * rejected before any form or decision exists.
  */
-function resolveBrowserSession(browserAuth: BrowserAuth, request: IncomingMessage, view: { tenantId: string; siteId: string }): { principal?: { principalId?: string; issuer: string; subject: string }; error?: { status: number; title: string; body: string } } {
+async function resolveBrowserSession(options: McpHttpOptions, browserAuth: BrowserAuth, request: IncomingMessage, view: { tenantId: string; siteId: string }): Promise<{ principal?: { principalId?: string; issuer: string; subject: string }; error?: { status: number; title: string; body: string } }> {
   const cookie = parseCookies(request.headers.cookie)[CONFIRMATION_SESSION_COOKIE];
   const record = cookie !== undefined ? browserAuth.sessions.get(sessionKey(cookie)) : undefined;
   if (!record || record.expiresAt <= Date.now()) {
     if (cookie !== undefined) browserAuth.sessions.delete(sessionKey(cookie));
     return { error: { status: 401, title: "Human session required", body: "This confirmation records a human publication decision and requires your own logged-in session. The link the agent shared identifies the request; it does not authorize the decision by itself." } };
   }
-  const { context } = record;
+  let context = record.context;
+  try {
+    if (options.resolveAuthorization) context = await options.resolveAuthorization(record.verified);
+  } catch {
+    return { error: { status: 403, title: "Not authorized", body: "Your publication authority is no longer valid." } };
+  }
+  if (context.expiresAt && Date.parse(context.expiresAt) <= Date.now()) {
+    return { error: { status: 401, title: "Human session required", body: "Your session has expired. Sign in again." } };
+  }
   if (context.principal.kind !== "human") {
     return { error: { status: 403, title: "Not authorized", body: "A delegated agent session cannot record this decision; the confirmation must come from your own logged-in human session." } };
   }
@@ -453,7 +467,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   // Single-use, bound to the browser that started the login.
   if (state !== null) browserAuth.pendingLogins.delete(state);
   response.setHeader("set-cookie", `${CONFIRMATION_OIDC_STATE_COOKIE}=; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=0${secure ? "; Secure" : ""}`);
-  if (!pending || !code) {
+  if (!pending || !code || Date.now() - pending.createdAt >= LOGIN_STATE_TTL_MS) {
     return sendHtml(response, 400, confirmationShell("Login could not be completed", "This sign-in response is unknown, expired, or was already used. Open the confirmation link again."));
   }
   const proto = request.headers["x-forwarded-proto"] === "https" || secure ? "https" : "http";
@@ -462,6 +476,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   try {
     const tokenResponse = await fetch(login.tokenEndpoint, {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "authorization_code",
@@ -483,8 +498,9 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
     return sendHtml(response, 401, confirmationShell("Sign-in failed", "The identity provider rejected this sign-in. Open the confirmation link and try again."));
   }
   let context: AuthorizationContext;
+  let verified: VerifiedAccessToken;
   try {
-    const verified = await options.verifier.verify(accessToken);
+    verified = await options.verifier.verify(accessToken);
     context = options.resolveAuthorization ? await options.resolveAuthorization(verified) : authorizationContext(verified);
   } catch {
     return sendHtml(response, 403, confirmationShell("Sign-in rejected", "Your account could not be resolved as a publisher for this deployment."));
@@ -493,10 +509,16 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
     return sendHtml(response, 403, confirmationShell("Sign-in rejected", "A delegated agent identity cannot sign in for a human confirmation; use your own account."));
   }
   const sessionValue = randomBytes(32).toString("base64url");
-  browserAuth.sessions.set(sessionKey(sessionValue), { context, expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000 });
+  const expiresAt = Math.min(Date.now() + SESSION_TTL_SECONDS * 1000, verified.claims.exp * 1000,
+    context.expiresAt ? Date.parse(context.expiresAt) : Infinity);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return sendHtml(response, 401, confirmationShell("Sign-in failed", "Your authorization has expired. Sign in again."));
+  }
+  for (const [key, session] of browserAuth.sessions) if (session.expiresAt <= Date.now()) browserAuth.sessions.delete(key);
+  browserAuth.sessions.set(sessionKey(sessionValue), { context, verified, expiresAt });
   response.statusCode = 302;
   response.setHeader("location", pending.returnUrl);
-  response.setHeader("set-cookie", `${CONFIRMATION_SESSION_COOKIE}=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_SECONDS}${secure ? "; Secure" : ""}`);
+  response.setHeader("set-cookie", `${CONFIRMATION_SESSION_COOKIE}=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(1, Math.floor((expiresAt - Date.now()) / 1000))}${secure ? "; Secure" : ""}`);
   response.end();
 }
 
@@ -522,7 +544,7 @@ function outputContentType(path: string): string {
 }
 
 function safeOutputPath(value: string): boolean {
-  return value.length > 0 && value.length <= 512 && !value.startsWith("/") && !value.includes("\\\\") &&
+  return value.length > 0 && value.length <= 512 && !value.startsWith("/") && !value.includes("\\") &&
     !value.includes("//") && !value.split("/").some((part) => !part || part === "." || part === "..");
 }
 

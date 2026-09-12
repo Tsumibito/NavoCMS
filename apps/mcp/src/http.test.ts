@@ -2,7 +2,7 @@ import type { ReleaseProvider, ReleaseProviderPublication, ReleaseProviderPublis
 import { InMemoryEventStore } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, siteRoleAuthority } from "@navocms/security";
 import type { AstroRenderInput } from "@navocms/design-astro";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createMcpHttpServer } from "./http.js";
@@ -39,7 +39,7 @@ describe("real preview namespace and browser-session confirmation", () => {
     const harness = previewHarness();
     const humanToken = "human-session-token-0000000000000001";
     harness.tokens.set(humanToken, { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
-    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
+    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true, expiresAt: Math.floor(Date.now() / 1000) + 120 });
     const created = await harness.service.createDraft(harness.context, {
       typeName: "article", slug: "real-preview", locale: "en", title: "Real preview",
       markdown: "# Real preview\n", idempotencyKey: "draft-real-preview-http-01"
@@ -107,6 +107,21 @@ describe("real preview namespace and browser-session confirmation", () => {
       expect((await fetch(`${base}/previews/${previewToken}/_astro/more.css`)).status).toBe(200);
       expect((await fetch(`${base}/previews/${previewToken}/../other/preview/_astro/styles.css`)).status).toBe(404);
       expect((await fetch(`${base}/previews/${previewToken}/index.html`)).status).toBe(200);
+      const malformed = await fetch(`${base}/previews/${previewToken}/%ZZ`);
+      expect(malformed.status).toBe(400);
+      expect((await fetch(`${base}/healthz`)).status).toBe(200);
+      harness.operations.setOutput(preview.releaseId, {
+        "index.html": '<html><link href="_astro/styles.css"><img src="images/photo.svg" srcset="data:image/svg+xml;base64,AAA= 1x, images/photo.svg 2x"></html>',
+        "_astro/styles.css": 'body { background: url(../images/photo.svg); }',
+        "nested/index.html": '<html><img src="../images/photo.svg"></html>',
+        "images/photo.svg": '<svg></svg>'
+      });
+      const relative = await (await fetch(`${base}/previews/${previewToken}`)).text();
+      expect(relative).toContain(`href="${namespace}/_astro/styles.css"`);
+      expect(relative).toContain(`src="${namespace}/images/photo.svg"`);
+      expect(relative).toContain(`data:image/svg+xml;base64,AAA= 1x, ${namespace}/images/photo.svg 2x`);
+      expect(await (await fetch(`${base}${namespace}/_astro/styles.css`)).text()).toContain(`url(${namespace}/images/photo.svg)`);
+      expect(await (await fetch(`${base}${namespace}/nested/index.html`)).text()).toContain(`src="${namespace}/images/photo.svg"`);
       // Unknown tokens never resolve.
       expect((await fetch(`${base}/previews/${"A".repeat(43)}`)).status).toBe(404);
 
@@ -153,7 +168,7 @@ describe("real preview namespace and browser-session confirmation", () => {
       releaseId: string; releaseHash: string; confirmationUrl: string;
     };
     const confirmationToken = preview.confirmationUrl.split("/confirmations/")[1]!;
-    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
+    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true, expiresAt: Math.floor(Date.now() / 1000) + 120 });
     await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", resolve));
     const address = harness.server.address();
     if (!address || typeof address === "string") throw new Error("Test server did not bind a TCP port");
@@ -219,6 +234,25 @@ describe("real preview namespace and browser-session confirmation", () => {
       });
       expect(status).toMatchObject({ status: "confirmed" });
       expect((status as unknown as Record<string, unknown>).decidedByReference).toMatch(/^[a-f0-9]{64}$/);
+      const clock = vi.spyOn(Date, "now");
+      const now = Date.now();
+      try {
+        clock.mockReturnValue(now + 121_000);
+        const expiredSession = await fetch(`${base}/confirmations/${confirmationToken}`, {
+          method: "POST", headers: { cookie: `${sessionCookie}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" }, body: `csrf=${csrf}`
+        });
+        expect(expiredSession.status).toBe(401);
+        clock.mockReturnValue(now);
+        const expiredStart = await fetch(`${base}/confirmations/${confirmationToken}`, { redirect: "manual" });
+        const expiredState = new URL(expiredStart.headers.get("location")!).searchParams.get("state")!;
+        const expiredCookie = expiredStart.headers.get("set-cookie")!.split(";")[0]!;
+        clock.mockReturnValue(now + 600_001);
+        const expiredCallback = await fetch(`${base}/confirmations/callback?code=idp-code-1&state=${expiredState}`, {
+          redirect: "manual", headers: { cookie: expiredCookie }
+        });
+        expect(expiredCallback.status).toBe(400);
+      } finally { clock.mockRestore(); }
+
     } finally {
       await new Promise<void>((resolve, reject) => harness.server.close((error) => error ? reject(error) : resolve()));
       await new Promise<void>((resolve) => idp.close(() => resolve()));
@@ -231,6 +265,7 @@ interface TestToken {
   readonly tenantId: string;
   readonly siteId: string;
   readonly publish: boolean;
+  readonly expiresAt?: number;
 }
 
 function previewHarness(options: {
@@ -265,7 +300,7 @@ function previewHarness(options: {
         if (!issued) throw new Error("unknown token");
         const permissions = issued.publish ? [...NAVOCMS_PERMISSIONS] : (["content:read"] as const).slice();
         return {
-          claims: { iss: "https://identity.example", sub: `subject:${token}`, aud: "https://cms.example.test/mcp", exp: Math.floor(Date.now() / 1000) + 3600 },
+          claims: { iss: "https://identity.example", sub: `subject:${token}`, aud: "https://cms.example.test/mcp", exp: issued.expiresAt ?? Math.floor(Date.now() / 1000) + 3600 },
           scopes: permissions,
           tenantId: issued.tenantId,
           siteId: issued.siteId,
