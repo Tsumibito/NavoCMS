@@ -77,3 +77,47 @@ then hit the database's one-build-job-per-release unique index: acquisition igno
 row and attempted another insert. The correction reopens the same row, increments `attempt`
 and retains the executor guard through lease cleanup. The PostgreSQL regression now injects a
 first-attempt failure and verifies a successful retry with exactly one job, attempt 2.
+
+Retry correction: PR [61](https://github.com/Tsumibito/NavoCMS/pull/61), tested head
+`b120ec4b7c5b763936bdb3228ddb4ef1e702babd`, merge
+`d782caafe302d7778a08faf89dedbce823a667ae` (identical tree).
+[CI 34700966184](https://github.com/Tsumibito/NavoCMS/actions/runs/34700966184) passed in two
+minutes. Full local check passed (189 unit tests, 10 browser tests), and the fresh Neon targeted
+suite passed 10/10 plus 5/5 isolation and upgrade/repeat checks. Temporary database removed.
+
+A second live candidate proves successful real building before the retry correction:
+release `e601e223-aec4-4aef-af66-cb1cc5646e48`, revision
+`b891bdcf-a2df-477d-8d27-c0aaedd0e5f0`, release hash
+`282935cd5285bb75403152acbb7951214895054e13fe6f546d16036ce4a5f182`.
+Its stored build is one file, 884 bytes, source commit `0d445018916d9261007b9a9bae91a493a358dd9a`,
+output manifest `sha256:fb5169d6d02fc611fc02d00eeaf3e226429ab6eafc04018e4bf94662075f52b1`.
+The real browser rendered its heading, marker and CSS (`rgb(18, 38, 58)` on white), without
+horizontal overflow. Preview HTTP: 200, noindex/nofollow/noarchive, no-referrer and scripts denied
+by CSP. The URL-bound preview projection is 937 bytes, SHA-256
+`5c862e98f7c532d4674d78cd73a4e485f93e24861146d9a269c6938e73b0f742`.
+MCP approval without the owner's browser decision returned `HUMAN_CONFIRMATION_REQUIRED` / none.
+
+## Current handoff state
+
+Final Coolify deployment `gzkmwhqisjmd9egu9tjcmcsn` finished, container
+`y7xtftoizsqmitvgfvzfwkbu-150427031774` healthy. `/readyz` reports all dependencies ready.
+[Main CI 34701110084](https://github.com/Tsumibito/NavoCMS/actions/runs/34701110084) passed on
+`d782caafe302d7778a08faf89dedbce823a667ae`.
+
+The original failed release was resumed through the same MCP preview request and key. It now
+reports ready, source commit `d782caafe302d7778a08faf89dedbce823a667ae`, 1 file / 1079 bytes,
+manifest `sha256:e65d3122645e9e6b0bd758233b83b8bccbbe7a0c6e05a145cb72fad9d40f5f21`.
+There is exactly one build job for it, attempt 2. The second candidate stayed ready after the
+container replacement, with the same stored manifest and source commit as before; its job
+remains attempt 1. This proves failed-build retry and completed-artifact persistence live.
+A running-process crash and lease expiry were exercised in PostgreSQL tests, not injected live.
+
+The owner-confirmation handoff is for the second candidate
+`e601e223-aec4-4aef-af66-cb1cc5646e48`, hash
+`282935cd5285bb75403152acbb7951214895054e13fe6f546d16036ce4a5f182`.
+The browser currently reaches WorkOS sign-in. Its preview/confirmation capability expires at
+2026-09-12 15:59:03 UTC. Capability URLs are provided only in the user-facing handoff, not stored
+in this report. No receipt has been issued by the agent and no publication was performed.
+After the owner's real confirmation, continue with a new approval key (the earlier negative
+check key is already used), publish, verify stored-output/public-byte parity and rollback to
+publication `4a2f7cf1-87f4-433f-912a-58b208697f29`. Sprint acceptance remains pending until then.
