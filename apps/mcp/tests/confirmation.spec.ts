@@ -206,23 +206,25 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
       ]
     }
   };
+  const browserVerifier = {
+    verify: async (token: string) => {
+      if (token !== `idp-token-for-${identity.subject}`) throw new Error("unknown token");
+      return {
+        claims: { iss: "https://identity.example", sub: identity.subject, aud: "confirmation-client", exp: Math.floor(Date.now() / 1000) + 3600 },
+        scopes: [...NAVOCMS_PERMISSIONS],
+        tenantId: site.tenantId,
+        siteId: site.siteId,
+        principal: { id: identity.id, kind: identity.kind, issuer: "https://identity.example", subject: identity.subject }
+      };
+    }
+  };
   const server = createMcpHttpServer({
     service,
-    verifier: {
-      verify: async (token: string) => {
-        if (token !== `idp-token-for-${identity.subject}`) throw new Error("unknown token");
-        return {
-          claims: { iss: "https://identity.example", sub: identity.subject, aud: "https://cms.example.test/mcp", exp: Math.floor(Date.now() / 1000) + 3600 },
-          scopes: [...NAVOCMS_PERMISSIONS],
-          tenantId: site.tenantId,
-          siteId: site.siteId,
-          principal: { id: identity.id, kind: identity.kind, issuer: "https://identity.example", subject: identity.subject }
-        };
-      }
-    },
+    verifier: { verify: async () => { throw new Error("Browser tokens cannot authorize MCP"); } },
     resource: "https://cms.example.test/mcp",
     authorizationServers: ["https://identity.example.test"],
     confirmationLogin: {
+      verifier: browserVerifier,
       clientId: "confirmation-client",
       clientSecret: "confirmation-secret",
       authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`,

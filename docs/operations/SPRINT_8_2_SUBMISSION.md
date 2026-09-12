@@ -172,8 +172,8 @@ REPLACE не может изменить тип возврата `resolve_releas
    в котором резолвится `principal_kind: human` и права `content:publish` на staging-site.
    Затем задать переменные окружения деплоя (значения — в секретах, не в чате):
    `NAVOCMS_CONFIRMATION_CLIENT_ID`, `NAVOCMS_CONFIRMATION_CLIENT_SECRET`,
-   `NAVOCMS_CONFIRMATION_AUTHORIZATION_ENDPOINT` (`<issuer>/authorize`),
-   `NAVOCMS_CONFIRMATION_TOKEN_ENDPOINT` (`<issuer>/token`) и перезапустить контейнер. Без этих
+   `NAVOCMS_CONFIRMATION_AUTHORIZATION_ENDPOINT` (from provider discovery),
+   `NAVOCMS_CONFIRMATION_TOKEN_ENDPOINT` (from provider discovery) и перезапустить контейнер. Без этих
    переменных confirmation-страница честно показывает «Login unavailable» (503).
 5. **Реальное решение владельца:** владелец открывает confirmation-ссылку в своём браузере —
    анонимная навигация уводит в логин провайдера; после входа и проверки digest он нажимает
