@@ -9,6 +9,7 @@ import { PostgresReviewedAstroBuildInputStore } from "./postgres-reviewed-astro-
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
 import { StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
 import { StagingOperationalRuntime } from "./staging-operational-runtime.js";
+import { LocalDeterministicMediaStorage } from "@navocms/media";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
 import { McpEditingService, type IdempotencyStore, type StagingAstroOperations } from "./service.js";
 import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
@@ -51,6 +52,7 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
       database: database!, environmentKey: "staging", reviewedSourceCommit: "c".repeat(40),
       toolchainDirectory: "/unused-injected-runner", readinessContext: serviceRepositoryContext,
       runtimePrincipalId: servicePrincipalId, objectStorage: artifactStorage,
+      mediaStorage: new LocalDeterministicMediaStorage(),
       runner: {
         attest: async () => ({ sourceCommitSha: "c".repeat(40), toolchainFingerprint: `sha256:${"e".repeat(64)}` as const }),
         build: async () => { buildCalls += 1; return { sourceCommitSha: "c".repeat(40), output: { "index.html": html("service-built") } }; }
