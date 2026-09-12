@@ -77,3 +77,28 @@ then hit the database's one-build-job-per-release unique index: acquisition igno
 row and attempted another insert. The correction reopens the same row, increments `attempt`
 and retains the executor guard through lease cleanup. The PostgreSQL regression now injects a
 first-attempt failure and verifies a successful retry with exactly one job, attempt 2.
+
+## Browser login follow-up, 2026-09-12
+
+The owner's callback reached an invalid/expired single-use login state. Starting a fresh
+browser flow revealed a separate 403: the returned access token had the configured MCP
+resource audience, not the confidential browser client audience. Safe, temporary diagnostics
+also established that the selected browser identity had neither the required organization
+claim nor an existing membership in this site. No credentials, token values or identity claims
+were logged. The temporary container diagnostic was removed and the original runtime restored
+before deploying the reviewed fix.
+
+The callback now validates two signed tokens from its confidential PKCE exchange: the API
+access token retains the existing organization/site/permission checks; the ID token binds the
+browser client and nonce to the same issuer and subject. This fixes the audience assumption
+without auto-provisioning the selected account or weakening the publication gate. Rejected
+logins emit only a stage and an internal error code, and the page offers a retry link.
+
+The HTTP regression now uses real RS256 signatures and distinct API/client audiences. It also
+rejects missing ID tokens, wrong audiences, mismatched or missing nonce, another subject,
+incorrect authorized party or access-token hash, expired identity tokens, missing/foreign
+organization and delegated agent identities. Browser tests retain the real redirect/code/PKCE
+flow with the added nonce-bound ID token.
+
+A valid site member must still complete browser login and record their own decision before
+publication/rollback acceptance can continue. This follow-up does not mark Sprint 8.2 accepted.

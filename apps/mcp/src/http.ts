@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   NAVOCMS_PERMISSIONS,
+  SecurityError,
   bearerChallenge,
   effectivePermissions,
   protectedResourceMetadata,
@@ -49,7 +50,10 @@ const CONFIRMATION_OIDC_STATE_COOKIE = "navocms_confirmation_oidc";
 
 /** External identity-provider settings for the confirmation browser login. */
 export interface ConfirmationLoginConfig {
+  /** Access token: the API resource audience, organization and permissions. */
   readonly verifier: AccessTokenVerifier;
+  /** ID token: the dedicated browser client audience, issuer and signature. */
+  readonly idTokenVerifier: AccessTokenVerifier;
   readonly clientId: string;
   readonly clientSecret: string;
   readonly authorizationEndpoint: string;
@@ -380,7 +384,7 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
 
 interface BrowserAuth {
   readonly sessions: Map<string, { readonly context: AuthorizationContext; readonly verified: VerifiedAccessToken; readonly expiresAt: number }>;
-  readonly pendingLogins: Map<string, { readonly verifier: string; readonly returnUrl: string; readonly createdAt: number }>;
+  readonly pendingLogins: Map<string, { readonly verifier: string; readonly nonce: string; readonly returnUrl: string; readonly createdAt: number }>;
 }
 
 const SESSION_TTL_SECONDS = 3600;
@@ -415,7 +419,7 @@ async function resolveBrowserSession(options: McpHttpOptions, browserAuth: Brows
   if (context.expiresAt && Date.parse(context.expiresAt) <= Date.now()) {
     return { error: { status: 401, title: "Human session required", body: "Your session has expired. Sign in again." } };
   }
-  if (context.principal.kind !== "human") {
+  if (context.principal.kind !== "human" || record.verified.principal.kind !== "human") {
     return { error: { status: 403, title: "Not authorized", body: "A delegated agent session cannot record this decision; the confirmation must come from your own logged-in human session." } };
   }
   if (context.tenantId !== view.tenantId || context.siteId !== view.siteId) {
@@ -439,7 +443,8 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   const state = randomBytes(32).toString("base64url");
   const verifier = randomBytes(48).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
-  browserAuth.pendingLogins.set(state, { verifier, returnUrl: `/confirmations/${token}`, createdAt: Date.now() });
+  const nonce = randomBytes(32).toString("base64url");
+  browserAuth.pendingLogins.set(state, { verifier, nonce, returnUrl: `/confirmations/${token}`, createdAt: Date.now() });
   const proto = request.headers["x-forwarded-proto"] === "https" || secure ? "https" : "http";
   const redirectUri = `${proto}://${request.headers.host ?? "localhost"}/confirmations/callback`;
   const authorization = new URL(login.authorizationEndpoint);
@@ -447,6 +452,8 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   authorization.searchParams.set("client_id", login.clientId);
   authorization.searchParams.set("redirect_uri", redirectUri);
   authorization.searchParams.set("state", state);
+  authorization.searchParams.set("nonce", nonce);
+  authorization.searchParams.set("resource", options.resource);
   authorization.searchParams.set("scope", (login.scopes ?? ["openid"]).join(" "));
   authorization.searchParams.set("code_challenge", challenge);
   authorization.searchParams.set("code_challenge_method", "S256");
@@ -474,6 +481,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   const proto = request.headers["x-forwarded-proto"] === "https" || secure ? "https" : "http";
   const redirectUri = `${proto}://${request.headers.host ?? "localhost"}/confirmations/callback`;
   let accessToken: string | undefined;
+  let idToken: string | undefined;
   try {
     const tokenResponse = await fetch(login.tokenEndpoint, {
       method: "POST",
@@ -485,32 +493,51 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
         redirect_uri: redirectUri,
         client_id: login.clientId,
         client_secret: login.clientSecret,
-        code_verifier: pending.verifier
+        code_verifier: pending.verifier,
+        resource: options.resource
       })
     });
     if (tokenResponse.ok) {
-      const payload = await tokenResponse.json() as { access_token?: unknown };
+      const payload = await tokenResponse.json() as { access_token?: unknown; id_token?: unknown };
       if (typeof payload.access_token === "string") accessToken = payload.access_token;
+      if (typeof payload.id_token === "string") idToken = payload.id_token;
     }
   } catch {
     accessToken = undefined;
   }
-  if (accessToken === undefined) {
+  if (accessToken === undefined || idToken === undefined) {
     return sendHtml(response, 401, confirmationShell("Sign-in failed", "The identity provider rejected this sign-in. Open the confirmation link and try again."));
   }
   let context: AuthorizationContext;
   let verified: VerifiedAccessToken;
+  let identity: VerifiedAccessToken;
+  let stage = "identity_token";
   try {
+    identity = await login.idTokenVerifier.verify(idToken);
+    stage = "access_token";
     verified = await login.verifier.verify(accessToken);
+    stage = "exchange_binding";
+    const claims = identity.claims;
+    if (claims.nonce !== pending.nonce || claims.sub !== verified.claims.sub || claims.iss !== verified.claims.iss
+      || (claims.azp !== undefined && claims.azp !== login.clientId)
+      || (Array.isArray(claims.aud) && claims.aud.length > 1 && claims.azp !== login.clientId)
+      || (claims.at_hash !== undefined && claims.at_hash !== createHash("sha256").update(accessToken).digest().subarray(0, 16).toString("base64url"))) {
+      throw new Error("Browser identity token does not bind this authorization exchange");
+    }
+    stage = "site_membership";
     context = options.resolveAuthorization ? await options.resolveAuthorization(verified) : authorizationContext(verified);
-  } catch {
-    return sendHtml(response, 403, confirmationShell("Sign-in rejected", "Your account could not be resolved as a publisher for this deployment."));
+  } catch (error) {
+    // Fixed internal error codes only: never log token claims, identity or provider payloads.
+    console.warn(JSON.stringify({ event: "confirmation.login_rejected", stage,
+      code: error instanceof SecurityError ? error.code : "LOGIN_REJECTED" }));
+    return sendHtml(response, 403, confirmationShell("Sign-in rejected",
+      `This sign-in could not be authorized for this site. Use the account connected to your CMS. <a href="${escapeHtml(pending.returnUrl)}">Try signing in again</a>.`));
   }
-  if (context.principal.kind !== "human") {
+  if (context.principal.kind !== "human" || verified.principal.kind !== "human" || identity.principal.kind !== "human") {
     return sendHtml(response, 403, confirmationShell("Sign-in rejected", "A delegated agent identity cannot sign in for a human confirmation; use your own account."));
   }
   const sessionValue = randomBytes(32).toString("base64url");
-  const expiresAt = Math.min(Date.now() + SESSION_TTL_SECONDS * 1000, verified.claims.exp * 1000,
+  const expiresAt = Math.min(Date.now() + SESSION_TTL_SECONDS * 1000, verified.claims.exp * 1000, identity.claims.exp * 1000,
     context.expiresAt ? Date.parse(context.expiresAt) : Infinity);
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     return sendHtml(response, 401, confirmationShell("Sign-in failed", "Your authorization has expired. Sign in again."));
