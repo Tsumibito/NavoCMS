@@ -1,9 +1,9 @@
 import type { ReleaseProvider, ReleaseProviderPublication, ReleaseProviderPublishInput } from "@navocms/kernel";
 import { InMemoryEventStore } from "@navocms/kernel";
-import { NAVOCMS_PERMISSIONS, siteRoleAuthority } from "@navocms/security";
+import { NAVOCMS_PERMISSIONS, OidcJwtVerifier, type AccessTokenVerifier, siteRoleAuthority } from "@navocms/security";
 import type { AstroRenderInput } from "@navocms/design-astro";
 import { describe, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { createServer } from "node:http";
 import { createMcpHttpServer } from "./http.js";
 import { InMemoryReleaseWorkflowRepository } from "./release-repository.js";
@@ -39,7 +39,6 @@ describe("real preview namespace and browser-session confirmation", () => {
     const harness = previewHarness();
     const humanToken = "human-session-token-0000000000000001";
     harness.tokens.set(humanToken, { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true });
-    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true, expiresAt: Math.floor(Date.now() / 1000) + 120 });
     const created = await harness.service.createDraft(harness.context, {
       typeName: "article", slug: "real-preview", locale: "en", title: "Real preview",
       markdown: "# Real preview\n", idempotencyKey: "draft-real-preview-http-01"
@@ -132,15 +131,30 @@ describe("real preview namespace and browser-session confirmation", () => {
 
   it("renders the confirmation page and records the decision after a real login exchange", async () => {
     // A fake identity-provider token endpoint: verifies the PKCE verifier it
-    // received at authorize time and issues a token the harness verifier maps
-    // to the site's human publisher.
+    // received at authorize time and issues real signed API and ID tokens
+    // with distinct audiences, as WorkOS does in the deployed configuration.
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const jwks = async () => ({ keys: [{ ...publicKey.export({ format: "jwk" }), kty: "RSA", kid: "login-test" }] });
+    const jwt = (claims: Record<string, unknown>) => {
+      const input = [ { alg: "RS256", kid: "login-test" }, claims ]
+        .map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".");
+      return `${input}.${sign("RSA-SHA256", Buffer.from(input), privateKey).toString("base64url")}`;
+    };
+    const issuer = "https://identity.example";
+    const resource = "https://cms.example.test/mcp";
+    const accessVerifier = new OidcJwtVerifier({ issuer, audience: resource, jwks, deploymentScope: previewSite, organizationId: "org-test" });
+    const idTokenVerifier = new OidcJwtVerifier({ issuer, audience: "confirmation-client", jwks, deploymentScope: previewSite });
+    let nonce = "";
+    let idOverrides: Record<string, unknown> = {};
+    let accessOverrides: Record<string, unknown> = {};
+    let omitIdentity = false;
     const idpCodes = new Map<string, string>();
     const idp = createServer((request, response) => {
       let body = "";
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         const params = new URLSearchParams(body);
-        if (params.get("grant_type") !== "authorization_code") {
+        if (params.get("grant_type") !== "authorization_code" || params.get("resource") !== resource) {
           response.writeHead(400).end(JSON.stringify({ error: "unsupported_grant_type" }));
           return;
         }
@@ -151,14 +165,18 @@ describe("real preview namespace and browser-session confirmation", () => {
           return;
         }
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ access_token: "browser-login-token", token_type: "Bearer" }));
+        const common = { iss: issuer, sub: "publisher", exp: Math.floor(Date.now() / 1000) + 120 };
+        const accessToken = jwt({ ...common, aud: resource, org_id: "org-test", scope: NAVOCMS_PERMISSIONS.join(" "), ...accessOverrides });
+        const idToken = jwt({ ...common, aud: "confirmation-client", nonce,
+          at_hash: createHash("sha256").update(accessToken).digest().subarray(0, 16).toString("base64url"), ...idOverrides });
+        response.end(JSON.stringify({ access_token: accessToken, ...(!omitIdentity ? { id_token: idToken } : {}), token_type: "Bearer" }));
       });
     });
     await new Promise<void>((resolve) => idp.listen(0, "127.0.0.1", resolve));
     const idpPort = (idp.address() as { port: number }).port;
     idpCodes.set("idp-code-1", "pkce-challenge-value");
     const harness = previewHarness({
-      withLogin: { authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`, tokenEndpoint: `http://127.0.0.1:${idpPort}/token` }
+      withLogin: { authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`, tokenEndpoint: `http://127.0.0.1:${idpPort}/token`, verifier: accessVerifier, idTokenVerifier }
     });
     const created = await harness.service.createDraft(harness.context, {
       typeName: "article", slug: "session-preview", locale: "en", title: "Session preview",
@@ -168,7 +186,6 @@ describe("real preview namespace and browser-session confirmation", () => {
       releaseId: string; releaseHash: string; confirmationUrl: string;
     };
     const confirmationToken = preview.confirmationUrl.split("/confirmations/")[1]!;
-    harness.tokens.set("browser-login-token", { kind: "human", tenantId: previewSite.tenantId, siteId: previewSite.siteId, publish: true, expiresAt: Math.floor(Date.now() / 1000) + 120 });
     await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", resolve));
     const address = harness.server.address();
     if (!address || typeof address === "string") throw new Error("Test server did not bind a TCP port");
@@ -180,6 +197,9 @@ describe("real preview namespace and browser-session confirmation", () => {
       expect(start.status).toBe(302);
       const loginUrl = new URL(start.headers.get("location")!);
       expect(loginUrl.pathname).toBe("/authorize");
+      expect(loginUrl.searchParams.get("resource")).toBe(resource);
+      nonce = loginUrl.searchParams.get("nonce")!;
+      expect(nonce.length).toBeGreaterThanOrEqual(32);
       idpCodes.set("idp-code-1", loginUrl.searchParams.get("code_challenge")!);
       const state = loginUrl.searchParams.get("state")!;
       const stateCookie = (start.headers.get("set-cookie") ?? "").split(";")[0]!;
@@ -197,6 +217,38 @@ describe("real preview namespace and browser-session confirmation", () => {
         redirect: "manual", headers: { cookie: stateCookie }
       });
       expect(replay.status).toBe(400);
+      // Signed tokens from different clients, users or login attempts must not
+      // become a browser session, even when the API access token is valid.
+      const rejectedPairs = [
+        { id: { aud: resource } },
+        { id: { nonce: "different-login" } },
+        { id: { nonce: undefined } },
+        { id: { sub: "another-user" } },
+        { id: { azp: "another-client" } },
+        { id: { aud: ["confirmation-client", "another-client"] } },
+        { id: { at_hash: "wrong-token" } },
+        { id: { exp: Math.floor(Date.now() / 1000) - 60 } },
+        { access: { aud: "confirmation-client" } },
+        { access: { org_id: undefined } },
+        { access: { org_id: "another-organization" } },
+        { access: { principal_kind: "agent" } },
+        { omit: true }
+      ];
+      for (const mismatch of rejectedPairs) {
+        const next = await fetch(`${base}/confirmations/${confirmationToken}`, { redirect: "manual" });
+        const nextUrl = new URL(next.headers.get("location")!);
+        nonce = nextUrl.searchParams.get("nonce")!;
+        idpCodes.set("idp-code-1", nextUrl.searchParams.get("code_challenge")!);
+        idOverrides = "id" in mismatch ? mismatch.id! : {};
+        accessOverrides = "access" in mismatch ? mismatch.access! : {};
+        omitIdentity = "omit" in mismatch;
+        const rejected = await fetch(`${base}/confirmations/callback?code=idp-code-1&state=${nextUrl.searchParams.get("state")}`, {
+          redirect: "manual", headers: { cookie: next.headers.get("set-cookie")!.split(";")[0]! }
+        });
+        expect(rejected.status, JSON.stringify(mismatch)).toBe(omitIdentity ? 401 : 403);
+        expect(rejected.headers.get("set-cookie")).not.toContain("navocms_confirmation_session");
+      }
+      idOverrides = {}; accessOverrides = {}; omitIdentity = false;
       // The session renders the form with CSRF pairing.
       const page = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
       expect(page.status).toBe(200);
@@ -269,7 +321,7 @@ interface TestToken {
 }
 
 function previewHarness(options: {
-  readonly withLogin?: { readonly authorizationEndpoint: string; readonly tokenEndpoint: string };
+  readonly withLogin?: { readonly authorizationEndpoint: string; readonly tokenEndpoint: string; readonly verifier: AccessTokenVerifier; readonly idTokenVerifier: AccessTokenVerifier };
 } = {}) {
   const provider = new RecordingProvider();
   const operations = new BuiltStagingOperations();
@@ -316,7 +368,8 @@ function previewHarness(options: {
     authorizationServers: ["https://identity.example.test"],
     ...(options.withLogin ? {
       confirmationLogin: {
-        verifier: browserVerifier,
+        verifier: options.withLogin.verifier,
+        idTokenVerifier: options.withLogin.idTokenVerifier,
         clientId: "confirmation-client",
         clientSecret: "confirmation-secret",
         authorizationEndpoint: options.withLogin.authorizationEndpoint,

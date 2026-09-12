@@ -147,8 +147,11 @@ The human decision is recorded through the separate confirmation capability in a
 independent session created by an interactive OIDC authorization-code login (PKCE S256,
 single-use state, dedicated confidential client on the existing identity provider). Anonymous
 navigation redirects into the provider's authorization endpoint; the callback exchanges the
-code, verifies the returned token through the same verifier and identity resolver as MCP,
-rejects non-human identities, and creates an `HttpOnly` server-side session cookie whose
+code and verifies the access token against the API resource through the same verifier and
+identity resolver as MCP. It also requires a signed ID token for the dedicated browser client,
+bound to the login nonce and the access token's issuer/subject (`azp` and `at_hash` are checked
+when present; multiple ID-token audiences require `azp`). Permissions come only from the access
+token and existing membership. The callback rejects non-human token or resolved identities, and creates an `HttpOnly` server-side session cookie whose
 credential never appears in MCP output. Authorization bearers are not accepted on confirmation
 endpoints — the same token that works on `/mcp` cannot read the form or record a decision. At
 decision time the session must still resolve to a `human` principal with `content:publish` on

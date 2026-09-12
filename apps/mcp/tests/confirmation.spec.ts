@@ -143,11 +143,14 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
     ? { id: "principal-agent", kind: "agent" as const, subject: "delegated-agent" }
     : { id: "principal-human", kind: "human" as const, subject: "publisher" };
   const codes = new Map<string, string>();
+  const nonces = new Map<string, string>();
+  const issuedNonces = new Map<string, string>();
   const idp = createHttpServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (url.pathname === "/authorize") {
       const code = `code-${randomId()}`;
       codes.set(code, url.searchParams.get("code_challenge") ?? "");
+      nonces.set(code, url.searchParams.get("nonce") ?? "");
       // A real IdP redirects to the registered redirect_uri of the client.
       const back = new URL(url.searchParams.get("redirect_uri") ?? "http://localhost/confirmations/callback");
       back.searchParams.set("code", code);
@@ -168,9 +171,12 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
           response.end(JSON.stringify({ error: "invalid_grant" }));
           return;
         }
+        const idToken = `identity-${params.get("code")}`;
+        issuedNonces.set(idToken, nonces.get(params.get("code") ?? "")!);
+        nonces.delete(params.get("code") ?? "");
         codes.delete(params.get("code") ?? "");
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ access_token: `idp-token-for-${identity.subject}`, token_type: "Bearer" }));
+        response.end(JSON.stringify({ access_token: `idp-token-for-${identity.subject}`, id_token: idToken, token_type: "Bearer" }));
       });
       return;
     }
@@ -225,6 +231,11 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
     authorizationServers: ["https://identity.example.test"],
     confirmationLogin: {
       verifier: browserVerifier,
+      idTokenVerifier: { verify: async (token: string) => {
+        if (!issuedNonces.has(token)) throw new Error("unknown identity token");
+        const verified = await browserVerifier.verify(`idp-token-for-${identity.subject}`);
+        return { ...verified, claims: { ...verified.claims, nonce: issuedNonces.get(token)! } };
+      } },
       clientId: "confirmation-client",
       clientSecret: "confirmation-secret",
       authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`,
