@@ -18,6 +18,20 @@ function jwt(
 }
 
 describe("MCP OAuth resource server", () => {
+  it("keeps browser-client and MCP-resource token audiences separate", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const jwks = async () => ({ keys: [{ ...publicKey.export({ format: "jwk" }), kty: "RSA", kid: "test-key" }] });
+    const browser = new OidcJwtVerifier({ issuer, audience: "client_confirmation", jwks });
+    const mcp = new OidcJwtVerifier({ issuer, audience: resource, jwks });
+    const claims = { iss: issuer, sub: "publisher", exp: Math.floor(Date.now() / 1000) + 60, tenant_id: "tenant-1", site_id: "site-1" };
+    const browserToken = jwt({ ...claims, aud: "client_confirmation" }, privateKey);
+    const mcpToken = jwt({ ...claims, aud: resource }, privateKey);
+    await expect(browser.verify(browserToken)).resolves.toMatchObject({ claims: { aud: "client_confirmation" } });
+    await expect(mcp.verify(mcpToken)).resolves.toMatchObject({ claims: { aud: resource } });
+    await expect(browser.verify(mcpToken)).rejects.toThrow(/not issued for this resource/i);
+    await expect(mcp.verify(browserToken)).rejects.toThrow(/not issued for this resource/i);
+  });
+
   it("publishes protected resource metadata and a discoverable challenge", () => {
     const metadata = protectedResourceMetadata({
       resource,

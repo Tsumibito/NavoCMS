@@ -292,26 +292,31 @@ function previewHarness(options: {
     }
   };
   const tokens = new Map<string, TestToken>();
+  const browserVerifier = {
+    verify: async (token: string) => {
+      const issued = tokens.get(token);
+      if (!issued) throw new Error("unknown token");
+      const permissions = issued.publish ? [...NAVOCMS_PERMISSIONS] : (["content:read"] as const).slice();
+      return {
+        claims: { iss: "https://identity.example", sub: `subject:${token}`, aud: "confirmation-client", exp: issued.expiresAt ?? Math.floor(Date.now() / 1000) + 3600 },
+        scopes: permissions,
+        tenantId: issued.tenantId,
+        siteId: issued.siteId,
+        principal: { id: `principal:${token}`, kind: issued.kind, issuer: "https://identity.example", subject: `subject:${token}` }
+      };
+    }
+  };
   const server = createMcpHttpServer({
     service,
-    verifier: {
-      verify: async (token: string) => {
-        const issued = tokens.get(token);
-        if (!issued) throw new Error("unknown token");
-        const permissions = issued.publish ? [...NAVOCMS_PERMISSIONS] : (["content:read"] as const).slice();
-        return {
-          claims: { iss: "https://identity.example", sub: `subject:${token}`, aud: "https://cms.example.test/mcp", exp: issued.expiresAt ?? Math.floor(Date.now() / 1000) + 3600 },
-          scopes: permissions,
-          tenantId: issued.tenantId,
-          siteId: issued.siteId,
-          principal: { id: `principal:${token}`, kind: issued.kind, issuer: "https://identity.example", subject: `subject:${token}` }
-        };
-      }
-    },
+    verifier: { verify: async (token: string) => {
+      if (token === "browser-login-token") throw new Error("Browser tokens cannot authorize MCP");
+      return browserVerifier.verify(token);
+    } },
     resource: "https://cms.example.test/mcp",
     authorizationServers: ["https://identity.example.test"],
     ...(options.withLogin ? {
       confirmationLogin: {
+        verifier: browserVerifier,
         clientId: "confirmation-client",
         clientSecret: "confirmation-secret",
         authorizationEndpoint: options.withLogin.authorizationEndpoint,

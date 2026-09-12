@@ -49,6 +49,7 @@ const CONFIRMATION_OIDC_STATE_COOKIE = "navocms_confirmation_oidc";
 
 /** External identity-provider settings for the confirmation browser login. */
 export interface ConfirmationLoginConfig {
+  readonly verifier: AccessTokenVerifier;
   readonly clientId: string;
   readonly clientSecret: string;
   readonly authorizationEndpoint: string;
@@ -500,7 +501,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   let context: AuthorizationContext;
   let verified: VerifiedAccessToken;
   try {
-    verified = await options.verifier.verify(accessToken);
+    verified = await login.verifier.verify(accessToken);
     context = options.resolveAuthorization ? await options.resolveAuthorization(verified) : authorizationContext(verified);
   } catch {
     return sendHtml(response, 403, confirmationShell("Sign-in rejected", "Your account could not be resolved as a publisher for this deployment."));

@@ -35,6 +35,9 @@ export async function runMigrations(connectionString: string): Promise<readonly 
     // The registry exists before evaluating any individual migration. Each
     // migration body and its registry row are committed together below.
     await client.query("CREATE SCHEMA IF NOT EXISTS navocms");
+    // Upgrades use a new connection and may skip the migration that originally
+    // set this path. Unqualified migration objects must still belong to navocms.
+    await client.query("SET search_path = navocms, pg_catalog");
     await client.query(
       `CREATE TABLE IF NOT EXISTS navocms.schema_migrations (
          name text PRIMARY KEY,
@@ -75,7 +78,7 @@ export async function runMigrations(connectionString: string): Promise<readonly 
 
 function withoutOuterTransaction(sql: string): string {
   return sql
-    .replace(/^\s*BEGIN\s*;\s*/i, "")
+    .replace(/^((?:\s|--[^\n]*(?:\n|$))*)BEGIN\s*;\s*/i, "$1")
     .replace(/\s*COMMIT\s*;\s*$/i, "");
 }
 

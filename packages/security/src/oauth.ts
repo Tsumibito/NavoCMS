@@ -145,7 +145,10 @@ export class OidcJwtVerifier implements AccessTokenVerifier {
 
   public constructor(options: OidcJwtVerifierOptions) {
     this.#issuer = canonicalHttpsUrl(options.issuer, "issuer");
-    this.#audience = canonicalHttpsUrl(options.audience, "audience");
+    if (!options.audience || options.audience.trim() !== options.audience) {
+      throw new SecurityError("OAUTH_AUDIENCE_INVALID", "Expected audience must be a nonempty identifier");
+    }
+    this.#audience = options.audience;
     this.#jwks = options.jwks;
     this.#now = options.now ?? (() => Math.floor(Date.now() / 1000));
     this.#tolerance = options.clockToleranceSeconds ?? 30;

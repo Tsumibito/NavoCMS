@@ -170,3 +170,10 @@ those stored/published files, while browser checks verify the preview projection
 The local executor guard is repeated after asynchronous job acquisition. Terminal writes hold
 the lease row lock, check the current owner and lease expiry, and commit the workflow update
 before releasing that lock; reclaim cannot interleave between validation and the terminal write.
+
+## Live deployment wiring, 2026-09-12
+
+Browser authorization-code tokens are verified against the dedicated confidential client ID.
+MCP tokens continue to require the MCP resource audience. Both verifiers check the same issuer,
+signing keys, organization, expiry and deployment scope; both use the existing identity and
+permission resolver. A token issued for either audience cannot substitute for the other.

@@ -36,10 +36,30 @@ try {
   await admin.query(`CREATE DATABASE "${database}"`); created = true;
   console.log(`Fresh Neon test database: ${database}`);
   await command(['build']);
-  const { runMigrations } = await import('../packages/persistence-postgres/dist/migrate.js');
+  const { runMigrations, expectedMigrations } = await import('../packages/persistence-postgres/dist/migrate.js');
   const { provisionRuntimeRole } = await import('../packages/persistence-postgres/dist/provision-runtime-role.js');
   const { bootstrapSite } = await import('../packages/persistence-postgres/dist/bootstrap-site.js');
+  // Reproduce a real 0012 -> 0013 upgrade: the old install's search_path does
+  // not survive closing its connection. The production migrator must set it.
+  const installed = (await expectedMigrations()).filter(({ name }) => name < '0013');
+  const seed = new Client({ connectionString: runUrl.toString() });
+  try {
+    await seed.connect();
+    await seed.query('CREATE SCHEMA navocms; CREATE TABLE navocms.schema_migrations (name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())');
+    for (const { name, checksum } of installed) {
+      await seed.query(await readFile(new URL(`../packages/persistence-postgres/migrations/${name}`, import.meta.url), 'utf8'));
+      await seed.query('INSERT INTO navocms.schema_migrations (name, checksum) VALUES ($1, $2)', [name, checksum]);
+    }
+  } finally { await seed.end(); }
   await runMigrations(runUrl.toString());
+  const upgraded = new Client({ connectionString: runUrl.toString() });
+  try {
+    await upgraded.connect();
+    const functions = await upgraded.query("SELECT n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.proname IN ('resolve_release_confirmation', 'record_release_confirmation', 'resolve_release_preview')");
+    if (functions.rows.length !== 3 || functions.rows.some(row => row.nspname !== 'navocms')) throw new Error('Upgrade created capability functions in the wrong schema');
+    if ((await runMigrations(runUrl.toString())).length !== 0) throw new Error('Repeated migration was not a no-op');
+    console.log('Upgrade passed: 0012 -> 0013 on a fresh connection, functions scoped to navocms, repeat is a no-op');
+  } finally { await upgraded.end(); }
   await provisionRuntimeRole(runUrl.toString(), process.env.NAVOCMS_RUNTIME_DATABASE_PASSWORD);
   // Neon owners are not PostgreSQL superusers. SQL isolation fixtures explicitly SET ROLE.
   // Grant that test-owner capability only on the allowlisted branch; runtime remains NOBYPASSRLS.

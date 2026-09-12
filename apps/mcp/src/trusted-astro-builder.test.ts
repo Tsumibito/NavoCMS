@@ -146,7 +146,9 @@ class TimeoutRunner implements TrustedAstroBuildRunner {
   public constructor(private readonly marker: string) {}
   public async attest() { return Object.freeze({ sourceCommitSha: "c".repeat(40), toolchainFingerprint: `sha256:${"e".repeat(64)}` as `sha256:${string}` }); }
   public async build(_: { readonly sourceCommitSha: string }, __: RegisterReviewedAstroArtifactInput["artifact"]): Promise<never> {
-    await runBoundedTrustedAstroProcess(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(this.marker)}, String(process.pid)); setInterval(() => {}, 1000);`], 500);
+    // A shell builtin records the PID before exec; cold Node startup can exceed
+    // the timeout under load without ever running its marker-writing script.
+    await runBoundedTrustedAstroProcess("/bin/sh", ["-c", 'printf "%s" "$$" > "$1"; exec sleep 60', "navocms-timeout", this.marker], 500);
     throw new Error("unreachable");
   }
 }
