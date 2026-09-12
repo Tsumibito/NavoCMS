@@ -159,3 +159,36 @@ A fresh live login passed dedicated ID-token verification and reached access-tok
 its remaining rejection is `OAUTH_CLAIM_INVALID` for the organizationless selected account.
 The owner has been asked which account originally connected the CMS. No membership, permissions,
 receipt or publication was changed to work around this rejection.
+
+## Completed live publication and rollback, 2026-09-12
+
+The owner signed in as the existing site member and personally recorded the decision at
+16:38:46.649 UTC. Receipt `sha256:9b2f6afb8e83bdc87165734502b92880688a34b0c63b0ba0cc81e033d9b0598e`
+covers the unchanged second candidate's manifest. The agent observed the resulting
+`Decision recorded` page; it did not press the confirmation button.
+
+- Approval: `s82-live-owner-approved-20260912-b2`, accepted at 16:39:23.704 UTC.
+- Publication: `s82-live-publish-20260912-b2`, publication
+  `b5191d86-5ebb-426e-bc17-36080809f59a`. The first live probe failed after application;
+  the tool correctly returned `LIVE_VERIFICATION_FAILED`, `effectState: applied`.
+- Recovery: `s82-live-reconcile-20260912-b2` reached `published` at 16:39:57.422 UTC.
+  Public route `/sprint-8-2-live-acceptance-20260912-b/` subsequently returned 200, with and
+  without a cache-busting query. Its 884 bytes hashed to
+  `568dabdbd87bd6134a56256fa9f286ef84dda26d75eab4a32bf3a83f618a503d`, exactly the stored file
+  digest in the provider reference; the acceptance marker was present. No rebuild occurred.
+- Rollback: `s82-live-rollback-20260912-b2` reached `rolled_back` at 16:40:34.027 UTC and
+  restored baseline publication `4a2f7cf1-87f4-433f-912a-58b208697f29`.
+  Live `/sprint-eight-operational-proof/` returned the original 874 bytes, SHA-256
+  `12bcd5130a6a3b3ecdce50f4d838d6b864b04f917d5a35d300442aa5195b89cb`.
+
+The core live acceptance cycle has passed. The login/confirmation UX is not accepted as ready
+for normal use: the owner explicitly rejected the repeated confusing authentication steps.
+Follow-up requirements are recorded in
+[confirmation UX correction](../development/CONFIRMATION_UX_CORRECTION.md).
+
+A response-consistency defect also remains: reconcile returned the old nested publication
+status `verification_failed` alongside the freshly loaded release status `published`, and
+rollback returned the target's pre-restore status `superseded`. The live bytes and durable
+release transitions succeeded. Reload these nested projections after the state transition;
+add regressions asserting consistent response statuses. Do not hide this defect by declaring
+all response semantics accepted.
