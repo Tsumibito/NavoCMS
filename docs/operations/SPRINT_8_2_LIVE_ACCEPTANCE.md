@@ -56,3 +56,24 @@ The correction commits preview creation before scheduling and uses the runtime s
 for executor database scope. A PostgreSQL regression runs the full editing-service preview path
 with distinct human/service IDs, checks successful artifact registration attributed to the
 service, and verifies repeat requests and a restarted runtime reuse the build.
+
+The service-build correction is merged in PR
+[60](https://github.com/Tsumibito/NavoCMS/pull/60), merge
+`0d445018916d9261007b9a9bae91a493a358dd9a` (tree matches tested
+`ad75177c9fcd983f8d0b7cfd1d962a896fd909d8`). Final
+[CI 34700427506](https://github.com/Tsumibito/NavoCMS/actions/runs/34700427506) passed the full
+check with PostgreSQL, browser and isolation gates. On Neon, the broad run passed the other
+240 tests; the new full preview/replay/restart regression passed after its fixture was corrected
+(media storage, environment kind/key and route path). Final typecheck and fresh Neon
+upgrade/isolation-only gates passed; all temporary databases were removed. A local real-Astro
+build timeout passed on isolated rerun and in CI. No production code changed during the fixture
+corrections.
+
+## Failed-job retry correction
+
+Deployment `ukextv9ienxticok0owdzl3p` completed at `0d445018916d9261007b9a9bae91a493a358dd9a`.
+It remained healthy, with confirmation settings present. Retrying the failed immutable preview
+then hit the database's one-build-job-per-release unique index: acquisition ignored the failed
+row and attempted another insert. The correction reopens the same row, increments `attempt`
+and retains the executor guard through lease cleanup. The PostgreSQL regression now injects a
+first-attempt failure and verifies a successful retry with exactly one job, attempt 2.
