@@ -173,10 +173,23 @@ before releasing that lock; reclaim cannot interleave between validation and the
 
 ## Live deployment wiring, 2026-09-12
 
-Browser authorization-code tokens are verified against the dedicated confidential client ID.
-MCP tokens continue to require the MCP resource audience. Both verifiers check the same issuer,
-signing keys, organization, expiry and deployment scope; both use the existing identity and
-permission resolver. A token issued for either audience cannot substitute for the other.
+The browser authorization-code exchange requests the API resource explicitly and requires both
+an access token and an ID token. WorkOS gives access tokens the resource audience (including
+when its configured default resource is used), not the dynamically registered client ID.
+The access token uses the existing MCP verifier: issuer, signature, resource audience,
+organization, expiry, tenant/site and the identity/permission resolver remain mandatory.
+The ID token separately requires the dedicated confidential browser client audience, the same
+issuer and subject, and the single-use login nonce. A supplied `azp` must match that client;
+multiple audiences require it. A supplied `at_hash` must bind the RS256 access token. Session
+expiry is bounded by both tokens. ID-token claims never supply publication permissions.
+
+This corrects the live deployment assumption that the access token itself would carry the
+browser client audience. An API bearer alone still cannot create a browser session or issue a
+receipt: the callback requires the confidential code exchange, PKCE, browser-bound state and
+verified ID-token nonce. Browser ID tokens cannot authorize MCP. Organizationless accounts and
+identities without existing site membership remain rejected; sign-in never provisions rights.
+See [WorkOS resource indicators](https://workos.com/docs/authkit/mcp#configure-mcp-server-url)
+and [OIDC token validation](https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation).
 
 The live build exposed a second boundary: asynchronous executors must not inherit the request's
 open database transaction or principal. Preview creation commits the immutable release, input,

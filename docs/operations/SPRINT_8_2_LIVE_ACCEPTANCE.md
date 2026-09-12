@@ -97,9 +97,9 @@ by CSP. The URL-bound preview projection is 937 bytes, SHA-256
 `5c862e98f7c532d4674d78cd73a4e485f93e24861146d9a269c6938e73b0f742`.
 MCP approval without the owner's browser decision returned `HUMAN_CONFIRMATION_REQUIRED` / none.
 
-## Current handoff state
+## Build handoff before the login follow-up
 
-Final Coolify deployment `gzkmwhqisjmd9egu9tjcmcsn` finished, container
+Build-retry Coolify deployment `gzkmwhqisjmd9egu9tjcmcsn` finished, container
 `y7xtftoizsqmitvgfvzfwkbu-150427031774` healthy. `/readyz` reports all dependencies ready.
 [Main CI 34701110084](https://github.com/Tsumibito/NavoCMS/actions/runs/34701110084) passed on
 `d782caafe302d7778a08faf89dedbce823a667ae`.
@@ -115,9 +115,47 @@ A running-process crash and lease expiry were exercised in PostgreSQL tests, not
 The owner-confirmation handoff is for the second candidate
 `e601e223-aec4-4aef-af66-cb1cc5646e48`, hash
 `282935cd5285bb75403152acbb7951214895054e13fe6f546d16036ce4a5f182`.
-The browser currently reaches WorkOS sign-in. Its preview/confirmation capability expires at
+That handoff reached WorkOS sign-in; the subsequent login result is recorded below.
+Its preview/confirmation capability expires at
 2026-09-12 15:59:03 UTC. Capability URLs are provided only in the user-facing handoff, not stored
 in this report. No receipt has been issued by the agent and no publication was performed.
 After the owner's real confirmation, continue with a new approval key (the earlier negative
 check key is already used), publish, verify stored-output/public-byte parity and rollback to
 publication `4a2f7cf1-87f4-433f-912a-58b208697f29`. Sprint acceptance remains pending until then.
+
+## Browser login follow-up, 2026-09-12
+
+The owner's callback reached an invalid/expired single-use login state. Starting a fresh
+browser flow revealed a separate 403: the returned access token had the configured MCP
+resource audience, not the confidential browser client audience. Safe, temporary diagnostics
+also established that the selected browser identity had neither the required organization
+claim nor an existing membership in this site. No credentials, token values or identity claims
+were logged. The temporary container diagnostic was removed and the original runtime restored
+before deploying the reviewed fix.
+
+The callback now validates two signed tokens from its confidential PKCE exchange: the API
+access token retains the existing organization/site/permission checks; the ID token binds the
+browser client and nonce to the same issuer and subject. This fixes the audience assumption
+without auto-provisioning the selected account or weakening the publication gate. Rejected
+logins emit only a stage and an internal error code, and the page offers a retry link.
+
+The HTTP regression now uses real RS256 signatures and distinct API/client audiences. It also
+rejects missing ID tokens, wrong audiences, mismatched or missing nonce, another subject,
+incorrect authorized party or access-token hash, expired identity tokens, missing/foreign
+organization and delegated agent identities. Browser tests retain the real redirect/code/PKCE
+flow with the added nonce-bound ID token.
+
+A valid site member must still complete browser login and record their own decision before
+publication/rollback acceptance can continue. This follow-up does not mark Sprint 8.2 accepted.
+
+The login correction is merged in [PR 62](https://github.com/Tsumibito/NavoCMS/pull/62):
+implementation `85f496a7f3ccb343c3bd4b8f89b783cd90cc8c98`, merge
+`221edf12d46367d2e778348462f93917a645b4c2`, identical source tree.
+[CI 34703107391](https://github.com/Tsumibito/NavoCMS/actions/runs/34703107391) passed in 2m9s,
+including all 39 test files, 10 browser checks and PostgreSQL isolation.
+Coolify deployment `rqrzknjdrxydtnfesusrt0lr` finished on that merge; container
+`y7xtftoizsqmitvgfvzfwkbu-154649834140` is healthy and all `/readyz` dependencies are ready.
+A fresh live login passed dedicated ID-token verification and reached access-token validation;
+its remaining rejection is `OAUTH_CLAIM_INVALID` for the organizationless selected account.
+The owner has been asked which account originally connected the CMS. No membership, permissions,
+receipt or publication was changed to work around this rejection.

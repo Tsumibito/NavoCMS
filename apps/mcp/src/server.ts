@@ -176,9 +176,9 @@ const verifier = new OidcJwtVerifier({
 // by the independent human-confirmation session. Never used by MCP clients.
 const confirmationLogin = process.env.NAVOCMS_CONFIRMATION_CLIENT_ID && process.env.NAVOCMS_CONFIRMATION_CLIENT_SECRET
   ? {
-    verifier: new OidcJwtVerifier({
+    verifier,
+    idTokenVerifier: new OidcJwtVerifier({
       issuer, audience: process.env.NAVOCMS_CONFIRMATION_CLIENT_ID, deploymentScope,
-      ...(organizationId ? { organizationId } : {}),
       jwks: createRemoteJwksProvider(jwksUrl)
     }),
     clientId: process.env.NAVOCMS_CONFIRMATION_CLIENT_ID,
