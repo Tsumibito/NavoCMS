@@ -10,7 +10,10 @@ import { randomUUID } from "node:crypto";
 import { NAVOCMS_PERMISSIONS, effectivePermissions, type AuthorizationContext } from "@navocms/security";
 import { afterAll, describe, expect, it } from "vitest";
 
+import { McpEditingError } from "./errors.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
+import { StagingOperationalRuntime } from "./staging-operational-runtime.js";
+import type { TrustedAstroBuildRunner } from "./trusted-astro-builder.js";
 import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
 import { PostgresReleaseWorkflowRepository } from "./postgres-release-repository.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
@@ -195,6 +198,348 @@ integration("Neon production persistence", () => {
     expect(() => new PostgresDeliveryPhaseStore(database!, { site: descriptor, principalId }, { authority: { principal: { id: principalId, kind: "human" }, permissions: ["content:publish"] } })).toThrow("Event Ledger");
     const resolutionEvents = await new PostgresEventStore(database!).query({ tenantId, siteId, principalId, correlationId: unknownInput.releaseId });
     expect(resolutionEvents.some(({ event }) => event.type === "io.navocms.delivery.phase-resolved.v1" && event.data.externalId === "coolify-human-resolved-1")).toBe(true);
+  });
+
+  it("gives build-job ownership to exactly one runtime instance and re-homes it only after the lease expires", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `build-lease-${suffix}`, locale: "en", title: `Build lease ${suffix}`,
+      markdown: "# Build lease\n", idempotencyKey: `build-lease-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-lease-preview-${suffix}`) as { releaseId: string; releaseHash: string };
+    const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
+
+    // The owner's runner blocks until the test releases it, so the lease is
+    // deterministically held while the second instance checks.
+    let releaseOwner = () => {};
+    const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    const blockingRunner: TrustedAstroBuildRunner = {
+      attest: async () => {
+        await ownerGate;
+        throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "blocked owner stopped");
+      },
+      build: async () => { throw new Error("not reached"); }
+    };
+    const owner = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId, runner: blockingRunner
+    });
+    const second = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId
+    });
+
+    // The first instance acquires ownership; its durable job row and lease
+    // exist before any build work starts.
+    await expect(owner.startBuild(repositoryContext, { id: preview.releaseId, releaseHash: preview.releaseHash, artifactHash: "0".repeat(64) }))
+      .resolves.toMatchObject({ releaseId: preview.releaseId, status: "building" });
+    const leaseOf = async () => {
+      const rows = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+        await client.query<{ owner_token: string }>(
+          `SELECT owner_token FROM navocms.build_job_leases
+            WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+          [tenantId, siteId, preview.releaseId]
+        )).rows);
+      return rows;
+    };
+    const ownerLease = await leaseOf();
+    expect(ownerLease).toHaveLength(1);
+
+    // A second live instance sees the foreign active lease, does not execute
+    // the job, and does not create a second workflow run.
+    await expect(second.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
+      releaseId: preview.releaseId, status: "building"
+    });
+    const runCount = async () => {
+      const rows = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+        await client.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM navocms.workflow_runs
+            WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+          [tenantId, siteId, preview.releaseId]
+        )).rows);
+      return Number(rows[0]!.count);
+    };
+    expect(await runCount()).toBe(1);
+    expect((await leaseOf())[0]!.owner_token).toBe(ownerLease[0]!.owner_token);
+
+    // The owner's lease expires while it is still (simulated) alive — the
+    // expiry is forced via SQL so the test is deterministic on remote
+    // databases — and the second instance then re-homes the job: same single
+    // run, new owner.
+    await database!.withScope({ tenantId, siteId, principalId }, (client) => client.query(
+      `UPDATE navocms.build_job_leases SET leased_until = now() - interval '1 second'
+        WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3
+          AND workflow_key = 'navocms.staging-astro.build.v1'`,
+      [tenantId, siteId, preview.releaseId]
+    ));
+    await expect(second.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
+      releaseId: preview.releaseId, status: "building"
+    });
+    expect(await runCount()).toBe(1);
+    const rehomedLease = await leaseOf();
+    expect(rehomedLease).toHaveLength(1);
+    expect(rehomedLease[0]!.owner_token).not.toBe(ownerLease[0]!.owner_token);
+
+    // The re-homed executor fails closed on the unattestable toolchain and
+    // its durable failure is the recovered status; the original owner's
+    // eventual stop does not corrupt the terminal state.
+    let runs: ReadonlyArray<{ status: string; last_error_code: string | null }> = [];
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      runs = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+        await client.query<{ status: string; last_error_code: string | null }>(
+          `SELECT status, last_error_code FROM navocms.workflow_runs
+            WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+          [tenantId, siteId, preview.releaseId]
+        )).rows
+      );
+      if (runs.length === 1 && runs[0]!.status === "failed") break;
+    }
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("failed");
+    expect(runs[0]!.last_error_code).toBe("REVIEWED_ASTRO_TOOLCHAIN_INVALID");
+    await expect(second.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
+      releaseId: preview.releaseId, status: "failed", errorCode: "REVIEWED_ASTRO_TOOLCHAIN_INVALID"
+    });
+    // The stale owner finally stops; its failure must not overwrite the new
+    // owner's recorded outcome.
+    releaseOwner();
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const afterStaleOwner = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ status: string; last_error_code: string | null }>(
+        `SELECT status, last_error_code FROM navocms.workflow_runs
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+        [tenantId, siteId, preview.releaseId]
+      )).rows[0]!);
+    expect(afterStaleOwner.status).toBe("failed");
+    expect(afterStaleOwner.last_error_code).toBe("REVIEWED_ASTRO_TOOLCHAIN_INVALID");
+  });
+
+  it("elects exactly one executor when two instances race to claim a fresh job", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `build-race-${suffix}`, locale: "en", title: `Build race ${suffix}`,
+      markdown: "# Build race\n", idempotencyKey: `build-race-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-race-preview-${suffix}`) as { releaseId: string; releaseHash: string };
+    const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
+    let firstRunnerCalls = 0;
+    let secondRunnerCalls = 0;
+    // Both runners block forever once started: whichever instance loses the
+    // claim must never even reach its runner, so the total invocation count
+    // is exactly one no matter how the network orders the two claims.
+    const first: StagingOperationalRuntime = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId,
+      runner: {
+        attest: async () => { firstRunnerCalls += 1; await new Promise<void>(() => {}); throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "first blocked"); },
+        build: async () => { throw new Error("not reached"); }
+      }
+    });
+    const second: StagingOperationalRuntime = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId,
+      runner: {
+        attest: async () => { secondRunnerCalls += 1; await new Promise<void>(() => {}); throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "second blocked"); },
+        build: async () => { throw new Error("not reached"); }
+      }
+    });
+    const claim = { id: preview.releaseId, releaseHash: preview.releaseHash, artifactHash: "0".repeat(64) };
+    const outcomes = await Promise.all([
+      first.startBuild(repositoryContext, claim),
+      second.startBuild(repositoryContext, claim)
+    ]);
+    expect(outcomes.map(({ status }) => status)).toEqual(["building", "building"]);
+    // Exactly one job row, one lease, and only the winner's runner ever ran.
+    const runs = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ owner_token: string }>(
+        `SELECT r.id::text FROM navocms.workflow_runs r
+          WHERE r.tenant_id = $1 AND r.site_id = $2 AND r.release_id = $3 AND r.workflow_key = 'navocms.staging-astro.build.v1'`,
+        [tenantId, siteId, preview.releaseId]
+      )).rows);
+    expect(runs).toHaveLength(1);
+    expect(firstRunnerCalls + secondRunnerCalls).toBe(1);
+  });
+
+  it("treats a repeated startBuild on the owning instance as a no-op", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `build-noop-${suffix}`, locale: "en", title: `Build noop ${suffix}`,
+      markdown: "# Build noop\n", idempotencyKey: `build-noop-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-noop-preview-${suffix}`) as { releaseId: string; releaseHash: string };
+    const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
+    let runnerCalls = 0;
+    const runtime = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId,
+      runner: {
+        attest: async () => { runnerCalls += 1; await new Promise<void>(() => {}); throw new McpEditingError("REVIEWED_ASTRO_CHECKOUT_INVALID", "blocked"); },
+        build: async () => { throw new Error("not reached"); }
+      }
+    });
+    const claim = { id: preview.releaseId, releaseHash: preview.releaseHash, artifactHash: "0".repeat(64) };
+    const starts = await Promise.all([runtime.startBuild(repositoryContext, claim), runtime.startBuild(repositoryContext, claim), runtime.startBuild(repositoryContext, claim)]);
+    expect(starts).toEqual(expect.arrayContaining([expect.objectContaining({ status: "building" })]));
+    expect(runnerCalls).toBe(1);
+  });
+
+  it("never lets publication workflow helpers advance a running build job", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `build-isolation-${suffix}`, locale: "en", title: `Build isolation ${suffix}`,
+      markdown: "# Build isolation\n", idempotencyKey: `build-isolation-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-isolation-preview-${suffix}`) as { releaseId: string; releaseHash: string };
+    const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
+    const runtime = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId
+    });
+    await expect(runtime.startBuild(repositoryContext, { id: preview.releaseId, releaseHash: preview.releaseHash, artifactHash: "0".repeat(64) }))
+      .resolves.toMatchObject({ status: "building" });
+    // Complete the proof-only publication pipeline; its workflow helpers must
+    // only touch the release's own workflow runs.
+    await serviceInstance.approveRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `build-isolation-approve-${suffix}`
+    });
+    await expect(serviceInstance.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `build-isolation-publish-${suffix}`
+    })).resolves.toMatchObject({ release: { status: "published" } });
+    const buildRuns = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+      await client.query<{ status: string }>(
+        `SELECT status FROM navocms.workflow_runs
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+        [tenantId, siteId, preview.releaseId]
+      )).rows
+    );
+    expect(buildRuns).toHaveLength(1);
+    expect(["running", "failed"]).toContain(buildRuns[0]!.status);
+  });
+
+  it("resumes a running pre-review build job after a restart without a second job", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `build-resume-${suffix}`, locale: "en", title: `Build resume ${suffix}`,
+      markdown: "# Build resume\n", idempotencyKey: `build-resume-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `build-resume-preview-${suffix}`) as { releaseId: string; releaseHash: string };
+    // Simulate a killed process that had checkpointed a running build job.
+    const repositoryContext = { site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId };
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `INSERT INTO navocms.workflow_runs (id, tenant_id, site_id, release_id, workflow_key, status, current_step)
+         VALUES ($1,$2,$3,$4,'navocms.staging-astro.build.v1','running','build.requested')`,
+        [randomUUID(), tenantId, siteId, preview.releaseId]
+      );
+    });
+    // A restarted runtime (empty in-memory executors) resumes the same job.
+    const runtime = new StagingOperationalRuntime({
+      database: database!, environmentKey: "default", reviewedSourceCommit: "f".repeat(64),
+      toolchainDirectory: "/tmp/navocms-nonexistent-toolchain", readinessContext: repositoryContext,
+      runtimePrincipalId: principalId
+    });
+    const status = await runtime.buildStatus(repositoryContext, preview.releaseId);
+    expect(status.status).toBe("building");
+    // The resumed executor runs asynchronously; poll for its durable outcome.
+    let runs: ReadonlyArray<{ status: string; last_error_code: string | null }> = [];
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      runs = await database!.withScope({ tenantId, siteId, principalId }, async (client) => (
+        await client.query<{ status: string; last_error_code: string | null }>(
+          `SELECT status, last_error_code FROM navocms.workflow_runs
+            WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = 'navocms.staging-astro.build.v1'`,
+          [tenantId, siteId, preview.releaseId]
+        )).rows
+      );
+      if (runs.length === 1 && runs[0]!.status === "failed") break;
+    }
+    // Exactly one job exists; the resumed executor failed closed on the
+    // unattestable toolchain of this synthetic environment and recorded its
+    // error durably for the next recovery attempt.
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("failed");
+    expect(runs[0]!.last_error_code).toBe("REVIEWED_ASTRO_TOOLCHAIN_INVALID");
+    await expect(runtime.buildStatus(repositoryContext, preview.releaseId)).resolves.toMatchObject({
+      releaseId: preview.releaseId, status: "failed", errorCode: "REVIEWED_ASTRO_TOOLCHAIN_INVALID"
+    });
+  });
+
+  it("persists release confirmations and gates publication of built releases on them", async () => {
+    const suffix = randomUUID().replace(/-/g, "");
+    const serviceInstance = service();
+    const created = await serviceInstance.createDraft(context(), {
+      typeName: "article", slug: `confirmation-${suffix}`, locale: "en", title: `Confirmation ${suffix}`,
+      markdown: "# Confirmation\n", idempotencyKey: `confirmation-draft-${suffix}`
+    }) as { draft: { revisionId: string } };
+    const preview = await serviceInstance.preparePreview(context(), created.draft.revisionId, `confirmation-preview-${suffix}`) as {
+      releaseId: string; releaseHash: string; confirmationUrl: string;
+    };
+    const confirmationToken = preview.confirmationUrl.split("/confirmations/")[1]!;
+    expect(await serviceInstance.releaseConfirmationStatus(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash }))
+      .toMatchObject({ status: "pending" });
+
+    const releases = new PostgresReleaseWorkflowRepository(database!);
+    const tokenHash = sha256(confirmationToken);
+    const resolved = await releases.resolveConfirmation(tokenHash);
+    expect(resolved).toMatchObject({ releaseId: preview.releaseId, releaseHash: preview.releaseHash });
+    const digest = `sha256:${"b".repeat(64)}`;
+    const decidedAt = new Date().toISOString();
+    const receiptExpiresAt = new Date(Date.now() + 600_000).toISOString();
+    const receiptHash = `sha256:${"c".repeat(64)}`;
+    const decision = { decidedAt, outputManifestDigest: digest, receiptHash, receiptExpiresAt };
+    await expect(releases.latestConfirmation({ site: { tenantId, siteId, name: "Persistence suite", primaryLocale: "en", locales: ["en"] }, principalId }, preview.releaseId, preview.releaseHash))
+      .resolves.toMatchObject({ releaseHash: preview.releaseHash });
+    await expect(serviceInstance.releaseConfirmationStatus(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash }))
+      .resolves.toMatchObject({ status: "pending" });
+
+    await serviceInstance.approveRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-approve-${suffix}`
+    });
+    // A registered built artifact flips publication onto the independent
+    // confirmation policy. The decision is not recorded yet, so publishing
+    // from the MCP bearer alone fails closed even with a durable approval.
+    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+      await client.query(
+        `INSERT INTO navocms.reviewed_astro_artifact_object_bindings (
+           tenant_id, site_id, environment_id, environment_key, release_id, release_hash,
+           artifact_hash, astro_artifact_hash, source_commit_sha, source_object_key, source_object_sha256,
+           source_object_bytes, output_object_key, output_object_sha256, output_object_bytes, state, evidence_hash
+         )
+         SELECT c.tenant_id, c.site_id, c.environment_id, 'default', c.id, c.release_hash, c.artifact_hash,
+                $1, $2, $3, $4, $5, $6, $7, $8, 'ready', $9
+           FROM navocms.release_candidates c
+          WHERE c.tenant_id = $10 AND c.site_id = $11 AND c.id = $12`,
+        [`sha256:${"d".repeat(64)}`, "f".repeat(64),
+          `tenants/${tenantId}/sites/${siteId}/reviewed-astro/source/sha256/${"e".repeat(64)}.json`, "e".repeat(64), 2048,
+          `tenants/${tenantId}/sites/${siteId}/reviewed-astro/output/sha256/${"f".repeat(64)}.json`, "f".repeat(64), 4096,
+          `sha256:${"9".repeat(64)}`, tenantId, siteId, preview.releaseId]
+      );
+    });
+    await expect(serviceInstance.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-${suffix}`
+    })).rejects.toMatchObject({ code: "HUMAN_CONFIRMATION_REQUIRED" });
+
+    // The independent human decision — recorded only by the server after the
+    // browser session acted — is what unlocks publication. Re-delivery of the
+    // same decision is a safe no-op; a forged receipt cannot exist because
+    // the browser request carries no trust-bearing values.
+    await expect(releases.recordConfirmation(tokenHash, { ...decision, decidedByReference: "d".repeat(64) })).resolves.toMatchObject({ recorded: true });
+    await expect(releases.recordConfirmation(tokenHash, { ...decision, decidedByReference: "d".repeat(64) })).resolves.toMatchObject({ recorded: false });
+    await expect(serviceInstance.publishRelease(context(), {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `confirmation-publish-2-${suffix}`
+    })).resolves.toMatchObject({ release: { status: "published" } });
   });
 
   it("preserves applied-effect evidence across service restart after verification failure", async () => {

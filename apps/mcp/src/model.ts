@@ -37,8 +37,33 @@ export interface PreviewPreparation {
   readonly artifactHash: string;
   readonly workflow: string;
   readonly previewUrl: string;
+  readonly confirmationUrl?: string;
+  readonly build: PreviewBuildStatus;
   readonly expiresAt: string;
   readonly nextStep: "approve-exact-release";
+}
+
+/** Durable trusted-Astro build job state for one release candidate. */
+export interface PreviewBuildStatus {
+  readonly releaseId: string;
+  readonly status: "building" | "ready" | "failed" | "unsupported";
+  readonly outputManifestDigest?: string;
+  readonly sourceCommitSha?: string;
+  readonly fileCount?: number;
+  readonly totalBytes?: number;
+  readonly errorCode?: string;
+}
+
+/** The independently recorded human decision for one release candidate. */
+export interface ConfirmationStatus {
+  readonly releaseId: string;
+  readonly releaseHash: string;
+  readonly status: "pending" | "confirmed" | "expired" | "revoked";
+  readonly policyVersion: string;
+  readonly decidedAt?: string;
+  readonly receiptHash?: string;
+  readonly outputManifestDigest?: string;
+  readonly receiptExpiresAt?: string;
 }
 
 export const MCP_LIMITS = Object.freeze({

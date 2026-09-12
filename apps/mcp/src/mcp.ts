@@ -179,9 +179,23 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ releaseId }) => result("Release status loaded", await service.releaseStatus(context, releaseId))));
 
+  if (canRead) server.registerTool("preview_build_status", {
+    title: "Read the trusted preview build status",
+    description: "Read the durable pre-review build job for one release: building, ready with the output manifest digest, or failed with its error code. The build runs outside the request; this never publishes.",
+    inputSchema: { releaseId: z.string().uuid() },
+    annotations: readOnlyAnnotations()
+  }, safeTool(async ({ releaseId }) => result("Preview build status loaded", await service.releaseBuildStatus(context, releaseId))));
+
+  if (canRead) server.registerTool("release_confirm_status", {
+    title: "Read the independent human confirmation status",
+    description: "Read whether an independent browser session has recorded a human confirmation receipt for this exact release hash. Agents can read this decision but can never record it.",
+    inputSchema: { releaseId: z.string().uuid(), releaseHash: z.string().regex(/^[a-f0-9]{64}$/) },
+    annotations: readOnlyAnnotations()
+  }, safeTool(async ({ releaseId, releaseHash }) => result("Release confirmation status loaded", await service.releaseConfirmationStatus(context, { releaseId, releaseHash }))));
+
   if (canPublish && context.authorization.principal.kind === "human") server.registerTool("release_approve", {
-    title: "Approve an exact previewed release",
-    description: "Approve only the supplied release hash. A stale or changed hash fails closed. Requires content:publish.",
+    title: "Approve an exact confirmed release",
+    description: "Checkpoint the independent human confirmation into the durable approval for the supplied release hash. Requires a current browser confirmation receipt whose output manifest digest still matches the registered build; the MCP bearer alone can never approve. A stale or changed hash fails closed.",
     inputSchema: exactReleaseInput(),
     annotations: writeAnnotations()
   }, safeTool(async (input) => result("Exact release approved; it is not published yet", await service.approveRelease(context, input))));

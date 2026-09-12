@@ -43,7 +43,9 @@ const deploymentScope = Object.freeze({
 });
 const environmentKey = runtimeMode === "production" ? required("NAVOCMS_ENVIRONMENT") : (process.env.NAVOCMS_ENVIRONMENT ?? runtimeMode);
 const deploymentEnvironmentKey = process.env.NAVOCMS_ENVIRONMENT_KEY ?? "default";
-const runtimePrincipalId = databaseUrl && runtimeMode === "production"
+// The trusted runtime principal drives pre-review builds and scoped artifact
+// reads outside any request. Required wherever the database runtime runs.
+const runtimePrincipalId = databaseUrl
   ? required("NAVOCMS_RUNTIME_PRINCIPAL_ID")
   : undefined;
 const database = databaseUrl ? new PostgresDatabase({
@@ -116,6 +118,7 @@ if (database) {
       reviewedSourceCommit: required("NAVOCMS_REVIEWED_SOURCE_COMMIT"),
       toolchainDirectory: required("NAVOCMS_REVIEWED_ASTRO_TOOLCHAIN"),
       readinessContext: deliveryRepositoryContext,
+      runtimePrincipalId: runtimePrincipalId!,
       objectStorage: r2Storage!.artifacts,
       mediaStorage: r2Storage!.media
     });
@@ -169,6 +172,16 @@ const verifier = new OidcJwtVerifier({
   ...(organizationId ? { organizationId } : {}),
   jwks: createRemoteJwksProvider(jwksUrl)
 });
+// Confirmation browser login: a dedicated confidential OIDC client used only
+// by the independent human-confirmation session. Never used by MCP clients.
+const confirmationLogin = process.env.NAVOCMS_CONFIRMATION_CLIENT_ID && process.env.NAVOCMS_CONFIRMATION_CLIENT_SECRET
+  ? {
+    clientId: process.env.NAVOCMS_CONFIRMATION_CLIENT_ID,
+    clientSecret: process.env.NAVOCMS_CONFIRMATION_CLIENT_SECRET,
+    authorizationEndpoint: required("NAVOCMS_CONFIRMATION_AUTHORIZATION_ENDPOINT"),
+    tokenEndpoint: required("NAVOCMS_CONFIRMATION_TOKEN_ENDPOINT")
+  }
+  : undefined;
 const server = createMcpHttpServer({
   service,
   ...(media ? { media } : {}),
@@ -176,6 +189,7 @@ const server = createMcpHttpServer({
   resource,
   authorizationServers: [issuer],
   scopes: ["openid"],
+  ...(confirmationLogin ? { confirmationLogin } : {}),
   ...(identityResolver ? { resolveAuthorization: (token) => identityResolver.resolve(token) } : {}),
   ...(database ? {
     readiness: async () => {

@@ -249,7 +249,10 @@ integration("reviewed Astro build-input PostgreSQL boundary", () => {
         });
         throw new Error("injected post-input failure");
       },
-      ensureArtifact: async () => undefined
+      startBuild: async (_repository, release) => ({ releaseId: release.id, status: "ready" }),
+      buildStatus: async (_repository, releaseId) => ({ releaseId, status: "ready" }),
+      artifactSummary: async () => undefined,
+      artifactFor: async () => undefined
     };
     const service = new McpEditingService(repository, new PostgresEventStore(database!), new PostgresIdempotencyStore(database!) as IdempotencyStore,
       new PostgresReleaseWorkflowRepository(database!), new EmbeddedReleaseProvider(), { environmentKey: "staging" }, database!, undefined, operations);
@@ -305,7 +308,7 @@ async function createBoundAstroRelease(label: string) {
   const render = new StagingAstroPreviewPreparer().prepare(humanRepositoryContext.site, revision);
   const environmentId = await releases.environmentId(humanRepositoryContext, "staging");
   const { manifest, releaseHash } = createReleaseManifest({ tenantId, siteId, environmentId, revisionId: revision.id, sourceHash: revision.sourceHash, workflow: await repository.workflowFor(humanRepositoryContext, revision.id), anchors: Object.fromEntries(Object.entries(render.anchors).map(([key, value]) => [key, value.slice(7)])) });
-  const release = await releases.createPreview({ context: humanRepositoryContext, environmentKey: "staging", revisionId: revision.id, workflow: manifest.workflow, manifest, releaseHash, artifact: renderMarkdownProofArtifact({ releaseHash, title: `Astro ${label}`, locale: "en", markdown: revision.source }), previewTokenHash: sha256(`preview-${suffix}`), previewExpiresAt: new Date(Date.now() + 60_000).toISOString(), correlationId: revision.documentId });
+  const release = await releases.createPreview({ context: humanRepositoryContext, environmentKey: "staging", revisionId: revision.id, workflow: manifest.workflow, manifest, releaseHash, artifact: renderMarkdownProofArtifact({ releaseHash, title: `Astro ${label}`, locale: "en", markdown: revision.source }), previewTokenHash: sha256(`preview-${suffix}`), previewExpiresAt: new Date(Date.now() + 60_000).toISOString(), confirmationTokenHash: sha256(`confirmation-${suffix}`), confirmationPolicyVersion: "navocms.release-approval.v1", correlationId: revision.documentId });
   return { release, render };
 }
 
