@@ -47,22 +47,22 @@ afterAll(async () => { await database?.close(); await adminDatabase?.close(); })
 
 integration("reviewed Astro artifact PostgreSQL boundary", () => {
   it("builds a human-requested preview under a distinct service principal and reloads it after restart", async () => {
+    const suffix = randomUUID();
     let buildCalls = 0;
     const config = {
-      database: database!, environmentKey: "staging", reviewedSourceCommit: "c".repeat(40),
+      database: database!, environmentKey: "default", reviewedSourceCommit: "c".repeat(40),
       toolchainDirectory: "/unused-injected-runner", readinessContext: serviceRepositoryContext,
       runtimePrincipalId: servicePrincipalId, objectStorage: artifactStorage,
       mediaStorage: new LocalDeterministicMediaStorage(),
       runner: {
         attest: async () => ({ sourceCommitSha: "c".repeat(40), toolchainFingerprint: `sha256:${"e".repeat(64)}` as const }),
-        build: async () => { buildCalls += 1; return { sourceCommitSha: "c".repeat(40), output: { "index.html": html("service-built") } }; }
+        build: async () => { buildCalls += 1; return { sourceCommitSha: "c".repeat(40), output: { [`service-build-${suffix}/index.html`]: html("service-built") } }; }
       }
     };
     const runtime = new StagingOperationalRuntime(config);
     const editing = new McpEditingService(new PostgresEditingRepository(database!), new PostgresEventStore(database!),
       new PostgresIdempotencyStore(database!) as IdempotencyStore, new PostgresReleaseWorkflowRepository(database!),
       new EmbeddedReleaseProvider(), { environmentKey: "staging" }, database!, undefined, runtime);
-    const suffix = randomUUID();
     const draft = await editing.createDraft(requestContext(), { typeName: "article", slug: `service-build-${suffix}`, locale: "en", title: "Service build", markdown: "# Service build\n", idempotencyKey: `service-draft-${suffix}` }) as { draft: { revisionId: string } };
     const previewKey = `service-preview-${suffix}`;
     const preview = await editing.preparePreview(requestContext(), draft.draft.revisionId, previewKey);
