@@ -184,3 +184,8 @@ event and idempotency result first. Scheduling then acquires its durable job lea
 uses the configured service principal consistently for database scope and artifact registration.
 A repeated preview request can resume scheduling after an interruption and reports current build
 status without creating another preview. A completed build is reused.
+
+A failed build retains its unique job identity. A requested retry reopens that row under the
+claim lock, increments its attempt number and clears terminal failure fields before acquiring
+the lease. The local executor guard remains held until lease cleanup completes, preventing an
+old attempt on the same instance from deleting a retry's lease.

@@ -164,10 +164,10 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
       if (lease && lease.owner_token !== this.#ownerToken && new Date(lease.leased_until).getTime() > Date.now()) {
         return false;
       }
-      const existing = (await client.query<{ id: string }>(
-        `SELECT id FROM navocms.workflow_runs
+      const existing = (await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM navocms.workflow_runs
           WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND workflow_key = $4
-            AND status IN ('running','succeeded')`,
+            AND status IN ('running','succeeded','failed')`,
         [repository.site.tenantId, repository.site.siteId, release.id, STAGING_ASTRO_BUILD_WORKFLOW]
       )).rows[0];
       if (!existing) {
@@ -183,6 +183,14 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
            VALUES ($1,$2,$3,$4,'build.requested',$5,$6::jsonb)`,
           [randomUUID(), repository.site.tenantId, repository.site.siteId, runId, release.releaseHash,
             JSON.stringify({ releaseHash: release.releaseHash })]
+        );
+      } else if (existing.status === "failed") {
+        // A failed attempt still owns the release's unique job identity.
+        await client.query(
+          `UPDATE navocms.workflow_runs SET status = 'running', current_step = 'build.requested',
+             attempt = attempt + 1, last_error_code = NULL, completed_at = NULL, updated_at = now()
+            WHERE id = $1 AND tenant_id = $2 AND site_id = $3 AND status = 'failed'`,
+          [existing.id, repository.site.tenantId, repository.site.siteId]
         );
       }
       await client.query(
@@ -318,9 +326,10 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         }).catch(() => undefined);
       } finally {
         clearInterval(renewal);
-        this.#buildExecutors.delete(release.id);
-        // Only our own lease row is ever removed.
+        // Keep the local guard until cleanup finishes: a retry on this same
+        // instance must not lose its new lease to the previous attempt.
         await this.#releaseJob(repository, release.id);
+        this.#buildExecutors.delete(release.id);
       }
     })();
     this.#buildExecutors.set(release.id, executor);

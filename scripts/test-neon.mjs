@@ -7,7 +7,9 @@ const require = createRequire(new URL('../packages/persistence-postgres/package.
 const { Client } = require('pg');
 const root = new URL('../', import.meta.url);
 const isolationOnly = process.argv[2] === '--isolation-only';
-if (process.argv.length > (isolationOnly ? 3 : 2)) throw new Error('Supported option: --isolation-only');
+const testFile = process.argv[2] === '--test-file' ? process.argv[3] : undefined;
+if (testFile && (!/^(apps|packages)\/[a-z0-9-]+\/src\/[a-z0-9.-]+\.test\.ts$/.test(testFile) || testFile.includes('..'))) throw new Error('Expected one repository test file');
+if (process.argv.length !== (isolationOnly ? 3 : testFile ? 4 : 2)) throw new Error('Supported options: --isolation-only or --test-file <path>');
 const adminUrl = new URL(process.env.NAVOCMS_NEON_TEST_ADMIN_DATABASE_URL ?? 'https://missing.invalid');
 const allowedHost = 'ep-round-darkness-b1wmk3ea.c-5.eu-central-1.aws.neon.tech';
 if (adminUrl.protocol !== 'postgresql:' || adminUrl.hostname !== allowedHost || adminUrl.pathname !== '/navocms_agent_test') {
@@ -70,7 +72,8 @@ try {
     environmentId: '7b0c4135-7015-4afd-9d6c-1ee4b2d974f1', environmentKind: 'staging', environmentKey: 'default',
     principal: { id: '016ef382-bf28-406b-9321-1fc580b6ea00', issuer: 'urn:navocms:integration', subject: 'sprint-6', kind: 'human', siteRole: 'owner' }
   });
-  if (!isolationOnly) await command(['check']);
+  if (testFile) await command(['exec', 'vitest', 'run', testFile]);
+  else if (!isolationOnly) await command(['check']);
   for (const name of ['rls', 'content', 'runtime', 'release-workflow', 'media']) {
     const sql = await readFile(new URL(`../packages/persistence-postgres/tests/${name}-isolation.sql`, import.meta.url), 'utf8');
     if (sql.split('\n').some(line => line.startsWith('\\') && line.trim() !== '\\set ON_ERROR_STOP on')) throw new Error('Unsupported isolation script directive');
