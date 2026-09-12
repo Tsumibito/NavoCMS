@@ -419,7 +419,7 @@ export class McpEditingService {
 
   public async preparePreview(context: McpRequestContext, revisionId: string, idempotencyKey: string): Promise<PreviewPreparation> {
     const repositoryContext = await this.requireSite(context, "content:draft");
-    return this.idempotent({
+    const preview = await this.idempotent<PreviewPreparation>({
       tenantId: repositoryContext.site.tenantId,
       siteId: repositoryContext.site.siteId,
       principalId: context.authorization.principal.id
@@ -460,9 +460,6 @@ export class McpEditingService {
       });
       if (stagingRender) {
         await this.#stagingAstro!.persistPreviewInput(context, repositoryContext, release, stagingRender);
-        // The trusted build runs before review, outside this request, under the
-        // service principal; its durable job survives disconnects and restarts.
-        await this.#stagingAstro!.startBuild(repositoryContext, release);
       }
       await this.appendEvent(context, "io.navocms.release.preview.created.v1", release.id, idempotencyKey, {
         phase: "verified",
@@ -472,9 +469,7 @@ export class McpEditingService {
         revisionId: revision.id,
         expiresAt
       }, "G1", release.correlationId);
-      const build = this.#stagingAstro
-        ? await this.#stagingAstro.buildStatus(repositoryContext, release.id)
-        : Object.freeze({ releaseId: release.id, status: "unsupported" as const });
+      const build = Object.freeze({ releaseId: release.id, status: this.#stagingAstro ? "building" as const : "unsupported" as const });
       return safe({
         status: "previewed",
         releaseId: release.id,
@@ -490,6 +485,12 @@ export class McpEditingService {
         nextStep: "approve-exact-release"
       });
     });
+    // Commit immutable preview evidence before launching a service-owned executor.
+    // A replay can resume scheduling without duplicating the preview or its charge.
+    if (!this.#stagingAstro) return preview;
+    const release = await this.#releases.getRelease(repositoryContext, preview.releaseId);
+    await this.#stagingAstro.startBuild(repositoryContext, release);
+    return safe({ ...preview, build: await this.#stagingAstro.buildStatus(repositoryContext, release.id) });
   }
 
   public async releaseStatus(context: McpRequestContext, releaseId: string): Promise<object> {

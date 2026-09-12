@@ -8,6 +8,8 @@ import { LocalDeterministicReviewedAstroObjectStorage, reviewedAstroObjectPrefix
 import { PostgresReviewedAstroBuildInputStore } from "./postgres-reviewed-astro-build-input-store.js";
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
 import { StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
+import { StagingOperationalRuntime } from "./staging-operational-runtime.js";
+import { LocalDeterministicMediaStorage } from "@navocms/media";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
 import { McpEditingService, type IdempotencyStore, type StagingAstroOperations } from "./service.js";
 import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
@@ -44,6 +46,38 @@ const binding = Object.freeze({
 afterAll(async () => { await database?.close(); await adminDatabase?.close(); });
 
 integration("reviewed Astro artifact PostgreSQL boundary", () => {
+  it("builds a human-requested preview under a distinct service principal and reloads it after restart", async () => {
+    const suffix = randomUUID();
+    let buildCalls = 0;
+    const config = {
+      database: database!, environmentKey: "default", reviewedSourceCommit: "c".repeat(40),
+      toolchainDirectory: "/unused-injected-runner", readinessContext: serviceRepositoryContext,
+      runtimePrincipalId: servicePrincipalId, objectStorage: artifactStorage,
+      mediaStorage: new LocalDeterministicMediaStorage(),
+      runner: {
+        attest: async () => ({ sourceCommitSha: "c".repeat(40), toolchainFingerprint: `sha256:${"e".repeat(64)}` as const }),
+        build: async () => { buildCalls += 1; return { sourceCommitSha: "c".repeat(40), output: { [`service-build-${suffix}/index.html`]: html("service-built") } }; }
+      }
+    };
+    const runtime = new StagingOperationalRuntime(config);
+    const editing = new McpEditingService(new PostgresEditingRepository(database!), new PostgresEventStore(database!),
+      new PostgresIdempotencyStore(database!) as IdempotencyStore, new PostgresReleaseWorkflowRepository(database!),
+      new EmbeddedReleaseProvider(), { environmentKey: "staging" }, database!, undefined, runtime);
+    const draft = await editing.createDraft(requestContext(), { typeName: "article", slug: `service-build-${suffix}`, locale: "en", title: "Service build", markdown: "# Service build\n", idempotencyKey: `service-draft-${suffix}` }) as { draft: { revisionId: string } };
+    const previewKey = `service-preview-${suffix}`;
+    const preview = await editing.preparePreview(requestContext(), draft.draft.revisionId, previewKey);
+    await expect.poll(() => runtime.buildStatus(humanRepositoryContext, preview.releaseId), { timeout: 30_000, interval: 500 })
+      .toMatchObject({ status: "ready", sourceCommitSha: "c".repeat(40) });
+    expect(buildCalls).toBe(2);
+    await expect(editing.preparePreview(requestContext(), draft.draft.revisionId, previewKey)).resolves.toMatchObject({ releaseId: preview.releaseId, build: { status: "ready" } });
+    const restarted = new StagingOperationalRuntime(config);
+    await expect(restarted.buildStatus(humanRepositoryContext, preview.releaseId)).resolves.toMatchObject({ status: "ready" });
+    expect(buildCalls).toBe(2);
+    const events = await new PostgresEventStore(database!).query({ tenantId, siteId, principalId: servicePrincipalId, type: "io.navocms.release.astro-artifact-registered.v1" });
+    expect(events.find(({ event }) => event.data.releaseId === preview.releaseId)?.event.navoactor)
+      .toMatchObject({ id: servicePrincipalId, type: "service" });
+  });
+
   it("registers as a human, resolves after restart as a service, and rejects replay drift", async () => {
     const release = await createRelease("durable");
     const store = new PostgresReviewedAstroArtifactStore(database!, humanRepositoryContext, "default", { storage: artifactStorage });
