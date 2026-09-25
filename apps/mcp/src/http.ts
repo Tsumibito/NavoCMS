@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { TLSSocket } from "node:tls";
 import { createServer as createNodeServer, type IncomingMessage, type ServerResponse } from "node:http";
 
@@ -42,11 +42,18 @@ export interface McpHttpOptions {
    * of silently accepting weaker authority.
    */
   readonly confirmationLogin?: ConfirmationLoginConfig;
+  readonly browserSessionRevocations?: BrowserSessionRevocations;
+}
+
+export interface BrowserSessionRevocations {
+  isRevoked(session: Readonly<{ id: string; tenantId: string; siteId: string; principalId: string }>): Promise<boolean>;
+  revoke(session: Readonly<{ id: string; tenantId: string; siteId: string; principalId: string; expiresAt: number }>): Promise<void>;
 }
 
 const CONFIRMATION_CSRF_COOKIE = "navocms_confirmation_csrf";
 const CONFIRMATION_SESSION_COOKIE = "navocms_confirmation_session";
 const CONFIRMATION_OIDC_STATE_COOKIE = "navocms_confirmation_oidc";
+const CONFIRMATION_SWITCH_HINT_COOKIE = "navocms_confirmation_switch_hint";
 
 /** External identity-provider settings for the confirmation browser login. */
 export interface ConfirmationLoginConfig {
@@ -58,10 +65,13 @@ export interface ConfirmationLoginConfig {
   readonly clientSecret: string;
   readonly authorizationEndpoint: string;
   readonly tokenEndpoint: string;
+  /** Optional provider logout endpoint; required for reliable account switching. */
+  readonly logoutEndpoint?: string;
   readonly scopes?: readonly string[];
 }
 const PREVIEW_CSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-const CONFIRMATION_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const REVIEW_PREVIEW_CSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+const CONFIRMATION_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 export interface ReadinessResult {
   readonly ready: boolean;
@@ -85,7 +95,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
   // Server-side browser-session store for the confirmation flow. Sessions are
   // created only through the OIDC authorization-code callback below; MCP
   // bearer tokens are never exchanged for one and never accepted as one.
-  const browserAuth: BrowserAuth = { sessions: new Map(), pendingLogins: new Map() };
+  const browserAuth: BrowserAuth = { pendingLogins: new Map(), revoked: new Set() };
 
   return createNodeServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/healthz") {
@@ -165,6 +175,18 @@ export function createMcpHttpServer(options: McpHttpOptions) {
       const secure = request.socket instanceof TLSSocket || request.headers["x-forwarded-proto"] === "https";
       if (callbackRoute && request.method === "GET") {
         return loginCallback(response, options, browserAuth, request, secure);
+      }
+      const switchRoute = /^\/confirmations\/([A-Za-z0-9_-]{43})\/switch$/.exec(request.url);
+      if (switchRoute && request.method === "GET") {
+        return switchAccount(response, options, browserAuth, switchRoute[1]!, request, secure);
+      }
+      const renewRoute = /^\/confirmations\/([A-Za-z0-9_-]{43})\/renew$/.exec(request.url);
+      if (renewRoute && request.method === "POST") {
+        return renewConfirmation(response, options, browserAuth, renewRoute[1]!, request, secure);
+      }
+      const reviewPreviewRoute = /^\/confirmations\/([A-Za-z0-9_-]{43})\/preview(?:\/(.*))?$/.exec(request.url);
+      if (reviewPreviewRoute && request.method === "GET") {
+        return confirmationPreview(response, options, browserAuth, reviewPreviewRoute[1]!, reviewPreviewRoute[2], request);
       }
       if (tokenRoute && request.method === "GET") {
         return confirmationPage(response, options, browserAuth, tokenRoute[1]!, request, secure);
@@ -306,24 +328,27 @@ async function readBody(request: IncomingMessage, maximumBytes: number): Promise
 
 async function confirmationPage(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean): Promise<void> {
   const view = await options.service.resolveConfirmationView(token);
-  if (!view) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "This confirmation link is invalid or has expired. Ask the agent for a fresh preview."));
-  const session = await resolveBrowserSession(options, browserAuth, request, view);
+  if (!view) return sendHtml(response, 404, confirmationShell("Publication link unavailable", "Ask the agent for a new review link."));
+  const session = await resolveBrowserSession(response, options, browserAuth, request, view);
   if (session.error) {
     if (session.error.status === 401) return startLogin(response, options, browserAuth, token, request, secure);
-    return sendHtml(response, session.error.status, confirmationShell(session.error.title, escapeHtml(session.error.body)));
+    return sendHtml(response, session.error.status, confirmationShell(session.error.title,
+      `${escapeHtml(session.error.body)}${session.error.status === 403 ? ` <a href="${escapeHtml(`/confirmations/${token}/switch`)}">Use another account</a>.` : ""}`));
   }
-  if (view.revokedAt) return sendHtml(response, 410, confirmationShell("Confirmation revoked", "This confirmation has been revoked; prepare a new preview."));
+  if (view.revokedAt) return sendHtml(response, 410, confirmationShell("Publication link revoked", "Ask the agent for a new review link."));
   if (view.decisionAt) {
-    return sendHtml(response, 200, confirmationShell("Decision already recorded", escapeHtml(`This release was confirmed on ${view.decisionAt}. Receipt ${view.receiptHash ?? "unknown"}. Re-delivery is safe; nothing was published by revisiting this page.`)));
+    return sendHtml(response, 200, confirmationShell("Publication approved", "Your decision is saved. The agent can finish publishing and report the result here in the conversation."));
   }
   if (new Date(view.previewExpiresAt ?? 0).getTime() <= Date.now()) {
-    return sendHtml(response, 410, confirmationShell("Confirmation expired", "This confirmation link has expired. Ask the agent for a fresh preview and confirm again."));
+    const csrf = randomBytes(32).toString("hex");
+    appendCookie(response, `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=900${secure ? "; Secure" : ""}`);
+    return sendHtml(response, 410, confirmationShell("Review link expired", `<p>The saved build can be reviewed again without rebuilding it.</p><form method="post" action="${escapeHtml(`/confirmations/${token}/renew`)}"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Get a new review link</button></form>`));
   }
   if (!view.build.ready) {
     return sendHtml(response, 409, confirmationShell("Build not finished", escapeHtml(`The trusted build for release ${shortHash(view.releaseHash)} has not completed yet. Ask the agent for the build status, then reopen this page to confirm.`)));
   }
   const csrf = randomBytes(32).toString("hex");
-  response.setHeader("set-cookie", `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=900${secure ? "; Secure" : ""}`);
+  appendCookie(response, `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=900${secure ? "; Secure" : ""}`);
   const summaryRows: readonly (readonly [string, string])[] = [
     ["Release hash", view.releaseHash],
     ["Output manifest digest", view.build.outputManifestDigest ?? "—"],
@@ -335,7 +360,8 @@ async function confirmationPage(response: ServerResponse, options: McpHttpOption
   const summary = summaryRows
     .map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd><code>${escapeHtml(value)}</code></dd>`)
     .join("");
-  sendHtml(response, 200, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="robots" content="noindex, nofollow"><title>Confirm release ${escapeHtml(shortHash(view.releaseHash))}</title></head><body><main><h1>Confirm publication of this exact build</h1><p>Confirming records your human decision for this exact build. Publication happens afterwards through the agent workflow and uses these exact files.</p><dl>${summary}</dl><form method="post" action="${escapeHtml(`/confirmations/${token}`)}"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Confirm this build</button></form><p>This page belongs to an independent confirmation session; the agent cannot press this button or record the decision through its token.</p></main></body></html>`);
+  const siteName = await options.service.confirmationSiteName(view, session.principal!.principalId!);
+  sendHtml(response, 200, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="robots" content="noindex, nofollow"><title>Review publication</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#172335}h1{font-size:2rem}iframe{width:100%;height:480px;border:1px solid #8b98aa;border-radius:8px;background:#fff}button{font:inherit;background:#173b67;color:white;border:0;border-radius:6px;padding:.7rem 1.5rem;cursor:pointer}details{margin-top:2rem}dt{font-weight:600;margin-top:.5rem}dd{margin:0;overflow-wrap:anywhere}code{font-size:.85rem}nav{margin:1rem 0}</style></head><body><main><h1>Review publication</h1><p>Site: <strong>${escapeHtml(siteName ?? view.siteId)}</strong></p><p>Review the saved page below. Publishing will use these exact files.</p><iframe title="Page preview" src="${escapeHtml(`/confirmations/${token}/preview`)}"></iframe><nav><a href="${escapeHtml(`/confirmations/${token}/preview`)}" target="_blank" rel="noopener noreferrer">Open full preview</a></nav><p>Signed in as ${escapeHtml(session.accountLabel ?? session.principal!.subject)} · <a href="${escapeHtml(`/confirmations/${token}/switch`)}">Use another account</a></p><form method="post" action="${escapeHtml(`/confirmations/${token}`)}"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Publish</button></form><p>The agent will finish publication and report the result after you approve it here.</p><details><summary>Technical details</summary><dl>${summary}</dl></details></main></body></html>`);
 }
 
 async function confirmDecision(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean): Promise<void> {
@@ -345,7 +371,7 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
   // sessions get a clear rejection regardless of form contents.
   const view = await options.service.resolveConfirmationView(token);
   if (!view) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "This confirmation link is invalid or has expired."));
-  const session = await resolveBrowserSession(options, browserAuth, request, view);
+  const session = await resolveBrowserSession(response, options, browserAuth, request, view);
   if (session.error) return sendHtml(response, session.error.status, confirmationShell(session.error.title, escapeHtml(session.error.body)));
   // Cross-origin form posts are rejected: a known foreign Origin never
   // matches the host that served the confirmation page (scheme-agnostic
@@ -370,9 +396,9 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
   try {
     const decision = await options.service.recordConfirmationDecision(token, session.principal!);
     const body = decision.recorded
-      ? escapeHtml(`Your decision was recorded at ${decision.decidedAt}. Receipt ${decision.receiptHash}. It covers output manifest ${decision.outputManifestDigest}. Publication is a separate step and uses exactly these files.`)
-      : escapeHtml(`This decision was already recorded at ${decision.decidedAt}. Receipt ${decision.receiptHash}. Re-delivery is safe.`);
-    return sendHtml(response, 200, confirmationShell(decision.recorded ? "Decision recorded" : "Decision already recorded", body));
+      ? "Your approval is saved for the page you reviewed. The agent can finish publishing and report the result."
+      : "Your approval was already saved; no further action is needed.";
+    return sendHtml(response, 200, confirmationShell(decision.recorded ? "Publication approved" : "Publication already approved", body));
   } catch (error) {
     const code = error instanceof Error && "code" in error ? String((error as { code: unknown }).code) : "REQUEST_REJECTED";
     if (code === "RELEASE_CONFIRMATION_REVOKED") return sendHtml(response, 410, confirmationShell("Confirmation revoked", "This confirmation has been revoked."));
@@ -383,15 +409,51 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
 }
 
 interface BrowserAuth {
-  readonly sessions: Map<string, { readonly context: AuthorizationContext; readonly verified: VerifiedAccessToken; readonly expiresAt: number }>;
   readonly pendingLogins: Map<string, { readonly verifier: string; readonly nonce: string; readonly returnUrl: string; readonly createdAt: number }>;
+  readonly revoked: Set<string>;
 }
 
-const SESSION_TTL_SECONDS = 3600;
+const SESSION_TTL_SECONDS = 8 * 3600;
 const LOGIN_STATE_TTL_MS = 600_000;
 
-function sessionKey(cookieValue: string): string {
-  return createHash("sha256").update(cookieValue).digest("hex");
+interface BrowserSession {
+  readonly id: string;
+  readonly principalId: string;
+  readonly verified: VerifiedAccessToken;
+  readonly expiresAt: number;
+  readonly refreshToken?: string;
+  readonly providerSessionId?: string;
+  readonly accountLabel?: string;
+}
+
+function sessionKey(secret: string): Buffer {
+  return createHash("sha256").update("navocms:browser-session:v1:").update(secret).digest();
+}
+
+function sealSession(session: BrowserSession, secret: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", sessionKey(secret), iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(session), "utf8"), cipher.final()]);
+  return `v1.${iv.toString("base64url")}.${ciphertext.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}`;
+}
+
+function openSession(value: string | undefined, secret: string | undefined): BrowserSession | undefined {
+  if (!value || !secret || value.length > 8192) return undefined;
+  const parts = value.split(".");
+  if (parts.length !== 4 || parts[0] !== "v1") return undefined;
+  try {
+    const iv = Buffer.from(parts[1]!, "base64url");
+    const tag = Buffer.from(parts[3]!, "base64url");
+    if (iv.length !== 12 || tag.length !== 16) return undefined;
+    const decipher = createDecipheriv("aes-256-gcm", sessionKey(secret), iv);
+    decipher.setAuthTag(tag);
+    const session = JSON.parse(Buffer.concat([decipher.update(Buffer.from(parts[2]!, "base64url")), decipher.final()]).toString("utf8")) as BrowserSession;
+    if (typeof session.id !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(session.id) || typeof session.principalId !== "string" ||
+      !Number.isSafeInteger(session.expiresAt) || session.expiresAt <= Date.now() ||
+      !session.verified || session.verified.principal.kind !== "human" ||
+      typeof session.verified.principal.issuer !== "string" || typeof session.verified.principal.subject !== "string") return undefined;
+    return session;
+  } catch { return undefined; }
 }
 
 /**
@@ -403,23 +465,51 @@ function sessionKey(cookieValue: string): string {
  * delegated agent identities, foreign sites, and read-only principals are
  * rejected before any form or decision exists.
  */
-async function resolveBrowserSession(options: McpHttpOptions, browserAuth: BrowserAuth, request: IncomingMessage, view: { tenantId: string; siteId: string }): Promise<{ principal?: { principalId?: string; issuer: string; subject: string }; error?: { status: number; title: string; body: string } }> {
+async function resolveBrowserSession(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, request: IncomingMessage, view: { tenantId: string; siteId: string }): Promise<{ principal?: { principalId?: string; issuer: string; subject: string }; accountLabel?: string; error?: { status: number; title: string; body: string } }> {
   const cookie = parseCookies(request.headers.cookie)[CONFIRMATION_SESSION_COOKIE];
-  const record = cookie !== undefined ? browserAuth.sessions.get(sessionKey(cookie)) : undefined;
-  if (!record || record.expiresAt <= Date.now()) {
-    if (cookie !== undefined) browserAuth.sessions.delete(sessionKey(cookie));
+  const record = openSession(cookie, options.confirmationLogin?.clientSecret);
+  if (!record) {
     return { error: { status: 401, title: "Human session required", body: "This confirmation records a human publication decision and requires your own logged-in session. The link the agent shared identifies the request; it does not authorize the decision by itself." } };
   }
-  let context = record.context;
+  // Access-token authority is never extended by the browser cookie. An
+  // expired token needs a successful refresh from the identity provider.
+  let verified = record.verified;
+  let refreshedCookie: string | undefined;
+  if (verified.claims.exp * 1000 <= Date.now()) {
+    const login = options.confirmationLogin;
+    if (!record.refreshToken || !login) {
+      return { error: { status: 401, title: "Human session required", body: "Your sign-in expired. Sign in again." } };
+    }
+    try {
+      const refreshed = await fetch(login.tokenEndpoint, {
+        method: "POST", signal: AbortSignal.timeout(15_000),
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: record.refreshToken,
+          client_id: login.clientId, client_secret: login.clientSecret, resource: options.resource })
+      });
+      if (!refreshed.ok) throw new Error("Refresh denied");
+      const tokens = await refreshed.json() as { access_token?: unknown; refresh_token?: unknown };
+      if (typeof tokens.access_token !== "string") throw new Error("No access token");
+      const next = await login.verifier.verify(tokens.access_token);
+      if (next.principal.kind !== "human" || next.claims.iss !== verified.claims.iss || next.claims.sub !== verified.claims.sub ||
+        next.tenantId !== verified.tenantId || next.siteId !== verified.siteId) throw new Error("Refresh identity changed");
+      verified = next;
+      const nextRefresh = typeof tokens.refresh_token === "string" ? tokens.refresh_token : record.refreshToken;
+      refreshedCookie = sealSession({ ...record, verified: next, refreshToken: nextRefresh }, login.clientSecret);
+    } catch {
+      return { error: { status: 401, title: "Human session required", body: "Your sign-in is no longer active. Sign in again." } };
+    }
+  }
+  let context: AuthorizationContext;
   try {
-    if (options.resolveAuthorization) context = await options.resolveAuthorization(record.verified);
+    context = options.resolveAuthorization ? await options.resolveAuthorization(verified) : authorizationContext(verified);
   } catch {
     return { error: { status: 403, title: "Not authorized", body: "Your publication authority is no longer valid." } };
   }
   if (context.expiresAt && Date.parse(context.expiresAt) <= Date.now()) {
     return { error: { status: 401, title: "Human session required", body: "Your session has expired. Sign in again." } };
   }
-  if (context.principal.kind !== "human" || record.verified.principal.kind !== "human") {
+  if (context.principal.kind !== "human" || verified.principal.kind !== "human") {
     return { error: { status: 403, title: "Not authorized", body: "A delegated agent session cannot record this decision; the confirmation must come from your own logged-in human session." } };
   }
   if (context.tenantId !== view.tenantId || context.siteId !== view.siteId) {
@@ -428,11 +518,19 @@ async function resolveBrowserSession(options: McpHttpOptions, browserAuth: Brows
   if (!effectivePermissions(context.layers).includes("content:publish")) {
     return { error: { status: 403, title: "Not authorized", body: "Your session does not hold publication authority for this site." } };
   }
-  return { principal: { principalId: context.principal.id, issuer: context.principal.issuer, subject: context.principal.subject } };
+  const scope = { id: record.id, tenantId: context.tenantId, siteId: context.siteId, principalId: context.principal.id };
+  let revoked = browserAuth.revoked.has(record.id);
+  try { revoked ||= (await options.browserSessionRevocations?.isRevoked(scope)) ?? false; }
+  catch { return { error: { status: 503, title: "Review unavailable", body: "The session check is temporarily unavailable. Try again shortly." } }; }
+  if (revoked) {
+    return { error: { status: 401, title: "Human session required", body: "This session was signed out. Sign in again." } };
+  }
+  if (refreshedCookie) appendCookie(response, `${CONFIRMATION_SESSION_COOKIE}=${refreshedCookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(1, Math.floor((record.expiresAt - Date.now()) / 1000))}${isSecureRequest(request) ? "; Secure" : ""}`);
+  return { principal: { principalId: context.principal.id, issuer: context.principal.issuer, subject: context.principal.subject }, accountLabel: record.accountLabel ?? context.principal.subject };
 }
 
 /** Starts the OIDC authorization-code login (PKCE S256, single-use state). */
-function startLogin(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean): void {
+function startLogin(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean, force = false): void {
   const login = options.confirmationLogin;
   if (!login) {
     return sendHtml(response, 503, confirmationShell("Login unavailable", "Confirmation login is not configured for this deployment; the administrator must register the confirmation client with the identity provider first."));
@@ -457,6 +555,7 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   authorization.searchParams.set("scope", (login.scopes ?? ["openid"]).join(" "));
   authorization.searchParams.set("code_challenge", challenge);
   authorization.searchParams.set("code_challenge_method", "S256");
+  if (force) authorization.searchParams.set("max_age", "0");
   response.statusCode = 302;
   response.setHeader("location", authorization.toString());
   response.setHeader("set-cookie", `${CONFIRMATION_OIDC_STATE_COOKIE}=${state}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`);
@@ -482,6 +581,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   const redirectUri = `${proto}://${request.headers.host ?? "localhost"}/confirmations/callback`;
   let accessToken: string | undefined;
   let idToken: string | undefined;
+  let refreshToken: string | undefined;
   try {
     const tokenResponse = await fetch(login.tokenEndpoint, {
       method: "POST",
@@ -498,9 +598,10 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
       })
     });
     if (tokenResponse.ok) {
-      const payload = await tokenResponse.json() as { access_token?: unknown; id_token?: unknown };
+      const payload = await tokenResponse.json() as { access_token?: unknown; id_token?: unknown; refresh_token?: unknown };
       if (typeof payload.access_token === "string") accessToken = payload.access_token;
       if (typeof payload.id_token === "string") idToken = payload.id_token;
+      if (typeof payload.refresh_token === "string") refreshToken = payload.refresh_token;
     }
   } catch {
     accessToken = undefined;
@@ -510,12 +611,14 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   }
   let context: AuthorizationContext;
   let verified: VerifiedAccessToken;
+  let verifiedForSwitch: VerifiedAccessToken | undefined;
   let identity: VerifiedAccessToken;
   let stage = "identity_token";
   try {
     identity = await login.idTokenVerifier.verify(idToken);
     stage = "access_token";
     verified = await login.verifier.verify(accessToken);
+    verifiedForSwitch = verified;
     stage = "exchange_binding";
     const claims = identity.claims;
     if (claims.nonce !== pending.nonce || claims.sub !== verified.claims.sub || claims.iss !== verified.claims.iss
@@ -530,24 +633,117 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
     // Fixed internal error codes only: never log token claims, identity or provider payloads.
     console.warn(JSON.stringify({ event: "confirmation.login_rejected", stage,
       code: error instanceof SecurityError ? error.code : "LOGIN_REJECTED" }));
+    if (typeof verifiedForSwitch?.claims.sid === "string") {
+      const hint = sealSession({ id: randomBytes(32).toString("base64url"), principalId: verifiedForSwitch.principal.id,
+        verified: verifiedForSwitch, expiresAt: Date.now() + LOGIN_STATE_TTL_MS,
+        providerSessionId: verifiedForSwitch.claims.sid }, login.clientSecret);
+      const previous = response.getHeader("set-cookie");
+      response.setHeader("set-cookie", [...(Array.isArray(previous) ? previous : previous ? [String(previous)] : []),
+        `${CONFIRMATION_SWITCH_HINT_COOKIE}=${hint}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`]);
+    }
     return sendHtml(response, 403, confirmationShell("Sign-in rejected",
-      `This sign-in could not be authorized for this site. Use the account connected to your CMS. <a href="${escapeHtml(pending.returnUrl)}">Try signing in again</a>.`));
+      `This account cannot publish to this site. <a href="${escapeHtml(`${pending.returnUrl}/switch`)}">Use another account</a>.`));
   }
   if (context.principal.kind !== "human" || verified.principal.kind !== "human" || identity.principal.kind !== "human") {
     return sendHtml(response, 403, confirmationShell("Sign-in rejected", "A delegated agent identity cannot sign in for a human confirmation; use your own account."));
   }
-  const sessionValue = randomBytes(32).toString("base64url");
-  const expiresAt = Math.min(Date.now() + SESSION_TTL_SECONDS * 1000, verified.claims.exp * 1000, identity.claims.exp * 1000,
-    context.expiresAt ? Date.parse(context.expiresAt) : Infinity);
+  const expiresAt = refreshToken ? Date.now() + SESSION_TTL_SECONDS * 1000
+    : Math.min(Date.now() + SESSION_TTL_SECONDS * 1000, verified.claims.exp * 1000, identity.claims.exp * 1000);
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     return sendHtml(response, 401, confirmationShell("Sign-in failed", "Your authorization has expired. Sign in again."));
   }
-  for (const [key, session] of browserAuth.sessions) if (session.expiresAt <= Date.now()) browserAuth.sessions.delete(key);
-  browserAuth.sessions.set(sessionKey(sessionValue), { context, verified, expiresAt });
+  const providerSessionId = verified.claims.sid;
+  const accountLabel = identity.claims.email;
+  const sessionValue = sealSession({ id: randomBytes(32).toString("base64url"), principalId: context.principal.id, verified: {
+    ...verified,
+    claims: {
+      iss: verified.claims.iss, sub: verified.claims.sub, aud: verified.claims.aud, exp: verified.claims.exp,
+      ...(verified.claims.role ? { role: verified.claims.role } : {}),
+      ...(verified.claims.roles ? { roles: verified.claims.roles } : {})
+    }
+  }, expiresAt, ...(refreshToken ? { refreshToken } : {}), ...(typeof providerSessionId === "string" ? { providerSessionId } : {}),
+    ...(typeof accountLabel === "string" && accountLabel.length < 256 ? { accountLabel } : {}) }, login.clientSecret);
   response.statusCode = 302;
   response.setHeader("location", pending.returnUrl);
   response.setHeader("set-cookie", `${CONFIRMATION_SESSION_COOKIE}=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(1, Math.floor((expiresAt - Date.now()) / 1000))}${secure ? "; Secure" : ""}`);
   response.end();
+}
+
+async function switchAccount(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean): Promise<void> {
+  const view = await options.service.resolveConfirmationView(token);
+  if (!view) return sendHtml(response, 404, confirmationShell("Confirmation unavailable", "Ask the agent for a current publication link."));
+  const login = options.confirmationLogin;
+  if (!login) return sendHtml(response, 503, confirmationShell("Login unavailable", "The site sign-in is not configured."));
+  const session = openSession(parseCookies(request.headers.cookie)[CONFIRMATION_SESSION_COOKIE], login.clientSecret);
+  const hint = openSession(parseCookies(request.headers.cookie)[CONFIRMATION_SWITCH_HINT_COOKIE], login.clientSecret);
+  if (session) {
+    try {
+      await options.browserSessionRevocations?.revoke({ id: session.id, tenantId: session.verified.tenantId,
+        siteId: session.verified.siteId, principalId: session.principalId, expiresAt: session.expiresAt });
+      browserAuth.revoked.add(session.id);
+    } catch { return sendHtml(response, 503, confirmationShell("Account switch unavailable", "The session could not be signed out. Try again shortly.")); }
+  }
+  response.setHeader("set-cookie", [
+    `${CONFIRMATION_SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure ? "; Secure" : ""}`,
+    `${CONFIRMATION_SWITCH_HINT_COOKIE}=; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=0${secure ? "; Secure" : ""}`
+  ]);
+  const providerSessionId = session?.providerSessionId ?? hint?.providerSessionId;
+  if (login.logoutEndpoint && providerSessionId) {
+    const providerLogout = new URL(login.logoutEndpoint);
+    if (providerLogout.protocol !== "https:" && secure) return sendHtml(response, 503, confirmationShell("Account switch unavailable", "The sign-out provider is not configured securely."));
+    const proto = secure ? "https" : "http";
+    providerLogout.searchParams.set("session_id", providerSessionId);
+    providerLogout.searchParams.set("return_to", `${proto}://${request.headers.host ?? "localhost"}/confirmations/${token}`);
+    response.writeHead(302, { location: providerLogout.toString() });
+    response.end();
+    return;
+  }
+  return startLogin(response, options, browserAuth, token, request, secure, true);
+}
+
+async function renewConfirmation(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean): Promise<void> {
+  const view = await options.service.resolveConfirmationView(token);
+  if (!view) return sendHtml(response, 404, confirmationShell("Review link unavailable", "Ask the agent for a new review link."));
+  const session = await resolveBrowserSession(response, options, browserAuth, request, view);
+  if (session.error) return sendHtml(response, session.error.status, confirmationShell(session.error.title, escapeHtml(session.error.body)));
+  const origin = request.headers.origin;
+  const host = request.headers.host;
+  if (origin && origin !== "null" && host && origin !== `https://${host}` && origin !== `http://${host}`) {
+    return sendHtml(response, 403, confirmationShell("Request rejected", "Open this link from its own page."));
+  }
+  let form: Record<string, string>;
+  try { form = parseForm(await readBody(request, 64 * 1024)); }
+  catch { return sendHtml(response, 400, confirmationShell("Request rejected", "The form could not be read.")); }
+  const csrf = parseCookies(request.headers.cookie)[CONFIRMATION_CSRF_COOKIE];
+  if (!csrf || form.csrf !== csrf) return sendHtml(response, 403, confirmationShell("Request rejected", "Reopen the review link and try again."));
+  try {
+    const location = await options.service.renewConfirmationLink(token, session.principal!.principalId!);
+    response.writeHead(303, { location });
+    response.end();
+  } catch {
+    sendHtml(response, 409, confirmationShell("New review needed", "This saved build can no longer be reviewed. Ask the agent to prepare a new candidate."));
+  }
+}
+
+async function confirmationPreview(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, rest: string | undefined, request: IncomingMessage): Promise<void> {
+  const view = await options.service.resolveConfirmationView(token);
+  if (!view) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
+  const session = await resolveBrowserSession(response, options, browserAuth, request, view);
+  if (session.error) return sendJson(response, session.error.status, { error: "PREVIEW_NOT_AUTHORIZED" });
+  const output = await options.service.resolveConfirmationOutput(token);
+  if (!output) return sendJson(response, 410, { error: "PREVIEW_EXPIRED" });
+  let path: string;
+  try { path = rest ? decodeURIComponent(rest.split("?")[0] ?? "") : pickEntryHtml(output) ?? ""; }
+  catch { return sendJson(response, 400, { error: "INVALID_PREVIEW_PATH" }); }
+  if (!safeOutputPath(path) || output[path] === undefined) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
+  response.setHeader("cache-control", "private, no-store, max-age=0");
+  response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
+  response.setHeader("referrer-policy", "no-referrer");
+  response.setHeader("content-security-policy", REVIEW_PREVIEW_CSP);
+  response.setHeader("content-type", outputContentType(path));
+  const body = output[path]!;
+  response.end(path.endsWith(".html") ? bindCapabilityUrls(body, `/confirmations/${token}/preview`, "html", path)
+    : path.endsWith(".css") ? bindCapabilityUrls(body, `/confirmations/${token}/preview`, "css", path) : body);
 }
 
 function confirmationShell(title: string, body: string): string {
@@ -584,6 +780,15 @@ function parseCookies(header: string | undefined): Record<string, string> {
     cookies[part.slice(0, index).trim()] = part.slice(index + 1).trim();
   }
   return cookies;
+}
+
+function appendCookie(response: ServerResponse, value: string): void {
+  const previous = response.getHeader("set-cookie");
+  response.setHeader("set-cookie", [...(Array.isArray(previous) ? previous : previous ? [String(previous)] : []), value]);
+}
+
+function isSecureRequest(request: IncomingMessage): boolean {
+  return request.socket instanceof TLSSocket || request.headers["x-forwarded-proto"] === "https";
 }
 
 function parseForm(body: string): Record<string, string> {

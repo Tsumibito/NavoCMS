@@ -569,7 +569,7 @@ export class McpEditingService {
       if (state.rollback) {
         await this.#releaseProvider.rollback(state.rollback.current, state.rollback.target);
         await this.#releases.completeRollback(repositoryContext, input.releaseId, state.rollback.current.id, state.rollback.target.id);
-        publication = state.rollback.target;
+        publication = { ...state.rollback.target, status: "verified" };
       } else if ((state.release.status === "approved" || state.release.status === "publishing") && !publication) {
         publication = await this.applyAndVerify(context, repositoryContext, input.releaseId, input.releaseHash);
       } else if (publication && (
@@ -582,6 +582,7 @@ export class McpEditingService {
           nextAction: "release_reconcile"
         });
         await this.#releases.markVerified(repositoryContext, input.releaseId, publication.id);
+        publication = { ...publication, status: "verified" };
       }
       const release = await this.#releases.getRelease(repositoryContext, input.releaseId);
       await this.appendEvent(context, "io.navocms.release.reconciled.v1", release.id, input.idempotencyKey, {
@@ -605,7 +606,7 @@ export class McpEditingService {
         phase: "verified", releaseId: release.id, releaseHash: release.releaseHash,
         restoredPublicationId: prepared.target.id, restoredArtifactHash: prepared.target.artifactHash
       }, "G1", release.correlationId);
-      return safe({ release: releaseProjection(release), restoredPublication: prepared.target });
+      return safe({ release: releaseProjection(release), restoredPublication: { ...prepared.target, status: "verified" } });
     }, false);
   }
 
@@ -714,6 +715,33 @@ export class McpEditingService {
         } : {})
       })
     });
+  }
+
+  /** The reviewed output addressed by the confirmation capability, for the authenticated review page only. */
+  public async resolveConfirmationOutput(token: string): Promise<Readonly<Record<string, string>> | undefined> {
+    const view = await this.resolveConfirmationView(token);
+    if (!view || view.revokedAt || new Date(view.previewExpiresAt ?? 0).getTime() <= Date.now()) return undefined;
+    return (await this.#stagingAstro?.artifactFor({ tenantId: view.tenantId, siteId: view.siteId, releaseId: view.releaseId }))?.output;
+  }
+
+  public async confirmationSiteName(view: ConfirmationView, principalId: string): Promise<string | undefined> {
+    return (await this.#repository.getSite({ tenantId: view.tenantId, siteId: view.siteId, principalId }))?.name;
+  }
+
+  /** Reissues a review link for the same saved output; no build or release is created. */
+  public async renewConfirmationLink(token: string, principalId: string): Promise<string> {
+    const view = await this.resolveConfirmationView(token);
+    if (!view || view.revokedAt || view.decisionAt || view.policyVersion !== this.#releaseConfig.approvalPolicyVersion) {
+      throw new McpEditingError("CONFIRMATION_RENEWAL_REJECTED", "This publication needs a new review candidate");
+    }
+    const site = await this.#repository.getSite({ tenantId: view.tenantId, siteId: view.siteId, principalId });
+    if (!site || !await this.#stagingAstro?.artifactFor({ tenantId: view.tenantId, siteId: view.siteId, releaseId: view.releaseId })) {
+      throw new McpEditingError("CONFIRMATION_RENEWAL_REJECTED", "The saved build is unavailable");
+    }
+    const nextToken = randomBytes(32).toString("base64url");
+    await this.#releases.renewConfirmation({ site, principalId }, view.releaseId, view.releaseHash,
+      sha256(nextToken), new Date(Date.now() + this.#releaseConfig.previewTtlSeconds * 1000).toISOString(), view.policyVersion);
+    return `/confirmations/${nextToken}`;
   }
 
   /**

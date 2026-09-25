@@ -167,6 +167,27 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
     });
   }
 
+  public async renewConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string, tokenHash: string, expiresAt: string, policyVersion: string): Promise<void> {
+    await this.#database.withScope(databaseScope(context), async (client) => {
+      const release = await requireExactRelease(client, context, releaseId, releaseHash, true);
+      if (release.status !== "previewed") throw new McpEditingError("CONFIRMATION_RENEWAL_REJECTED", "This release cannot receive a new review link");
+      const decided = await client.query<{ decided: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM navocms.release_confirmations
+          WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND decision_at IS NOT NULL) AS decided`,
+        [context.site.tenantId, context.site.siteId, releaseId]
+      );
+      if (decided.rows[0]?.decided) throw new McpEditingError("CONFIRMATION_RENEWAL_REJECTED", "This release was already approved");
+      await client.query(
+        `INSERT INTO navocms.release_confirmations (
+           id, tenant_id, site_id, release_id, release_hash, token_hash,
+           policy_version, preview_expires_at, created_by
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [randomUUID(), context.site.tenantId, context.site.siteId, releaseId, releaseHash,
+          tokenHash, policyVersion, expiresAt, uuidOrNull(context.principalId)]
+      );
+    });
+  }
+
   public async recordConfirmation(tokenHash: string, decision: ConfirmationDecision) {
     return this.#database.withScope(nullScope(), async (client) => {
       const row = (await client.query<ConfirmationRow>(
@@ -189,7 +210,7 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
                 decided_by_principal_id, decided_by_reference, revoked_at
            FROM navocms.release_confirmations
           WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3 AND release_hash = $4
-          ORDER BY created_at DESC LIMIT 1`,
+          ORDER BY (decision_at IS NOT NULL) DESC, created_at DESC LIMIT 1`,
         [context.site.tenantId, context.site.siteId, releaseId, releaseHash]
       )).rows[0];
       return row ? toConfirmation(row) : undefined;

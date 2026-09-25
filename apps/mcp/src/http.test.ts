@@ -154,13 +154,15 @@ describe("real preview namespace and browser-session confirmation", () => {
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         const params = new URLSearchParams(body);
-        if (params.get("grant_type") !== "authorization_code" || params.get("resource") !== resource) {
+        const refreshing = params.get("grant_type") === "refresh_token";
+        if ((!refreshing && params.get("grant_type") !== "authorization_code") || params.get("resource") !== resource) {
           response.writeHead(400).end(JSON.stringify({ error: "unsupported_grant_type" }));
           return;
         }
         const verifier = params.get("code_verifier") ?? "";
         const challenge = createHash("sha256").update(verifier).digest("base64url");
-        if (challenge !== idpCodes.get(params.get("code") ?? "")) {
+        if ((!refreshing && challenge !== idpCodes.get(params.get("code") ?? "")) ||
+          (refreshing && params.get("refresh_token") !== "refresh-publisher")) {
           response.writeHead(400).end(JSON.stringify({ error: "invalid_grant" }));
           return;
         }
@@ -169,7 +171,8 @@ describe("real preview namespace and browser-session confirmation", () => {
         const accessToken = jwt({ ...common, aud: resource, org_id: "org-test", scope: NAVOCMS_PERMISSIONS.join(" "), ...accessOverrides });
         const idToken = jwt({ ...common, aud: "confirmation-client", nonce,
           at_hash: createHash("sha256").update(accessToken).digest().subarray(0, 16).toString("base64url"), ...idOverrides });
-        response.end(JSON.stringify({ access_token: accessToken, ...(!omitIdentity ? { id_token: idToken } : {}), token_type: "Bearer" }));
+        response.end(JSON.stringify({ access_token: accessToken, ...(!refreshing && !omitIdentity ? { id_token: idToken } : {}),
+          refresh_token: "refresh-publisher", token_type: "Bearer" }));
       });
     });
     await new Promise<void>((resolve) => idp.listen(0, "127.0.0.1", resolve));
@@ -212,6 +215,21 @@ describe("real preview namespace and browser-session confirmation", () => {
       expect(callback.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
       const sessionCookie = (callback.headers.get("set-cookie") ?? "")
         .split("\n").find((line) => line.includes("navocms_confirmation_session"))!.split(";")[0]!;
+      // A replacement process can read the sealed browser session without
+      // returning the owner to the identity provider.
+      const restarted = harness.newServer();
+      await new Promise<void>((resolve) => restarted.listen(0, "127.0.0.1", resolve));
+      try {
+        const restartAddress = restarted.address();
+        if (!restartAddress || typeof restartAddress === "string") throw new Error("Restarted server did not bind");
+        const resumed = await fetch(`http://127.0.0.1:${restartAddress.port}/confirmations/${confirmationToken}`, {
+          redirect: "manual", headers: { cookie: sessionCookie }
+        });
+        expect(resumed.status).toBe(200);
+        expect(await resumed.text()).toContain("Review publication");
+      } finally {
+        await new Promise<void>((resolve) => restarted.close(() => resolve()));
+      }
       // Replaying the same callback is rejected.
       const replay = await fetch(`${base}/confirmations/callback?code=idp-code-1&state=${state}`, {
         redirect: "manual", headers: { cookie: stateCookie }
@@ -253,9 +271,40 @@ describe("real preview namespace and browser-session confirmation", () => {
       const page = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
       expect(page.status).toBe(200);
       const html = await page.text();
-      expect(html).toContain("Confirm this build");
+      expect(html).toContain("Review publication");
+      expect(html).toContain("<button type=\"submit\">Publish</button>");
+      expect(html).toContain("Use another account");
       const csrfCookie = (page.headers.get("set-cookie") ?? "").split(";")[0]!;
       const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)![1]!;
+      const reviewPreview = await fetch(`${base}/confirmations/${confirmationToken}/preview`, {
+        headers: { cookie: sessionCookie }
+      });
+      expect(reviewPreview.status).toBe(200);
+      expect(await reviewPreview.text()).toContain("/confirmations/");
+      const clockForRenewal = vi.spyOn(Date, "now");
+      const beforeExpiry = Date.now();
+      try {
+        clockForRenewal.mockReturnValue(beforeExpiry + 121_000);
+        const refreshedPage = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
+        expect(refreshedPage.status).toBe(200);
+        expect(refreshedPage.headers.getSetCookie().some((value) => value.startsWith("navocms_confirmation_session="))).toBe(true);
+        clockForRenewal.mockReturnValue(beforeExpiry + 3600_001);
+        const expired = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
+        expect(expired.status).toBe(410);
+        const expiredHtml = await expired.text();
+        expect(expiredHtml).toContain("Get a new review link");
+        const renewalCsrf = /name="csrf" value="([0-9a-f]{64})"/.exec(expiredHtml)![1]!;
+        const renewalCookie = expired.headers.getSetCookie().find((value) => value.startsWith("navocms_confirmation_csrf="))!.split(";")[0]!;
+        const renewed = await fetch(`${base}/confirmations/${confirmationToken}/renew`, {
+          method: "POST", redirect: "manual", headers: { cookie: `${sessionCookie}; ${renewalCookie}`,
+            "content-type": "application/x-www-form-urlencoded" }, body: `csrf=${renewalCsrf}`
+        });
+        expect(renewed.status).toBe(303);
+        expect(renewed.headers.get("location")).toMatch(/^\/confirmations\/[A-Za-z0-9_-]{43}$/);
+        expect(await (await fetch(`${base}${renewed.headers.get("location")}`, { headers: { cookie: sessionCookie } })).text())
+          .toContain("Review publication");
+        expect(harness.operations.startCount).toBe(1);
+      } finally { clockForRenewal.mockRestore(); }
       // Cross-site origin rejected; missing CSRF rejected.
       const crossSite = await fetch(`${base}/confirmations/${confirmationToken}`, {
         method: "POST",
@@ -274,22 +323,31 @@ describe("real preview namespace and browser-session confirmation", () => {
         body: `csrf=${csrf}`
       });
       expect(decision.status).toBe(200);
-      expect(await decision.text()).toContain("Decision recorded");
+      expect(await decision.text()).toContain("Publication approved");
       const redelivery = await fetch(`${base}/confirmations/${confirmationToken}`, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded", cookie: `${sessionCookie}; ${csrfCookie}` },
         body: `csrf=${csrf}`
       });
-      expect(await redelivery.text()).toContain("already recorded");
+      expect(await redelivery.text()).toContain("already saved");
       const status = await harness.service.releaseConfirmationStatus(harness.context, {
         releaseId: preview.releaseId, releaseHash: preview.releaseHash
       });
       expect(status).toMatchObject({ status: "confirmed" });
       expect((status as unknown as Record<string, unknown>).decidedByReference).toMatch(/^[a-f0-9]{64}$/);
+      const switching = await fetch(`${base}/confirmations/${confirmationToken}/switch`, {
+        redirect: "manual", headers: { cookie: sessionCookie }
+      });
+      expect(switching.status).toBe(302);
+      expect(new URL(switching.headers.get("location")!).searchParams.get("max_age")).toBe("0");
+      const signedOut = await fetch(`${base}/confirmations/${confirmationToken}`, {
+        redirect: "manual", headers: { cookie: sessionCookie }
+      });
+      expect(signedOut.status).toBe(302);
       const clock = vi.spyOn(Date, "now");
       const now = Date.now();
       try {
-        clock.mockReturnValue(now + 121_000);
+        clock.mockReturnValue(now + 8 * 3600_000 + 1_000);
         const expiredSession = await fetch(`${base}/confirmations/${confirmationToken}`, {
           method: "POST", headers: { cookie: `${sessionCookie}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" }, body: `csrf=${csrf}`
         });
@@ -358,7 +416,7 @@ function previewHarness(options: {
       };
     }
   };
-  const server = createMcpHttpServer({
+  const newServer = () => createMcpHttpServer({
     service,
     verifier: { verify: async (token: string) => {
       if (token === "browser-login-token") throw new Error("Browser tokens cannot authorize MCP");
@@ -377,7 +435,7 @@ function previewHarness(options: {
       }
     } : {})
   });
-  return { service, server, context, operations, provider, tokens };
+  return { service, server: newServer(), newServer, context, operations, provider, tokens };
 }
 
 const previewSite = Object.freeze({

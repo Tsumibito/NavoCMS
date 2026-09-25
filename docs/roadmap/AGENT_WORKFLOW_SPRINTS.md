@@ -3,7 +3,8 @@
 Дата планирования: 2026-09-05. Статус: **Sprint 8.1 accepted** — PR #53 объединён,
 staging обновлён, независимая операционная проверка завершена.
 [Приёмка](../operations/SPRINT_8_1_ACCEPTANCE.md).
-Следующее задание: [Sprint 8.2](../development/SPRINT_8_2_HANDOFF.md).
+Sprint 8.2 прошёл живую проверку публикации и отката 2026-09-12. Закрытие UX
+подтверждения находится в работе; Sprint 8.3 начнётся после его приёмки.
 
 Основание: аудит `main` на `1b02acd29cab60bb74c9a80a401606c8540260b5` и поручение владельца
 подготовить задания исполнителю. Этот документ задаёт ближайший порядок работ вместо перехода
@@ -340,8 +341,8 @@ CI/deployment IDs, выполненными сценариями и решени
 
 | Спринт | Состояние | Условие старта |
 | --- | --- | --- |
-| 8.1 | Planned, ready to assign | Прочитать handoff и подтвердить baseline |
-| 8.2 | Planned | 8.1 accepted |
+| 8.1 | Accepted | — |
+| 8.2 | Live technical cycle passed; UX closure in review | Приёмка одного действия Publish и восстановления входа |
 | 8.3 | Planned | 8.2 accepted |
 | 9.1 | Planned | 8.3 accepted + pilot bundle |
 | 9.2 | Planned | 9.1 accepted |

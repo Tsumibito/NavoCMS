@@ -31,6 +31,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0024](0024-remove-dormant-runtime-surfaces.md) | Accepted | Remove dormant runtime surfaces until their first real caller |
 | [0025](0025-current-head-patch-gate-and-bounded-reads.md) | Accepted | Current-head patch gate, keyset cursors, bounded reads, and honest effect-state errors |
 | [0026](0026-real-preview-and-independent-human-confirmation.md) | Accepted | Pre-review trusted builds, real capability preview, and independent human confirmation receipts |
+| [0027](0027-publication-review-session.md) | Accepted | Persistent browser review sessions, one-action approval, and link renewal |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.

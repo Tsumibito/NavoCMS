@@ -291,7 +291,7 @@ describe("durable release workflow", () => {
     expect(provider.publishCount).toBe(1);
     await expect(service.reconcileRelease(context, {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-verification-crash-001"
-    })).resolves.toMatchObject({ release: { status: "published" }, publication: { status: "applied" } });
+    })).resolves.toMatchObject({ release: { status: "published" }, publication: { status: "verified" } });
     expect(provider.publishCount).toBe(1);
   });
 });
