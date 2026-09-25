@@ -45,21 +45,22 @@ test("anonymous navigation leads to login; a real browser login records the deci
     // The fake IdP signs the user in and returns the code to the callback;
     // the CMS exchanged it (PKCE) and created the server-side session, so the
     // final landing page is the confirmation form itself.
-    await expect(page.getByRole("heading", { name: "Confirm publication of this exact build" })).toBeVisible();
-    await expect(page.getByText("Output manifest digest")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Confirm this build" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review publication" })).toBeVisible();
+    await expect(page.getByText("Confirmation proving site")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Publish" })).toBeVisible();
+    await expect(page.frameLocator('iframe[title="Page preview"]').getByRole("heading", { name: "built" })).toBeVisible();
     await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", "noindex, nofollow");
     const axe = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
     expect(axe.violations).toEqual([]);
 
     // The human clicks; the browser form POST carries only session cookies.
-    await page.getByRole("button", { name: "Confirm this build" }).click();
-    await expect(page.getByRole("heading", { name: "Decision recorded" })).toBeVisible();
-    expect(await page.textContent("main")).toContain("Publication is a separate step");
+    await page.getByRole("button", { name: "Publish" }).click();
+    await expect(page.getByRole("heading", { name: "Publication approved" })).toBeVisible();
+    expect(await page.textContent("main")).toContain("agent can finish publishing");
 
     // Re-delivery of the same decision is the safe no-op view.
     await page.goto(`${base}/confirmations/${token}`);
-    await expect(page.getByRole("heading", { name: "Decision already recorded" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Publication approved" })).toBeVisible();
 
     const status = await harness.service.releaseConfirmationStatus(harness.context, {
       releaseId: preview.releaseId, releaseHash: preview.releaseHash
@@ -88,7 +89,7 @@ test("anonymous navigation leads to login; a real browser login records the deci
     expect(loginHop!.searchParams.get("code_challenge_method")).toBe("S256");
     expect(loginHop!.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(loginHop!.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]+$/);
-    await expect(secondPage.getByRole("heading", { name: "Decision already recorded" })).toBeVisible();
+    await expect(secondPage.getByRole("heading", { name: "Publication approved" })).toBeVisible();
     await second.close();
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

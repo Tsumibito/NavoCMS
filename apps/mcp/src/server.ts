@@ -20,6 +20,7 @@ import { McpEditingService, type IdempotencyStore } from "./service.js";
 import { assertPinnedProductionProfile } from "./production-profile.js";
 import { assertStagingActivationGuard, createDotenvxSecretBroker, safeStagingRuntimeIdentifiers, selectReleaseProvider, stagingBindingFromEnvironment, stagingExpectationFromEnvironment } from "./staging-runtime.js";
 import { PostgresDeliveryPhaseStore } from "./postgres-delivery-phase-store.js";
+import { PostgresBrowserSessionRevocations } from "./postgres-browser-session-revocations.js";
 import { PostgresReviewedAstroArtifactStore } from "./postgres-reviewed-astro-artifact-store.js";
 import { ReviewedAstroArtifactResolver } from "./reviewed-astro-resolver.js";
 import { composeCloudflareStagingReleaseProvider } from "./staging-composition.js";
@@ -184,7 +185,8 @@ const confirmationLogin = process.env.NAVOCMS_CONFIRMATION_CLIENT_ID && process.
     clientId: process.env.NAVOCMS_CONFIRMATION_CLIENT_ID,
     clientSecret: process.env.NAVOCMS_CONFIRMATION_CLIENT_SECRET,
     authorizationEndpoint: required("NAVOCMS_CONFIRMATION_AUTHORIZATION_ENDPOINT"),
-    tokenEndpoint: required("NAVOCMS_CONFIRMATION_TOKEN_ENDPOINT")
+    tokenEndpoint: required("NAVOCMS_CONFIRMATION_TOKEN_ENDPOINT"),
+    ...(process.env.NAVOCMS_CONFIRMATION_LOGOUT_ENDPOINT ? { logoutEndpoint: process.env.NAVOCMS_CONFIRMATION_LOGOUT_ENDPOINT } : {})
   }
   : undefined;
 const server = createMcpHttpServer({
@@ -195,6 +197,7 @@ const server = createMcpHttpServer({
   authorizationServers: [issuer],
   scopes: ["openid"],
   ...(confirmationLogin ? { confirmationLogin } : {}),
+  ...(database ? { browserSessionRevocations: new PostgresBrowserSessionRevocations(database) } : {}),
   ...(identityResolver ? { resolveAuthorization: (token) => identityResolver.resolve(token) } : {}),
   ...(database ? {
     readiness: async () => {

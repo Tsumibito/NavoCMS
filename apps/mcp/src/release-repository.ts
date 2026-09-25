@@ -108,6 +108,7 @@ export interface ReleaseWorkflowRepository {
   createPreview(input: CreateReleaseInput): Promise<StoredRelease>;
   resolvePreview(tokenHash: string): Promise<PreviewDocument | undefined>;
   resolveConfirmation(tokenHash: string): Promise<ConfirmationRecord | undefined>;
+  renewConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string, tokenHash: string, expiresAt: string, policyVersion: string): Promise<void>;
   recordConfirmation(tokenHash: string, decision: ConfirmationDecision): Promise<{ readonly record: ConfirmationRecord; readonly recorded: boolean } | undefined>;
   latestConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<ConfirmationRecord | undefined>;
   getRelease(context: RepositoryContext, releaseId: string): Promise<StoredRelease>;
@@ -204,8 +205,17 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
 
   public async resolveConfirmation(tokenHash: string): Promise<ConfirmationRecord | undefined> {
     const confirmation = this.#confirmations.get(tokenHash);
-    if (!confirmation || new Date(confirmation.previewExpiresAt).getTime() <= Date.now()) return undefined;
-    return freezeConfirmation(confirmation);
+    return confirmation ? freezeConfirmation(confirmation) : undefined;
+  }
+
+  public async renewConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string, tokenHash: string, expiresAt: string, policyVersion: string): Promise<void> {
+    const release = this.requireExact(context, releaseId, releaseHash);
+    if (release.status !== "previewed" || this.#confirmations.has(tokenHash) || [...this.#confirmations.values()].some((confirmation) =>
+      confirmation.releaseId === releaseId && confirmation.decisionAt !== undefined)) {
+      throw new McpEditingError("CONFIRMATION_RENEWAL_REJECTED", "This release cannot receive a new review link");
+    }
+    this.#confirmations.set(tokenHash, { releaseId, tenantId: context.site.tenantId, siteId: context.site.siteId,
+      releaseHash, policyVersion, previewExpiresAt: expiresAt });
   }
 
   public async recordConfirmation(tokenHash: string, decision: ConfirmationDecision) {
@@ -228,7 +238,8 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
       .filter((confirmation) => confirmation.tenantId === context.site.tenantId &&
         confirmation.siteId === context.site.siteId && confirmation.releaseId === releaseId &&
         confirmation.releaseHash === releaseHash)
-      .sort((left, right) => (right.decisionAt ?? right.previewExpiresAt).localeCompare(left.decisionAt ?? left.previewExpiresAt));
+      .sort((left, right) => Number(Boolean(right.decisionAt)) - Number(Boolean(left.decisionAt)) ||
+        right.previewExpiresAt.localeCompare(left.previewExpiresAt));
     return candidates[0] ? freezeConfirmation(candidates[0]) : undefined;
   }
 
