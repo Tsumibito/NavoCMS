@@ -16,9 +16,9 @@
   "dependencies": {
     "@navocms/contracts": "workspace:*",
     "@navocms/security": "workspace:*",
-    "pg": "8.16.3"
+    "pg": "8.23.0"
   },
   "devDependencies": {
-    "@types/pg": "8.15.5"
+    "@types/pg": "8.23.1"
   }
 }
