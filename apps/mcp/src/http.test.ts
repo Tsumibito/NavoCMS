@@ -201,6 +201,7 @@ describe("real preview namespace and browser-session confirmation", () => {
       const loginUrl = new URL(start.headers.get("location")!);
       expect(loginUrl.pathname).toBe("/authorize");
       expect(loginUrl.searchParams.get("resource")).toBe(resource);
+      expect(loginUrl.searchParams.get("scope")).toBe("openid email offline_access");
       nonce = loginUrl.searchParams.get("nonce")!;
       expect(nonce.length).toBeGreaterThanOrEqual(32);
       idpCodes.set("idp-code-1", loginUrl.searchParams.get("code_challenge")!);

@@ -24,7 +24,8 @@ decision by itself, and the MCP bearer cannot submit the browser form.
 ## Deployment configuration
 
 Apply migrations `0014` through `0016` before deploying the new runtime. Keep the
-existing confidential OIDC confirmation client. It should issue refresh
+existing confidential OIDC confirmation client. The browser requests `openid`,
+`email` and `offline_access` so WorkOS Connect can issue refresh
 tokens; a client without them remains valid only until its access token ends.
 For reliable account switching, set
 `NAVOCMS_CONFIRMATION_LOGOUT_ENDPOINT` to the provider's HTTPS logout
