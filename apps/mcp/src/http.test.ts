@@ -168,7 +168,7 @@ describe("real preview namespace and browser-session confirmation", () => {
         }
         response.writeHead(200, { "content-type": "application/json" });
         const common = { iss: issuer, sub: "publisher", exp: Math.floor(Date.now() / 1000) + 120 };
-        const accessToken = jwt({ ...common, aud: resource, org_id: "org-test", scope: NAVOCMS_PERMISSIONS.join(" "), ...accessOverrides });
+        const accessToken = jwt({ ...common, sid: "session-test", aud: resource, org_id: "org-test", scope: NAVOCMS_PERMISSIONS.join(" "), ...accessOverrides });
         const idToken = jwt({ ...common, aud: "confirmation-client", nonce,
           at_hash: createHash("sha256").update(accessToken).digest().subarray(0, 16).toString("base64url"), ...idOverrides });
         response.end(JSON.stringify({ access_token: accessToken, ...(!refreshing && !omitIdentity ? { id_token: idToken } : {}),
@@ -179,7 +179,7 @@ describe("real preview namespace and browser-session confirmation", () => {
     const idpPort = (idp.address() as { port: number }).port;
     idpCodes.set("idp-code-1", "pkce-challenge-value");
     const harness = previewHarness({
-      withLogin: { authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`, tokenEndpoint: `http://127.0.0.1:${idpPort}/token`, verifier: accessVerifier, idTokenVerifier }
+      withLogin: { authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`, tokenEndpoint: `http://127.0.0.1:${idpPort}/token`, logoutEndpoint: "https://identity.example/logout", verifier: accessVerifier, idTokenVerifier }
     });
     const created = await harness.service.createDraft(harness.context, {
       typeName: "article", slug: "session-preview", locale: "en", title: "Session preview",
@@ -339,7 +339,15 @@ describe("real preview namespace and browser-session confirmation", () => {
         redirect: "manual", headers: { cookie: sessionCookie }
       });
       expect(switching.status).toBe(302);
-      expect(new URL(switching.headers.get("location")!).searchParams.get("max_age")).toBe("0");
+      const logoutUrl = new URL(switching.headers.get("location")!);
+      expect(logoutUrl.pathname).toBe("/logout");
+      expect(logoutUrl.searchParams.get("session_id")).toBe("session-test");
+      expect(logoutUrl.searchParams.get("return_to")).toBe(`${base}/confirmations/signed-out`);
+      const returnCookie = switching.headers.getSetCookie().find(value => value.startsWith("navocms_confirmation_return="))!.split(";")[0]!;
+      const returned = await fetch(`${base}/confirmations/signed-out`, { redirect: "manual", headers: { cookie: returnCookie } });
+      expect(returned.status).toBe(302);
+      expect(returned.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
+      expect((await fetch(`${base}/confirmations/signed-out`, { redirect: "manual" })).status).toBe(400);
       const signedOut = await fetch(`${base}/confirmations/${confirmationToken}`, {
         redirect: "manual", headers: { cookie: sessionCookie }
       });
@@ -379,7 +387,7 @@ interface TestToken {
 }
 
 function previewHarness(options: {
-  readonly withLogin?: { readonly authorizationEndpoint: string; readonly tokenEndpoint: string; readonly verifier: AccessTokenVerifier; readonly idTokenVerifier: AccessTokenVerifier };
+  readonly withLogin?: { readonly authorizationEndpoint: string; readonly tokenEndpoint: string; readonly logoutEndpoint?: string; readonly verifier: AccessTokenVerifier; readonly idTokenVerifier: AccessTokenVerifier };
 } = {}) {
   const provider = new RecordingProvider();
   const operations = new BuiltStagingOperations();
@@ -431,7 +439,8 @@ function previewHarness(options: {
         clientId: "confirmation-client",
         clientSecret: "confirmation-secret",
         authorizationEndpoint: options.withLogin.authorizationEndpoint,
-        tokenEndpoint: options.withLogin.tokenEndpoint
+        tokenEndpoint: options.withLogin.tokenEndpoint,
+        ...(options.withLogin.logoutEndpoint ? { logoutEndpoint: options.withLogin.logoutEndpoint } : {})
       }
     } : {})
   });
