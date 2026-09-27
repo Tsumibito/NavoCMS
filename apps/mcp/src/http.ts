@@ -561,7 +561,7 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   authorization.searchParams.set("state", state);
   authorization.searchParams.set("nonce", nonce);
   authorization.searchParams.set("resource", options.resource);
-  authorization.searchParams.set("scope", (login.scopes ?? ["openid"]).join(" "));
+  authorization.searchParams.set("scope", (login.scopes ?? ["openid", "email", "offline_access"]).join(" "));
   authorization.searchParams.set("code_challenge", challenge);
   authorization.searchParams.set("code_challenge_method", "S256");
   if (force) authorization.searchParams.set("max_age", "0");
