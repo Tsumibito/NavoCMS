@@ -54,6 +54,7 @@ const CONFIRMATION_CSRF_COOKIE = "navocms_confirmation_csrf";
 const CONFIRMATION_SESSION_COOKIE = "navocms_confirmation_session";
 const CONFIRMATION_OIDC_STATE_COOKIE = "navocms_confirmation_oidc";
 const CONFIRMATION_SWITCH_HINT_COOKIE = "navocms_confirmation_switch_hint";
+const CONFIRMATION_RETURN_COOKIE = "navocms_confirmation_return";
 
 /** External identity-provider settings for the confirmation browser login. */
 export interface ConfirmationLoginConfig {
@@ -175,6 +176,14 @@ export function createMcpHttpServer(options: McpHttpOptions) {
       const secure = request.socket instanceof TLSSocket || request.headers["x-forwarded-proto"] === "https";
       if (callbackRoute && request.method === "GET") {
         return loginCallback(response, options, browserAuth, request, secure);
+      }
+      if (request.url === "/confirmations/signed-out" && request.method === "GET") {
+        const token = parseCookies(request.headers.cookie)[CONFIRMATION_RETURN_COOKIE];
+        appendCookie(response, `${CONFIRMATION_RETURN_COOKIE}=; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=0${secure ? "; Secure" : ""}`);
+        if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return sendHtml(response, 400, confirmationShell("Review link required", "Reopen the review link from your conversation."));
+        response.writeHead(302, { location: `/confirmations/${token}` });
+        response.end();
+        return;
       }
       const switchRoute = /^\/confirmations\/([A-Za-z0-9_-]{43})\/switch$/.exec(request.url);
       if (switchRoute && request.method === "GET") {
@@ -693,7 +702,8 @@ async function switchAccount(response: ServerResponse, options: McpHttpOptions, 
     if (providerLogout.protocol !== "https:" && secure) return sendHtml(response, 503, confirmationShell("Account switch unavailable", "The sign-out provider is not configured securely."));
     const proto = secure ? "https" : "http";
     providerLogout.searchParams.set("session_id", providerSessionId);
-    providerLogout.searchParams.set("return_to", `${proto}://${request.headers.host ?? "localhost"}/confirmations/${token}`);
+    providerLogout.searchParams.set("return_to", `${proto}://${request.headers.host ?? "localhost"}/confirmations/signed-out`);
+    appendCookie(response, `${CONFIRMATION_RETURN_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`);
     response.writeHead(302, { location: providerLogout.toString() });
     response.end();
     return;

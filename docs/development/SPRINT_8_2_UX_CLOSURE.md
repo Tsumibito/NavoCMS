@@ -28,7 +28,7 @@ existing confidential OIDC confirmation client. It should issue refresh
 tokens; a client without them remains valid only until its access token ends.
 For reliable account switching, set
 `NAVOCMS_CONFIRMATION_LOGOUT_ENDPOINT` to the provider's HTTPS logout
-endpoint and register the CMS confirmation URL as an allowed sign-out return
+endpoint and register `/confirmations/signed-out` on the CMS origin as an allowed sign-out return
 URI. For WorkOS AuthKit, the endpoint is
 `https://api.workos.com/user_management/sessions/logout` when that host is
 the configured environment. The actual host and sign-out URI must match the
