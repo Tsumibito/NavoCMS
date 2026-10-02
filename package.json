@@ -30,11 +30,11 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
-    "@playwright/test": "1.62.1",
+    "@playwright/test": "1.63.0",
     "@types/node": "24.10.1",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "markdownlint-cli2": "0.23.2",
+    "markdownlint-cli2": "0.23.3",
     "typescript": "5.9.3",
     "vitest": "4.1.11"
   }
