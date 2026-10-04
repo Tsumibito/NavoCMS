@@ -9,7 +9,7 @@ import {
 } from "@navocms/persistence-postgres";
 
 import { createMcpHttpServer } from "./http.js";
-import { environmentInteger, environmentRolePermissions } from "./config.js";
+import { environmentInteger, environmentRolePermissions, reviewWindowSeconds } from "./config.js";
 import { MediaUploadGateway } from "./media-upload-gateway.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
 import { PostgresMediaRepository } from "@navocms/media";
@@ -141,8 +141,8 @@ if (database) {
     {
       environmentKey,
       previewBaseUrl: process.env.NAVOCMS_PREVIEW_BASE_URL ?? new URL(resource).origin,
-      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800),
-      approvalTtlSeconds: environmentInteger("NAVOCMS_APPROVAL_TTL_SECONDS", 900, 86_400),
+      previewTtlSeconds: reviewWindowSeconds("NAVOCMS_PREVIEW_TTL_SECONDS", 604_800),
+      approvalTtlSeconds: reviewWindowSeconds("NAVOCMS_APPROVAL_TTL_SECONDS", 86_400),
       approvalPolicyVersion: process.env.NAVOCMS_APPROVAL_POLICY_VERSION ?? "navocms.release-approval.v1"
     }, database, new PostgresRuntimePolicyGuard(database), stagingOperations
   );
@@ -165,8 +165,8 @@ if (database) {
     {
       environmentKey,
       previewBaseUrl: process.env.NAVOCMS_PREVIEW_BASE_URL ?? new URL(resource).origin,
-      previewTtlSeconds: environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800),
-      approvalTtlSeconds: environmentInteger("NAVOCMS_APPROVAL_TTL_SECONDS", 900, 86_400),
+      previewTtlSeconds: reviewWindowSeconds("NAVOCMS_PREVIEW_TTL_SECONDS", 604_800),
+      approvalTtlSeconds: reviewWindowSeconds("NAVOCMS_APPROVAL_TTL_SECONDS", 86_400),
       approvalPolicyVersion: process.env.NAVOCMS_APPROVAL_POLICY_VERSION ?? "navocms.release-approval.v1"
     }
   );

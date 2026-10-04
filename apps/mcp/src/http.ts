@@ -402,15 +402,26 @@ async function confirmationPage(response: ServerResponse, options: McpHttpOption
     return sendHtml(response, 200, confirmationShell("Publication approved", "Your decision is saved. The agent can finish publishing and report the result here in the conversation."));
   }
   if (new Date(view.previewExpiresAt ?? 0).getTime() <= Date.now()) {
+    try {
+      // Renew only the same saved output for a currently authorized human.
+      // Old bookmarks keep resolving to a fresh capability; no decision is made.
+      const renewedUrl = await options.service.renewConfirmationLink(token, session.principal!.principalId!);
+      response.statusCode = 303;
+      response.setHeader("location", renewedUrl);
+      response.end();
+      return;
+    } catch {
+      // Changed policy or missing artifacts require an explicit new candidate.
+    }
     const csrf = randomBytes(32).toString("hex");
-    appendCookie(response, `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=900${secure ? "; Secure" : ""}`);
+    appendCookie(response, `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=86400${secure ? "; Secure" : ""}`);
     return sendHtml(response, 410, confirmationShell("Review link expired", `<p>The saved build can be reviewed again without rebuilding it.</p><form method="post" action="${escapeHtml(`/confirmations/${token}/renew`)}"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Get a new review link</button></form>`));
   }
   if (!view.build.ready) {
     return sendHtml(response, 409, confirmationShell("Build not finished", escapeHtml(`The trusted build for release ${shortHash(view.releaseHash)} has not completed yet. Ask the agent for the build status, then reopen this page to confirm.`)));
   }
   const csrf = randomBytes(32).toString("hex");
-  appendCookie(response, `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=900${secure ? "; Secure" : ""}`);
+  appendCookie(response, `${CONFIRMATION_CSRF_COOKIE}=${csrf}; HttpOnly; SameSite=Strict; Path=/confirmations; Max-Age=86400${secure ? "; Secure" : ""}`);
   const summaryRows: readonly (readonly [string, string])[] = [
     ["Release hash", view.releaseHash],
     ["Output manifest digest", view.build.outputManifestDigest ?? "—"],
@@ -476,7 +487,7 @@ interface BrowserAuth {
 }
 
 const SESSION_TTL_SECONDS = 360 * 24 * 3600;
-const LOGIN_STATE_TTL_MS = 600_000;
+const LOGIN_STATE_TTL_MS = 24 * 3600_000;
 
 interface BrowserSession {
   readonly id: string;
@@ -658,7 +669,7 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   if (force) authorization.searchParams.set("max_age", "0");
   response.statusCode = 302;
   response.setHeader("location", authorization.toString());
-  response.setHeader("set-cookie", `${CONFIRMATION_OIDC_STATE_COOKIE}=${loginCookie}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`);
+  response.setHeader("set-cookie", `${CONFIRMATION_OIDC_STATE_COOKIE}=${loginCookie}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=${LOGIN_STATE_TTL_MS / 1000}${secure ? "; Secure" : ""}`);
   response.end();
 }
 
@@ -687,6 +698,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   let accessToken: string | undefined;
   let idToken: string | undefined;
   let refreshToken: string | undefined;
+  let codeExpired = false;
   try {
     const tokenResponse = await fetch(login.tokenEndpoint, {
       method: "POST",
@@ -707,9 +719,20 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
       if (typeof payload.access_token === "string") accessToken = payload.access_token;
       if (typeof payload.id_token === "string") idToken = payload.id_token;
       if (typeof payload.refresh_token === "string") refreshToken = payload.refresh_token;
+    } else {
+      const failure = await tokenResponse.json() as { error?: unknown };
+      codeExpired = failure.error === "invalid_grant";
     }
   } catch {
     accessToken = undefined;
+  }
+  if (codeExpired) {
+    // A provider may expire its code sooner than our review window. Return
+    // to the saved review to start a fresh flow using any remembered login.
+    response.statusCode = 303;
+    response.setHeader("location", pending.returnUrl);
+    response.end();
+    return;
   }
   if (accessToken === undefined || idToken === undefined) {
     return sendHtml(response, 401, confirmationShell("Sign-in failed", "The identity provider rejected this sign-in. Open the confirmation link and try again."));
@@ -744,7 +767,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
         providerSessionId: verifiedForSwitch.claims.sid }, login.clientSecret);
       const previous = response.getHeader("set-cookie");
       response.setHeader("set-cookie", [...(Array.isArray(previous) ? previous : previous ? [String(previous)] : []),
-        `${CONFIRMATION_SWITCH_HINT_COOKIE}=${hint}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`]);
+        `${CONFIRMATION_SWITCH_HINT_COOKIE}=${hint}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=${LOGIN_STATE_TTL_MS / 1000}${secure ? "; Secure" : ""}`]);
     }
     return sendHtml(response, 403, confirmationShell("Sign-in rejected",
       `This account cannot publish to this site. <a href="${escapeHtml(`${pending.returnUrl}/switch`)}">Use another account</a>.`));
@@ -793,7 +816,7 @@ async function switchAccount(response: ServerResponse, options: McpHttpOptions, 
     const proto = secure ? "https" : "http";
     providerLogout.searchParams.set("session_id", providerSessionId);
     providerLogout.searchParams.set("return_to", `${proto}://${request.headers.host ?? "localhost"}/confirmations/signed-out`);
-    appendCookie(response, `${CONFIRMATION_RETURN_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`);
+    appendCookie(response, `${CONFIRMATION_RETURN_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=${LOGIN_STATE_TTL_MS / 1000}${secure ? "; Secure" : ""}`);
     response.writeHead(302, { location: providerLogout.toString() });
     response.end();
     return;

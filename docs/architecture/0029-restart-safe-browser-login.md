@@ -35,3 +35,8 @@ remembered session cookies retain their original format and expiry.
 Complete a login on a replacement server using the original server's pending
 cookie. Reject cookie tampering, expired attempts, and cross-process code replay.
 Retain identity-pair, logout, permission, and independent decision checks.
+
+## Superseded duration
+
+[ADR 0030](0030-day-long-owner-review.md) extends the authorization attempt
+window to 24 hours. The encryption and replay protections above remain in force.

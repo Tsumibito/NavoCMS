@@ -275,9 +275,15 @@ describe("real preview namespace and browser-session confirmation", () => {
           redirect: "manual", headers: { cookie: `${freshCookie}tampered` }
         });
         expect(tampered.status).toBe(400);
-        const completedAfterRestart = await fetch(`http://127.0.0.1:${restartAddress.port}${restartCallbackUrl}`, {
-          redirect: "manual", headers: { cookie: freshCookie }
-        });
+        const delayedLoginClock = vi.spyOn(Date, "now");
+        const loginStartedAt = Date.now();
+        let completedAfterRestart: Response;
+        try {
+          delayedLoginClock.mockReturnValue(loginStartedAt + 23 * 3600_000);
+          completedAfterRestart = await fetch(`http://127.0.0.1:${restartAddress.port}${restartCallbackUrl}`, {
+            redirect: "manual", headers: { cookie: freshCookie }
+          });
+        } finally { delayedLoginClock.mockRestore(); }
         expect(completedAfterRestart.status).toBe(302);
         expect(completedAfterRestart.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
         // A replay on the original process reaches the provider, which must
@@ -285,7 +291,9 @@ describe("real preview namespace and browser-session confirmation", () => {
         const crossProcessReplay = await fetch(`${base}${restartCallbackUrl}`, {
           redirect: "manual", headers: { cookie: freshCookie }
         });
-        expect(crossProcessReplay.status).toBe(401);
+        expect(crossProcessReplay.status).toBe(303);
+        expect(crossProcessReplay.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
+        expect(crossProcessReplay.headers.getSetCookie().some(value => value.startsWith("navocms_confirmation_session="))).toBe(false);
         const resumed = await fetch(`http://127.0.0.1:${restartAddress.port}/confirmations/${confirmationToken}`, {
           redirect: "manual", headers: { cookie: sessionCookie }
         });
@@ -363,11 +371,15 @@ describe("real preview namespace and browser-session confirmation", () => {
         expect(refreshedPage.headers.getSetCookie().some((value) => value.startsWith("navocms_confirmation_session="))).toBe(true);
         expect(refreshedPage.headers.getSetCookie().find(value => value.startsWith("navocms_confirmation_session="))!.length).toBeLessThan(4096);
         accessOverrides = {};
-        clockForRenewal.mockReturnValue(beforeExpiry + 3600_001);
+        clockForRenewal.mockReturnValue(beforeExpiry + 6 * 3600_000);
+        const afternoonReview = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
+        expect(afternoonReview.status).toBe(200);
+        expect(await afternoonReview.text()).toContain("Review publication");
+        clockForRenewal.mockReturnValue(beforeExpiry + 24 * 3600_000 + 1);
         const expired = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
-        expect(expired.status).toBe(410);
+        expect(expired.status).toBe(200);
         const expiredHtml = await expired.text();
-        expect(expiredHtml).toContain("Get a new review link");
+        expect(expiredHtml).toContain("Review publication");
         const renewalCsrf = /name="csrf" value="([0-9a-f]{64})"/.exec(expiredHtml)![1]!;
         const renewalCookie = expired.headers.getSetCookie().find((value) => value.startsWith("navocms_confirmation_csrf="))!.split(";")[0]!;
         const renewed = await fetch(`${base}/confirmations/${confirmationToken}/renew`, {
@@ -383,10 +395,13 @@ describe("real preview namespace and browser-session confirmation", () => {
         const remembered = await fetch(`${base}${renewed.headers.get("location")}`, {
           redirect: "manual", headers: { cookie: sessionCookie }
         });
-        // The review link has expired, but the browser remains signed in and
-        // can renew the saved build instead of being sent to the identity provider.
-        expect(remembered.status).toBe(410);
-        expect(await remembered.text()).toContain("Get a new review link");
+        // The old bookmark is renewed for the same build without another login
+        // or publication decision. The browser session deadline never slides.
+        expect(remembered.status).toBe(303);
+        expect(remembered.headers.get("location")).toMatch(/^\/confirmations\/[A-Za-z0-9_-]{43}$/);
+        expect(await (await fetch(`${base}${remembered.headers.get("location")}`, { headers: { cookie: sessionCookie } })).text())
+          .toContain("Review publication");
+        expect(harness.operations.startCount).toBe(1);
         const rememberedCookie = remembered.headers.getSetCookie().find(value => value.startsWith("navocms_confirmation_session="))!;
         const remainingAge = Number(/Max-Age=(\d+)/.exec(rememberedCookie)![1]);
         expect(remainingAge).toBeGreaterThanOrEqual(24 * 3600 - 2);
@@ -460,7 +475,7 @@ describe("real preview namespace and browser-session confirmation", () => {
         const expiredStart = await fetch(`${base}/confirmations/${confirmationToken}`, { redirect: "manual" });
         const expiredState = new URL(expiredStart.headers.get("location")!).searchParams.get("state")!;
         const expiredCookie = expiredStart.headers.get("set-cookie")!.split(";")[0]!;
-        clock.mockReturnValue(now + 600_001);
+        clock.mockReturnValue(now + 24 * 3600_000 + 1);
         const expiredCallback = await fetch(`${base}/confirmations/callback?code=idp-code-1&state=${expiredState}`, {
           redirect: "manual", headers: { cookie: expiredCookie }
         });

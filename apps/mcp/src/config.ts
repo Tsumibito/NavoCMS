@@ -16,6 +16,15 @@ export function environmentInteger(
   return parsed;
 }
 
+/** Owner review must remain usable when the owner returns the next day. */
+export function reviewWindowSeconds(
+  name: string,
+  maximum: number,
+  environment: Readonly<Record<string, string | undefined>> = process.env
+): number {
+  return Math.max(86_400, environmentInteger(name, 86_400, maximum, environment));
+}
+
 export function environmentRolePermissions(
   name: string,
   environment: Readonly<Record<string, string | undefined>> = process.env
