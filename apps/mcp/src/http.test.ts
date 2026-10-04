@@ -246,6 +246,9 @@ describe("real preview namespace and browser-session confirmation", () => {
       expect(callback.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
       const sessionCookie = (callback.headers.get("set-cookie") ?? "")
         .split("\n").find((line) => line.includes("navocms_confirmation_session"))!.split(";")[0]!;
+      const sessionMaxAge = Number(/Max-Age=(\d+)/.exec(callback.headers.get("set-cookie")!)![1]);
+      expect(sessionMaxAge).toBeGreaterThanOrEqual(30 * 24 * 3600 - 1);
+      expect(sessionMaxAge).toBeLessThanOrEqual(30 * 24 * 3600);
       // A replacement process can read the sealed browser session without
       // returning the owner to the identity provider.
       const restarted = harness.newServer();
@@ -324,9 +327,12 @@ describe("real preview namespace and browser-session confirmation", () => {
       const beforeExpiry = Date.now();
       try {
         clockForRenewal.mockReturnValue(beforeExpiry + 121_000);
+        accessOverrides = { provider_metadata: "x".repeat(12_000) };
         const refreshedPage = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
         expect(refreshedPage.status).toBe(200);
         expect(refreshedPage.headers.getSetCookie().some((value) => value.startsWith("navocms_confirmation_session="))).toBe(true);
+        expect(refreshedPage.headers.getSetCookie().find(value => value.startsWith("navocms_confirmation_session="))!.length).toBeLessThan(4096);
+        accessOverrides = {};
         clockForRenewal.mockReturnValue(beforeExpiry + 3600_001);
         const expired = await fetch(`${base}/confirmations/${confirmationToken}`, { headers: { cookie: sessionCookie } });
         expect(expired.status).toBe(410);
@@ -343,7 +349,26 @@ describe("real preview namespace and browser-session confirmation", () => {
         expect(await (await fetch(`${base}${renewed.headers.get("location")}`, { headers: { cookie: sessionCookie } })).text())
           .toContain("Review publication");
         expect(harness.operations.startCount).toBe(1);
-      } finally { clockForRenewal.mockRestore(); }
+        clockForRenewal.mockReturnValue(beforeExpiry + 9 * 3600_000);
+        const remembered = await fetch(`${base}${renewed.headers.get("location")}`, {
+          redirect: "manual", headers: { cookie: sessionCookie }
+        });
+        // The review link has expired, but the browser remains signed in and
+        // can renew the saved build instead of being sent to the identity provider.
+        expect(remembered.status).toBe(410);
+        expect(await remembered.text()).toContain("Get a new review link");
+        const rememberedCookie = remembered.headers.getSetCookie().find(value => value.startsWith("navocms_confirmation_session="))!;
+        expect(Number(/Max-Age=(\d+)/.exec(rememberedCookie)![1])).toBeLessThan(30 * 24 * 3600 - 9 * 3600 + 1);
+        expect(await harness.service.releaseConfirmationStatus(harness.context, {
+          releaseId: preview.releaseId, releaseHash: preview.releaseHash
+        })).toMatchObject({ status: "pending" });
+        clockForRenewal.mockReturnValue(beforeExpiry + (30 * 24 * 3600 + 1) * 1000);
+        const ended = await fetch(`${base}/confirmations/${confirmationToken}`, {
+          redirect: "manual", headers: { cookie: sessionCookie }
+        });
+        expect(ended.status).toBe(302);
+        expect(new URL(ended.headers.get("location")!).pathname).toBe("/authorize");
+      } finally { accessOverrides = {}; clockForRenewal.mockRestore(); }
       // Cross-site origin rejected; missing CSRF rejected.
       const crossSite = await fetch(`${base}/confirmations/${confirmationToken}`, {
         method: "POST",

@@ -475,7 +475,7 @@ interface BrowserAuth {
   readonly revoked: Set<string>;
 }
 
-const SESSION_TTL_SECONDS = 8 * 3600;
+const SESSION_TTL_SECONDS = 30 * 24 * 3600;
 const LOGIN_STATE_TTL_MS = 600_000;
 
 interface BrowserSession {
@@ -490,6 +490,17 @@ interface BrowserSession {
 
 function sessionKey(secret: string): Buffer {
   return createHash("sha256").update("navocms:browser-session:v1:").update(secret).digest();
+}
+
+function browserIdentity(verified: VerifiedAccessToken): VerifiedAccessToken {
+  return {
+    ...verified,
+    claims: {
+      iss: verified.claims.iss, sub: verified.claims.sub, aud: verified.claims.aud, exp: verified.claims.exp,
+      ...(verified.claims.role ? { role: verified.claims.role } : {}),
+      ...(verified.claims.roles ? { roles: verified.claims.roles } : {})
+    }
+  };
 }
 
 function sealSession(session: BrowserSession, secret: string): string {
@@ -557,7 +568,7 @@ async function resolveBrowserSession(response: ServerResponse, options: McpHttpO
         next.tenantId !== verified.tenantId || next.siteId !== verified.siteId) throw new Error("Refresh identity changed");
       verified = next;
       const nextRefresh = typeof tokens.refresh_token === "string" ? tokens.refresh_token : record.refreshToken;
-      refreshedCookie = sealSession({ ...record, verified: next, refreshToken: nextRefresh }, login.clientSecret);
+      refreshedCookie = sealSession({ ...record, verified: browserIdentity(next), refreshToken: nextRefresh }, login.clientSecret);
     } catch {
       return { error: { status: 401, title: "Human session required", body: "Your sign-in is no longer active. Sign in again." } };
     }
@@ -716,14 +727,8 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   }
   const providerSessionId = verified.claims.sid;
   const accountLabel = identity.claims.email;
-  const sessionValue = sealSession({ id: randomBytes(32).toString("base64url"), principalId: context.principal.id, verified: {
-    ...verified,
-    claims: {
-      iss: verified.claims.iss, sub: verified.claims.sub, aud: verified.claims.aud, exp: verified.claims.exp,
-      ...(verified.claims.role ? { role: verified.claims.role } : {}),
-      ...(verified.claims.roles ? { roles: verified.claims.roles } : {})
-    }
-  }, expiresAt, ...(refreshToken ? { refreshToken } : {}), ...(typeof providerSessionId === "string" ? { providerSessionId } : {}),
+  const sessionValue = sealSession({ id: randomBytes(32).toString("base64url"), principalId: context.principal.id, verified: browserIdentity(verified),
+    expiresAt, ...(refreshToken ? { refreshToken } : {}), ...(typeof providerSessionId === "string" ? { providerSessionId } : {}),
     ...(typeof accountLabel === "string" && accountLabel.length < 256 ? { accountLabel } : {}) }, login.clientSecret);
   response.statusCode = 302;
   response.setHeader("location", pending.returnUrl);

@@ -8,10 +8,14 @@ The browser review link shows the saved page, the site and the current account.
 the existing approve/publish tools and reports the result. Reopening the link
 does not request another decision.
 
-The review session lasts at most eight hours. If the identity provider issues
+New review sessions last at most 30 days in the same browser profile, under
+[ADR 0028](../architecture/0028-remember-publication-review-login.md). Existing
+cookies keep their original deadline. If the identity provider issues
 a refresh token, the CMS refreshes and verifies the access token after its
 expiry; otherwise the browser must sign in again when the original token
-expires. Restarting the CMS does not end a still-valid session. Removing site
+expires. Refresh never extends the 30-day deadline. Browser profiles, including
+Chrome and Codex, do not share their remembered login. Restarting the CMS does
+not end a still-valid session. Removing site
 membership, permission, or the current session's revocation record blocks
 publication. The account link signs out locally and uses the provider logout
 endpoint when configured. A rejected account can switch through the same UI.
