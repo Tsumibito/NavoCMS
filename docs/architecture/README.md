@@ -32,7 +32,8 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0025](0025-current-head-patch-gate-and-bounded-reads.md) | Accepted | Current-head patch gate, keyset cursors, bounded reads, and honest effect-state errors |
 | [0026](0026-real-preview-and-independent-human-confirmation.md) | Accepted | Pre-review trusted builds, real capability preview, and independent human confirmation receipts |
 | [0027](0027-publication-review-session.md) | Accepted | Persistent browser review sessions, one-action approval, and link renewal |
-| [0028](0028-remember-publication-review-login.md) | Accepted | Remember browser login for at most 30 days without automatic release approval |
+| [0028](0028-remember-publication-review-login.md) | Accepted | Remember browser login for at most 360 days without automatic release approval |
+| [0029](0029-restart-safe-browser-login.md) | Accepted | Preserve an in-progress browser login across deployment restarts |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.
