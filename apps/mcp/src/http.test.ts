@@ -140,6 +140,17 @@ describe("real preview namespace and browser-session confirmation", () => {
       expect(relative).toContain(`data:image/svg+xml;base64,AAA= 1x, ${namespace}/images/photo.svg 2x`);
       expect(await (await fetch(`${base}${namespace}/_astro/styles.css`)).text()).toContain(`url(${namespace}/images/photo.svg)`);
       expect(await (await fetch(`${base}${namespace}/nested/index.html`)).text()).toContain(`src="${namespace}/images/photo.svg"`);
+      // Navigation emitted by Astro addresses directory routes, with either
+      // slash convention. Relative assets must bind against the saved index.
+      for (const route of ["nested", "nested/"]) {
+        const response = await fetch(`${base}${namespace}/${route}`);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/html");
+        expect(await response.text()).toContain(`src="${namespace}/images/photo.svg"`);
+      }
+      expect((await fetch(`${base}${namespace}/missing`)).status).toBe(404);
+      expect((await fetch(`${base}${namespace}/constructor`)).status).toBe(404);
+      expect((await fetch(`${base}${namespace}/nested/%2e%2e%2findex.html`)).status).toBe(404);
       // Unknown tokens never resolve.
       expect((await fetch(`${base}/previews/${"A".repeat(43)}`)).status).toBe(404);
 
@@ -301,6 +312,14 @@ describe("real preview namespace and browser-session confirmation", () => {
       });
       expect(reviewPreview.status).toBe(200);
       expect(await reviewPreview.text()).toContain("/confirmations/");
+      for (const route of ["nested", "nested/"]) {
+        const nested = await fetch(`${base}/confirmations/${confirmationToken}/preview/${route}`, {
+          headers: { cookie: sessionCookie }
+        });
+        expect(nested.status).toBe(200);
+        expect(await nested.text()).toContain(`/confirmations/${confirmationToken}/preview/_astro/styles.css`);
+      }
+      expect((await fetch(`${base}/confirmations/${confirmationToken}/preview/nested`)).status).toBe(401);
       const clockForRenewal = vi.spyOn(Date, "now");
       const beforeExpiry = Date.now();
       try {
@@ -500,6 +519,7 @@ class BuiltStagingOperations implements StagingAstroOperations {
     if (!this.#outputs.has(release.id)) {
       this.#outputs.set(release.id, Object.freeze({
         "index.html": "<!doctype html><html lang=\"en\"><head><link rel=\"stylesheet\" href=\"/_astro/styles.css\"></head><body><h1>built-index</h1></body></html>",
+        "nested/index.html": '<html><link rel="stylesheet" href="../_astro/styles.css"><h1>built-nested</h1></html>',
         "_astro/styles.css": "body { margin: 0; }\n"
       }));
     }
