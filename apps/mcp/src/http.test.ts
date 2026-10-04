@@ -13,6 +13,25 @@ import { McpEditingService, type StagingAstroOperations } from "./service.js";
 import type { PreviewBuildStatus } from "./model.js";
 
 describe("MCP OAuth metadata", () => {
+  it("delivers only available public snapshots and media with immutable cache metadata", async () => {
+    const hash = "a".repeat(64);
+    const server = createMcpHttpServer({ service: {} as McpEditingService,
+      verifier: { verify: async () => { throw new Error("not called"); } }, resource: "https://cms.example.test/mcp", authorizationServers: ["https://identity.example.test"],
+      delivery: { snapshot: async value => value === hash ? { snapshot: { releaseHash: hash } } : undefined,
+        media: async value => value === hash ? { bytes: new Uint8Array([1,2,3]), mediaType: "image/webp", sha256: hash } : undefined } });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw new Error("No test port");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const snapshot = await fetch(`${base}/delivery/${hash}.json`);
+      expect(snapshot.status).toBe(200); expect(snapshot.headers.get("cache-control")).toContain("immutable");
+      const media = await fetch(`${base}/media/${hash}`);
+      expect(media.status).toBe(200); expect(media.headers.get("content-type")).toBe("image/webp"); expect(media.headers.get("etag")).toBe(`"${hash}"`);
+      expect((await fetch(`${base}/delivery/${"b".repeat(64)}.json`)).status).toBe(404);
+      expect((await fetch(`${base}/media/${"b".repeat(64)}`)).status).toBe(404);
+    } finally { await new Promise<void>((resolve,reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
   it("advertises only the scopes enabled for a deployment", async () => {
     const enabledScopes = ["openid"] as const;
     const server = createMcpHttpServer({

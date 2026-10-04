@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { createHash } from "node:crypto";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
@@ -28,6 +29,19 @@ function unique(values, label) { assert(new Set(values).size === values.length, 
 
 const astroSchema = ajv.compile(await readJson("schemas/astro-artifact-manifest.schema.json"));
 const cloudflareReferenceSchema = ajv.compile(await readJson("schemas/cloudflare-artifact-reference.schema.json"));
+const snapshotSchema = ajv.compile(await readJson("schemas/public-site-snapshot-v1.schema.json"));
+function parseSnapshot(document, file) {
+  assert(snapshotSchema(document), `${file}: invalid site snapshot`);
+  const { snapshot, snapshotHash } = document;
+  assert(createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") === snapshotHash, `${file}: snapshot hash mismatch`);
+  unique(snapshot.routes.map(route => route.path.replace(/\/$/, "")), `${file}: route paths`);
+  assert(snapshot.locales.supported.includes(snapshot.locales.default) && snapshot.routes.every(route => snapshot.locales.supported.includes(route.locale)), `${file}: unsupported locale`);
+  for (const route of snapshot.routes) for (const media of route.media) for (const binding of [media, ...(media.sources ?? [])]) {
+    const url = new URL(binding.url);
+    assert(!url.username && !url.password && !url.port && url.pathname === `/media/${binding.variantIdentity}`, `${file}: invalid immutable media binding`);
+  }
+  return document;
+}
 function parseAstroManifest(document, file) {
   assert(astroSchema(document), `${file}: invalid Astro manifest`);
   unique(document.files.map((entry) => entry.path), `${file}: artifact paths`);
@@ -37,6 +51,7 @@ function parseAstroManifest(document, file) {
 function parseCloudflareReference(document, file) { assert(cloudflareReferenceSchema(document), `${file}: invalid Cloudflare reference`); return document; }
 
 const fixtureKinds = [
+  [".site-snapshot.json", { parse: parseSnapshot }],
   [".cloudflare-staging-binding-v3.json", contracts.cloudflareStagingBinding],
   [".plugin.json", contracts.plugin],
   [".profile.json", contracts.profile],
@@ -72,6 +87,7 @@ await assertRejected(fixtureFiles.filter((file) => file.endsWith(".astro-artifac
 await assertRejected(fixtureFiles.filter((file) => file.endsWith(".cloudflare-artifact-reference.invalid.json")), { parse: parseCloudflareReference }, "Cloudflare reference");
 await assertRejected(fixtureFiles.filter((file) => file.endsWith(".cloudflare-staging-binding.invalid.json")), contracts.cloudflareStagingBinding, "Cloudflare staging binding");
 await assertRejected(fixtureFiles.filter((file) => file.endsWith(".r2-runtime-binding.invalid.json")), contracts.r2RuntimeBinding, "R2 runtime binding");
+await assertRejected(fixtureFiles.filter((file) => file.endsWith(".site-snapshot.invalid.json")), { parse: parseSnapshot }, "site snapshot");
 
 const astroCorpus = await readJson("examples/astro/path-and-identifier-corpus.json");
 const validAstroManifest = await readJson("examples/astro/valid.astro-artifact-manifest.json");
@@ -83,4 +99,4 @@ for (const mutation of astroCorpus) {
 }
 
 assert(validated >= 10, `Expected at least ten contract fixtures, validated ${validated}`);
-console.log(`Validated ${Object.keys(contracts).length + 2} schemas and ${validated} contract fixtures.`);
+console.log(`Validated ${Object.keys(contracts).length + 3} schemas and ${validated} contract fixtures.`);

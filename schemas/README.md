@@ -4,6 +4,7 @@ These JSON Schemas are the executable `navocms.io/v0alpha1` foundation contracts
 
 | Schema | Fixtures |
 |---|---|
+| [`public-site-snapshot-v1.schema.json`](public-site-snapshot-v1.schema.json) | `examples/sites/*.site-snapshot.json` and adversarial fixtures |
 | [`plugin-manifest.schema.json`](plugin-manifest.schema.json) | `examples/plugins/*.json` |
 | [`site-profile.schema.json`](site-profile.schema.json) | `examples/profiles/*.json` |
 | [`content-type.schema.json`](content-type.schema.json) | `examples/content-types/*.json` |

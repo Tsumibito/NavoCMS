@@ -51,6 +51,21 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [] }));
   }
 
+  if (canRead) server.registerTool("content_dependencies", {
+    title: "Find referencing content", description: "Read a bounded page of current records referencing this document. Follow nextCursor until absent; this never enumerates another site.",
+    inputSchema: { documentId: z.string().uuid(), cursor: z.string().uuid().optional() }, annotations: readOnlyAnnotations()
+  }, safeTool(async ({ documentId, cursor }) => result("Content dependencies loaded", await service.dependencies(context, documentId, cursor))));
+
+  if (canRead) server.registerTool("site_passport", {
+    title: "Read site schemas and capabilities", description: "Read the bounded canonical site model, registered field schemas, relations, locales and release rules before creating or changing structured content.",
+    inputSchema: {}, annotations: readOnlyAnnotations()
+  }, safeTool(async () => result("Site passport loaded", await service.sitePassport(context))));
+
+  if (canRead) server.registerTool("content_schema", {
+    title: "Read a registered content schema", description: "Read canonical field validation and relationships for one type discovered through site_passport.",
+    inputSchema: { typeName: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) }, annotations: readOnlyAnnotations()
+  }, safeTool(async ({ typeName }) => result("Content schema loaded", await service.contentSchema(context, typeName))));
+
   if (canRead) server.registerTool("sites_list", {
     title: "List authorized sites",
     description: "List only the site visible to the current OAuth token. Use before content work when site context is unclear.",
@@ -122,7 +137,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     title: "Create a Markdown draft",
     description: "Create an immutable first revision from Markdown. Requires content:draft and an idempotency key. This never publishes content.",
     inputSchema: {
-      typeName: z.enum(["article", "landing-page", "organization", "legal-page"]),
+      typeName: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
       slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
       locale: z.string().min(2).max(20),
       title: z.string().min(1).max(180),
@@ -144,7 +159,8 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     inputSchema: {
       revisionId: z.string().min(1),
       baseSourceHash: z.string().regex(/^[a-f0-9]{64}$/),
-      operations: z.array(operationSchema).min(1).max(50),
+      metadataPatch: z.record(z.string(), z.unknown()).optional(),
+      operations: z.array(operationSchema).max(50),
       idempotencyKey: idempotencyKeySchema()
     },
     annotations: {
@@ -168,9 +184,10 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
   if (canDraft) server.registerTool("preview_prepare", {
     title: "Create a protected immutable preview",
     description: "Build an expiring noindex capability URL and bind it to the exact release and artifact hashes. This does not publish.",
-    inputSchema: { revisionId: z.string().min(1), idempotencyKey: idempotencyKeySchema() },
+    inputSchema: { revisionId: z.string().min(1),
+      additionalRevisionIds: z.array(z.string().uuid()).max(99).optional(), idempotencyKey: idempotencyKeySchema() },
     annotations: writeAnnotations()
-  }, safeTool(async ({ revisionId, idempotencyKey }) => result("Protected preview created; nothing was published", await service.preparePreview(context, revisionId, idempotencyKey))));
+  }, safeTool(async ({ revisionId, idempotencyKey, additionalRevisionIds }) => result("Protected preview created; nothing was published", await service.preparePreview(context, revisionId, idempotencyKey, additionalRevisionIds))));
 
   if (canRead) server.registerTool("release_status", {
     title: "Read release status",
@@ -328,8 +345,8 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
   server.registerTool("media_reference_create", {
     title: "Create a media reference",
     description: "Attach an existing asset to a bounded owner reference. Requires media:write.",
-    inputSchema: { assetId: z.string().uuid(), ownerType: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), ownerId: z.string().uuid(), purpose: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), idempotencyKey: z.string().min(16).max(128) }, annotations: writeAnnotations()
-  }, safeTool(async (input) => result("Media reference created", await media.createReference(context, input))));
+    inputSchema: { assetId: z.string().uuid(), ownerType: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), ownerId: z.string().uuid(), alt: z.string().min(1).max(512).optional(), purpose: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), idempotencyKey: z.string().min(16).max(128) }, annotations: writeAnnotations()
+  }, safeTool(async ({ alt, ...input }) => result("Media reference created", await media.createReference(context, { ...input, ...(alt ? { alt } : {}) }))));
   server.registerTool("media_reference_remove", {
     title: "Remove a media reference",
     description: "Soft-remove one media reference. Requires media:write.",
@@ -476,7 +493,8 @@ const PRE_EFFECT_ERROR_CODES = new Set([
   "HUMAN_APPROVAL_REQUIRED",
   "SITE_NOT_REGISTERED",
   "CONTENT_NOT_FOUND",
-  "RELEASE_APPROVAL_CHECKPOINT_INVALID"
+  "RELEASE_APPROVAL_CHECKPOINT_INVALID",
+  "SITE_SNAPSHOT_STALE", "SITE_PUBLICATION_IN_PROGRESS"
 ]);
 
 const APPLIED_EFFECT_TEXT = "The provider effect was applied, but live verification did not succeed and the workflow is not complete. Run release_reconcile with the same release hash to verify it again; the provider effect is not repeated.";
@@ -498,6 +516,10 @@ function safeTool<TArgs extends Record<string, unknown>>(
       const structured: Record<string, unknown> = { code, effectState };
       if (error instanceof McpEditingError && error.nextAction !== undefined) structured.nextAction = error.nextAction;
       if (error instanceof ContentError) {
+        if (Array.isArray(error.details.issues)) {
+          structured.issues = error.details.issues.slice(0, 20).filter((issue: unknown) => issue !== null && typeof issue === "object" && typeof (issue as { path?: unknown }).path === "string" && typeof (issue as { message?: unknown }).message === "string");
+          structured.nextAction = "Read content_schema for this type and correct the listed fields";
+        }
         for (const key of ["currentRevisionId", "currentSourceHash", "currentRevisionNumber"] as const) {
           const value = error.details[key];
           if (typeof value === "string" || typeof value === "number") structured[key] = value;

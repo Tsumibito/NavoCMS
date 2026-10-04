@@ -382,12 +382,19 @@ export class PostgresMediaRepository implements MediaRepository {
   }
 
   public async createReference(scope: MediaScope, input: MediaReferenceInput): Promise<{ readonly id: string }> {
+    if (input.alt !== undefined && (input.alt.length < 1 || input.alt.length > 512)) throw new Error("MEDIA_ALT_INVALID");
+    if (input.ownerType === "content.revision") {
+      const owner = await this.#database.withScope(scope, async client => (await client.query(
+        `SELECT id FROM navocms.content_revisions WHERE tenant_id=$1 AND site_id=$2 AND id=$3`, [scope.tenantId,scope.siteId,input.ownerId]
+      )).rows[0]);
+      if (!owner) throw new Error("MEDIA_REFERENCE_OWNER_SCOPE");
+    }
     return this.idempotent(scope, "media_reference_create", input.idempotencyKey, input, async () => {
       const id = randomUUID();
       await this.#database.withScope(scope, (client) => client.query(
-        `INSERT INTO navocms.media_references (id, tenant_id, site_id, asset_id, owner_type, owner_id, purpose)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [id, scope.tenantId, scope.siteId, input.assetId, input.ownerType, input.ownerId, input.purpose]
+        `INSERT INTO navocms.media_references (id, tenant_id, site_id, asset_id, owner_type, owner_id, purpose, alt)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [id, scope.tenantId, scope.siteId, input.assetId, input.ownerType, input.ownerId, input.purpose, input.alt ?? null]
       ));
       await this.append(scope, "media_reference_create", input.assetId, input.idempotencyKey, "io.navocms.media.reference.created.v1", { assetId: input.assetId, referenceId: id, purpose: input.purpose });
       return Object.freeze({ id });

@@ -1,10 +1,11 @@
 import { sha256, type MediaStorage } from "@navocms/media";
 import type { AstroMediaBinding, AstroRenderInput } from "@navocms/design-astro";
-import type { ContentRevision } from "@navocms/content";
+import { renderSemanticMarkdownHtml, type ContentRevision } from "@navocms/content";
 import type { SqlClient, PostgresDatabase } from "@navocms/persistence-postgres";
 import { NAVOCMS_PERMISSIONS } from "@navocms/security";
 import { randomUUID } from "node:crypto";
 
+import { composeSiteSnapshot, snapshotGovernance } from "./site-snapshot.js";
 import { McpEditingError } from "./errors.js";
 import type { McpRequestContext, PreviewBuildStatus } from "./model.js";
 import { outputManifestDigest } from "./output-manifest.js";
@@ -14,7 +15,7 @@ import { PostgresReviewedAstroBuildInputStore } from "./postgres-reviewed-astro-
 import type { RepositoryContext } from "./repository.js";
 import type { StoredRelease } from "./release-repository.js";
 import type { StagingAstroOperations } from "./service.js";
-import { STAGING_ASTRO_POLICY_DIGEST, StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
+import { STAGING_ASTRO_GOVERNANCE_DIGEST, STAGING_ASTRO_POLICY_DIGEST, StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
 import { ImageAttestedAstroBuildRunner, TrustedAstroBuilder, type TrustedAstroBuildRunner } from "./trusted-astro-builder.js";
 
 const INLINE_VARIANT_BYTES = 192 * 1024;
@@ -25,6 +26,7 @@ export const STAGING_ASTRO_BUILD_WORKFLOW = "navocms.staging-astro.build.v1";
 interface MediaBindingRow extends Record<string, unknown> {
   readonly asset_id: string;
   readonly purpose: string;
+  readonly alt: string | null;
   readonly variant_identity: string;
   readonly sha256: string;
   readonly storage_key: string;
@@ -47,19 +49,21 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
   readonly #objectStorage: ReviewedAstroObjectStorage | undefined;
   readonly #mediaStorage: MediaStorage | undefined;
   readonly #runtimePrincipalId: string;
+  readonly #mediaBaseUrl: string;
   readonly #leaseTtlMs: number;
   readonly #ownerToken = randomUUID();
   readonly #preparer = new StagingAstroPreviewPreparer();
   readonly #buildExecutors = new Map<string, Promise<void>>();
   #runnerReadiness: Promise<boolean> | undefined;
 
-  public constructor(input: Readonly<{ database: PostgresDatabase; environmentKey: string; reviewedSourceCommit: string; toolchainDirectory: string; readinessContext: RepositoryContext; runtimePrincipalId: string; leaseTtlMs?: number; runner?: TrustedAstroBuildRunner; objectStorage?: ReviewedAstroObjectStorage; mediaStorage?: MediaStorage }>) {
+  public constructor(input: Readonly<{ database: PostgresDatabase; environmentKey: string; reviewedSourceCommit: string; toolchainDirectory: string; readinessContext: RepositoryContext; runtimePrincipalId: string; leaseTtlMs?: number; runner?: TrustedAstroBuildRunner; objectStorage?: ReviewedAstroObjectStorage; mediaStorage?: MediaStorage; mediaBaseUrl?: string }>) {
     this.#database = input.database;
     this.#environmentKey = input.environmentKey;
     this.#readinessContext = input.readinessContext;
     this.#objectStorage = input.objectStorage;
     this.#mediaStorage = input.mediaStorage;
     this.#runtimePrincipalId = input.runtimePrincipalId;
+    this.#mediaBaseUrl = input.mediaBaseUrl ?? "";
     this.#leaseTtlMs = input.leaseTtlMs ?? 900_000;
     this.#runner = input.runner ?? new ImageAttestedAstroBuildRunner({ sourceCommitSha: input.reviewedSourceCommit, toolchainDirectory: input.toolchainDirectory });
   }
@@ -73,14 +77,95 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
 
   public policyDigest(): string { return STAGING_ASTRO_POLICY_DIGEST; }
 
-  public async prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision): Promise<AstroRenderInput> {
+  public async siteContext(repository: RepositoryContext): Promise<object> {
+    const base = await this.snapshotBase(repository);
+    const input = base ? await new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey).get({ tenantId: repository.site.tenantId, siteId: repository.site.siteId, environment: "staging", environmentKey: this.#environmentKey, releaseId: base.release_id }) : undefined;
+    return { environmentKey: this.#environmentKey, releaseId: base?.release_id ?? null,
+      routes: input?.render.routes.map(route => ({ path: route.path, locale: route.locale, documentId: route.id, revisionId: route.revisionId, sectionId: "main", componentId: route.componentId, dataSource: "content.revision", fields: ["title", "body", "media"] })) ?? [],
+      redirects: input?.render.redirects ?? [], integrations: { build: "reviewed-astro", media: "injected-immutable-storage" }, policyDigest: STAGING_ASTRO_POLICY_DIGEST };
+  }
+
+  public async prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision, additional: readonly ContentRevision[] = []): Promise<AstroRenderInput> {
     if (!this.#mediaStorage || context.authorization.tenantId !== site.tenantId || context.authorization.siteId !== site.siteId) {
       throw new McpEditingError("STAGING_ASTRO_MEDIA_SCOPE_DENIED", "Staging Astro media binding is outside the authorized site");
     }
-    return this.#preparer.prepare(site, revision, await this.resolveMedia(context, revision));
+    const repository = { site, principalId: context.authorization.principal.id };
+    const base = await this.snapshotBase(repository);
+    const previous = base ? await new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey).get({
+      tenantId: site.tenantId, siteId: site.siteId, environment: "staging", environmentKey: this.#environmentKey, releaseId: base.release_id
+    }) : undefined;
+    if (base && !previous) throw new McpEditingError("SITE_SNAPSHOT_BASE_MISSING", "Published route snapshot is missing; restore it before preparing another release");
+    const selected = await Promise.all([revision, ...additional].map(async item => this.#preparer.prepare(site, item, await this.resolveMedia(context, item))));
+    return composeSiteSnapshot(selected, previous?.render.routes ?? [], base?.id ?? null);
+  }
+
+  private async snapshotBase(repository: RepositoryContext): Promise<{ id: string; release_id: string } | undefined> {
+    return this.#database.withScope(serviceScope(repository), async client => (await client.query<{ id: string; release_id: string }>(
+      `SELECT p.id, p.release_id FROM navocms.release_publications p JOIN navocms.environments e
+       ON e.tenant_id = p.tenant_id AND e.site_id = p.site_id AND e.id = p.environment_id
+       WHERE p.tenant_id = $1 AND p.site_id = $2 AND e.environment_key = $3
+         AND p.status IN ('applied','verified','verification_failed') ORDER BY p.applied_at DESC LIMIT 1`,
+      [repository.site.tenantId, repository.site.siteId, this.#environmentKey]
+    )).rows[0]);
+  }
+
+  public async publicSnapshot(releaseHash: string): Promise<object | undefined> {
+    if (!/^[a-f0-9]{64}$/.test(releaseHash)) return undefined;
+    const repository = { ...this.#readinessContext, principalId: this.#runtimePrincipalId };
+    const releaseId = await this.#database.withScope(serviceScope(repository), async client => (await client.query<{ release_id: string }>(
+      `SELECT p.release_id FROM navocms.release_publications p JOIN navocms.release_candidates c
+       ON c.tenant_id=p.tenant_id AND c.site_id=p.site_id AND c.id=p.release_id
+       WHERE p.tenant_id=$1 AND p.site_id=$2 AND c.release_hash=$3 AND p.verified_at IS NOT NULL LIMIT 1`,
+      [repository.site.tenantId, repository.site.siteId, releaseHash]
+    )).rows[0]?.release_id);
+    if (!releaseId) return undefined;
+    const input = await new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey).get({
+      tenantId: repository.site.tenantId, siteId: repository.site.siteId, environment: "staging", environmentKey: this.#environmentKey, releaseId
+    });
+    if (!input) return undefined;
+    const routes = await this.#database.withScope(serviceScope(repository), async client => Promise.all(input.render.routes.map(async route => {
+      const row = (await client.query<{ metadata_json: Record<string, unknown>; type_name: string; document_id: string }>(
+        `SELECT r.metadata_json, t.name AS type_name, r.document_id FROM navocms.content_revisions r
+         JOIN navocms.content_documents d ON d.tenant_id=r.tenant_id AND d.site_id=r.site_id AND d.id=r.document_id
+         JOIN navocms.content_types t ON t.tenant_id=d.tenant_id AND t.site_id=d.site_id AND t.id=d.content_type_id
+         WHERE r.tenant_id=$1 AND r.site_id=$2 AND r.id=$3`, [repository.site.tenantId, repository.site.siteId, route.revisionId]
+      )).rows[0];
+      if (!row) throw new McpEditingError("SITE_SNAPSHOT_REVISION_MISSING", "Published revision is missing");
+      return { path: route.path, locale: route.locale, revisionId: route.revisionId, documentId: row.document_id,
+        typeName: row.type_name, title: route.title, markdown: route.source, html: renderSemanticMarkdownHtml(route.source, route.directives), fields: row.metadata_json, media: route.media };
+    })));
+    const snapshot = { schema: "io.navocms.public-site-snapshot.v1", siteId: repository.site.siteId, releaseHash,
+      locales: input.render.locales, redirects: input.render.redirects ?? [], routes };
+    return { snapshot, snapshotHash: sha256(JSON.stringify(snapshot)) };
+  }
+
+  public async readMedia(variantIdentity: string, previewReleaseId?: string): Promise<{ bytes: Uint8Array; mediaType: string; sha256: string } | undefined> {
+    if (!/^[a-f0-9]{64}$/.test(variantIdentity) || !this.#mediaStorage) return undefined;
+    const repository = { ...this.#readinessContext, principalId: this.#runtimePrincipalId };
+    const eligible = await this.#database.withScope(serviceScope(repository), async client => (await client.query<{ storage_key: string; byte_size: number; media_type: string; sha256: string }>(
+      `SELECT v.storage_key,v.byte_size,v.media_type,v.sha256 FROM navocms.media_variants v
+       WHERE v.tenant_id=$1 AND v.site_id=$2 AND v.variant_identity=$3 AND EXISTS (
+         SELECT 1 FROM navocms.reviewed_astro_build_inputs b
+         WHERE b.tenant_id=v.tenant_id AND b.site_id=v.site_id
+           AND (($4::uuid IS NOT NULL AND b.release_id=$4) OR ($4::uuid IS NULL AND EXISTS (
+             SELECT 1 FROM navocms.release_publications p WHERE p.tenant_id=b.tenant_id AND p.site_id=b.site_id AND p.release_id=b.release_id AND p.verified_at IS NOT NULL)))
+           AND b.render_json->'routes' @? ('$[*].media[*] ? (@.variantIdentity == "' || $3 || '" || exists(@.sources[*] ? (@.variantIdentity == "' || $3 || '")))')::jsonpath
+       ) LIMIT 1`, [repository.site.tenantId, repository.site.siteId, variantIdentity, previewReleaseId ?? null]
+    )).rows[0]);
+    if (!eligible || Number(eligible.byte_size) > INLINE_VARIANT_BYTES) return undefined;
+    const object = await this.#mediaStorage.read(eligible.storage_key, INLINE_VARIANT_BYTES);
+    if (!object || sha256(object.bytes) !== eligible.sha256 || object.mediaType !== eligible.media_type || object.bytes.length !== Number(eligible.byte_size)) return undefined;
+    return { bytes: object.bytes, mediaType: object.mediaType, sha256: eligible.sha256 };
   }
 
   public async persistPreviewInput(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease, render: AstroRenderInput): Promise<void> {
+    const base = await this.snapshotBase(repository);
+    if (render.anchors.governance !== snapshotGovernance(STAGING_ASTRO_GOVERNANCE_DIGEST, base?.id ?? null)) throw new McpEditingError("SITE_SNAPSHOT_STALE", "Published release changed during preparation; prepare a fresh snapshot");
+    await this.#database.withScope(serviceScope(repository), client => client.query(
+      `INSERT INTO navocms.site_release_snapshots (tenant_id, site_id, release_id, base_publication_id, governance_digest)
+       VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+      [repository.site.tenantId, repository.site.siteId, release.id, base?.id ?? null, render.anchors.governance]
+    ));
     await new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey).register(context, {
       idempotencyKey: `astro-input:${release.releaseHash}`,
       releaseId: release.id,
@@ -360,8 +445,8 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
       siteId: context.authorization.siteId,
       principalId: context.authorization.principal.id
     }, async (client) => client.query<MediaBindingRow>(
-      `SELECT r.asset_id::text, r.purpose, v.variant_identity, v.sha256, v.storage_key,
-              v.byte_size::integer AS byte_size, v.media_type, v.width
+      `SELECT r.asset_id::text, r.purpose, r.alt, v.variant_identity, v.sha256, v.storage_key,
+              v.byte_size::integer AS byte_size, v.media_type, (v.transform_json->>'width')::integer AS width
          FROM navocms.media_references r
          JOIN navocms.media_assets a
            ON a.tenant_id = r.tenant_id AND a.site_id = r.site_id AND a.id = r.asset_id
@@ -370,8 +455,8 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         WHERE r.tenant_id = $1 AND r.site_id = $2 AND r.owner_type = 'content.revision'
           AND r.owner_id = $3 AND r.deleted_at IS NULL AND a.state = 'verified'
           AND v.preset_id = 'responsive' AND v.preset_version = 'v1'
-          AND ((v.media_type = 'image/webp' AND v.width IN (320, 640))
-            OR (v.media_type = 'image/jpeg' AND v.width = 640))
+          AND ((v.media_type = 'image/webp' AND v.transform_json->>'width' IN ('320', '640'))
+            OR (v.media_type = 'image/jpeg' AND v.transform_json->>'width' = '640'))
         ORDER BY r.purpose, r.asset_id, v.media_type, v.width`,
       [revision.tenantId, revision.siteId, revision.id]
     ))).rows;
@@ -395,7 +480,8 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         }
         total += object.bytes.byteLength;
         if (total > INLINE_MEDIA_BYTES) throw new McpEditingError("STAGING_ASTRO_MEDIA_BOUNDS", "Staging media bindings exceed the reviewed inline limit");
-        return `data:${variant.media_type};base64,${Buffer.from(object.bytes).toString("base64")}`;
+        if (!this.#mediaBaseUrl) throw new McpEditingError("MEDIA_DELIVERY_UNAVAILABLE", "Immutable media delivery origin is missing");
+        return `${this.#mediaBaseUrl}/media/${variant.variant_identity}`;
       }));
       const [webp320Url, webp640Url, jpeg640Url] = urls;
       if (!webp320Url || !webp640Url || !jpeg640Url) throw new McpEditingError("STAGING_ASTRO_MEDIA_STORAGE_MISMATCH", "Verified media bytes do not match the immutable staging variant");
@@ -403,7 +489,7 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         assetId: jpeg640.asset_id,
         variantIdentity: jpeg640.variant_identity,
         url: jpeg640Url,
-        alt: `${key.split(":", 1)[0]} image`,
+        alt: jpeg640.alt ?? `${key.split(":", 1)[0]} image`,
         sources: Object.freeze([
           Object.freeze({ variantIdentity: webp320.variant_identity, url: webp320Url, mediaType: webp320.media_type, media: "(max-width: 480px)" }),
           Object.freeze({ variantIdentity: webp640.variant_identity, url: webp640Url, mediaType: webp640.media_type })

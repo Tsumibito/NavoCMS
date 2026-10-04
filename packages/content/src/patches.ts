@@ -27,6 +27,7 @@ export function applyStructuralPatch(input: {
   readonly baseSourceHash: string;
   readonly operations: readonly StructuralPatchOperation[];
   readonly directives?: readonly DirectiveDefinition[];
+  readonly allowEmpty?: boolean;
 }): PatchResult {
   const directives = input.directives ?? [];
   const source = canonicalMarkdown(input.source, directives);
@@ -37,7 +38,7 @@ export function applyStructuralPatch(input: {
       actualHash
     });
   }
-  if (input.operations.length === 0) {
+  if (input.operations.length === 0 && !input.allowEmpty) {
     throw new ContentError("PATCH_EMPTY", "A structural patch must contain at least one operation");
   }
   const ast = parseMarkdown(source, directives);

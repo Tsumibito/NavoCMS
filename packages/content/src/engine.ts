@@ -213,11 +213,12 @@ export class ContentEngine {
       source: base.source,
       baseSourceHash: input.baseSourceHash,
       operations: input.operations,
+      allowEmpty: Boolean(input.metadata && Object.keys(input.metadata).length),
       directives: this.directivesFor(input, document.typeName)
     });
     // `body` is a supported metadata mirror in the foundation packs. Never let it
     // point at the previous revision after a structural patch.
-    const metadata = input.metadata ?? (
+    const metadata = input.metadata ? { ...input.metadata, ...(typeof base.metadata.body === "string" ? { body: result.source } : {}) } : (
       typeof base.metadata.body === "string" ? { ...base.metadata, body: result.source } : base.metadata
     );
     const revision = this.createRevision({
@@ -304,6 +305,10 @@ export class ContentEngine {
         .filter((revision) => sameScope(revision, scope) && revision.variantId === variantId)
         .sort((left, right) => left.number - right.number)
     );
+  }
+
+  public listTypes(scope: ContentScope): readonly ContentTypeDefinition[] {
+    return [...this.#types.entries()].filter(([key]) => key.startsWith(`${scope.tenantId}:${scope.siteId}:`)).map(([, definition]) => definition);
   }
 
   public exportBundle(scope: ContentScope, exportedAt: Date = this.#now()): PortableSiteBundle {
@@ -511,7 +516,7 @@ function validateDirectives(directives: readonly DirectiveDefinition[]): void {
   }
 }
 
-function validateMetadata(
+export function validateMetadata(
   definition: ContentTypeDefinition,
   metadata: Readonly<Record<string, unknown>>,
   slug: string,

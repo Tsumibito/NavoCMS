@@ -6,6 +6,7 @@ import {
   applyStructuralPatch,
   compareMarkdown,
   foundationPacks,
+  validateMetadata,
   type ContentPack,
   type ContentRevision,
   type ContentTypeDefinition,
@@ -61,6 +62,7 @@ interface RevisionRow extends Record<string, unknown> {
   readonly metadata_json: Record<string, unknown>;
   readonly provenance_json: RevisionProvenance;
   readonly created_at: Date | string;
+  readonly locale: string;
 }
 
 interface TypeRow extends Record<string, unknown> {
@@ -76,6 +78,7 @@ interface VariantTypeRow extends Record<string, unknown> {
   readonly slug: string;
   readonly locale: string;
   readonly directive_definitions: DirectiveDefinition[];
+  readonly definition: ContentTypeDefinition;
 }
 
 export class PostgresEditingRepository implements EditingRepository {
@@ -83,6 +86,16 @@ export class PostgresEditingRepository implements EditingRepository {
 
   public constructor(database: PostgresDatabase) {
     this.#database = database;
+  }
+
+  public async listTypes(context: RepositoryContext): Promise<readonly ContentTypeDefinition[]> {
+    const registered = await this.#database.withScope(databaseScope(context), async client => (await client.query<TypeRow>(
+      `SELECT id, name, version, definition, directive_definitions FROM navocms.content_types WHERE tenant_id=$1 AND site_id=$2 ORDER BY name LIMIT 64`,
+      [context.site.tenantId, context.site.siteId]
+    )).rows);
+    const types = new Map(foundationPacks.flatMap(pack => pack.types).map(type => [type.metadata.name, type]));
+    for (const row of registered) types.set(row.name, row.definition);
+    return [...types.values()];
   }
 
   public async getSite(scope: RepositoryScope): Promise<SiteDescriptor | undefined> {
@@ -152,10 +165,16 @@ export class PostgresEditingRepository implements EditingRepository {
     if (!input.site.locales.includes(input.locale)) {
       throw new ContentError("VARIANT_LOCALE_INVALID", "Locale is not enabled for this site");
     }
-    const pack = requirePack(input.typeName);
+    const registered = await this.#database.withScope({ ...input.site, principalId: input.actorId }, async client => (await client.query<TypeRow>(
+      `SELECT id, name, version, definition, directive_definitions FROM navocms.content_types WHERE tenant_id=$1 AND site_id=$2 AND name=$3`,
+      [input.site.tenantId, input.site.siteId, input.typeName]
+    )).rows[0]);
+    const pack = registered ? undefined : requirePack(input.typeName);
+    const definition = registered?.definition ?? pack!.types.find(candidate => candidate.metadata.name === input.typeName)!;
+    const directives = registered?.directive_definitions ?? pack!.directives?.[input.typeName] ?? [];
     const engine = new ContentEngine();
-    for (const foundation of foundationPacks) engine.registerPack(input.site, foundation);
-    const created = engine.createDocument({
+    engine.registerType(input.site, definition, directives);
+    let created = engine.createDocument({
       ...input.site,
       typeName: input.typeName,
       slug: input.slug,
@@ -164,15 +183,27 @@ export class PostgresEditingRepository implements EditingRepository {
       metadata: metadataFor(input.typeName, input.slug, input.title, input.source, input.metadata),
       provenance: { kind: "agent", actorId: input.actorId, note: "Created through MCP" }
     });
-    const definition = pack.types.find((candidate) => candidate.metadata.name === input.typeName)!;
-    const directives = pack.directives?.[input.typeName] ?? [];
     await this.#database.withScope({ ...input.site, principalId: input.actorId }, async (client) => {
+      await validateRelationFields(client, input.site, definition, created.revision.metadata);
       const typeId = await ensureContentType(client, input.site, definition, directives);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`document:${input.site.siteId}:${input.slug}`]);
+      const existing = (await client.query<{ id: string; content_type_id: string }>(
+        `SELECT id,content_type_id FROM navocms.content_documents WHERE tenant_id=$1 AND site_id=$2 AND slug=$3`,
+        [input.site.tenantId,input.site.siteId,input.slug]
+      )).rows[0];
+      if (existing) {
+        if (existing.content_type_id !== typeId) throw new ContentError("DOCUMENT_SLUG_CONFLICT", "This slug belongs to another content type");
+        const localeExists = (await client.query(`SELECT id FROM navocms.content_variants WHERE tenant_id=$1 AND site_id=$2 AND document_id=$3 AND locale=$4`,
+          [input.site.tenantId,input.site.siteId,existing.id,input.locale])).rows[0];
+        if (localeExists) throw new ContentError("VARIANT_CONFLICT", "This locale already exists; patch its current revision");
+        created = { document: { ...created.document, id: existing.id }, variant: { ...created.variant, documentId: existing.id }, revision: { ...created.revision, documentId: existing.id } };
+      } else {
       await client.query(
         `INSERT INTO navocms.content_documents (id, tenant_id, site_id, content_type_id, slug, created_at)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [created.document.id, input.site.tenantId, input.site.siteId, typeId, created.document.slug, created.document.createdAt]
       );
+      }
       await client.query(
         `INSERT INTO navocms.content_variants
            (id, tenant_id, site_id, document_id, locale, variant_key, created_at)
@@ -201,7 +232,7 @@ export class PostgresEditingRepository implements EditingRepository {
     return this.#database.withScope({ ...input.site, principalId: input.actorId }, async (client) => {
       const base = await requireRevision(client, input.site, input.revisionId);
       const variant = (await client.query<VariantTypeRow>(
-        `SELECT t.name AS type_name, d.slug, v.locale, t.directive_definitions
+        `SELECT t.name AS type_name, d.slug, v.locale, t.directive_definitions, t.definition
            FROM navocms.content_variants v
            JOIN navocms.content_documents d ON d.tenant_id = v.tenant_id AND d.site_id = v.site_id AND d.id = v.document_id
            JOIN navocms.content_types t ON t.tenant_id = d.tenant_id AND t.site_id = d.site_id AND t.id = d.content_type_id
@@ -213,6 +244,7 @@ export class PostgresEditingRepository implements EditingRepository {
         source: base.source,
         baseSourceHash: input.baseSourceHash,
         operations: input.operations,
+        allowEmpty: Boolean(input.metadataPatch && Object.keys(input.metadataPatch).length),
         directives: variant.directive_definitions
       });
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [base.variantId]);
@@ -243,9 +275,10 @@ export class PostgresEditingRepository implements EditingRepository {
       const provenance: RevisionProvenance = Object.freeze({
         kind: "agent", actorId: input.actorId, note: "Patched through MCP"
       });
-      const metadata = typeof base.metadata.body === "string"
-        ? Object.freeze({ ...base.metadata, body: patched.source })
-        : base.metadata;
+      const metadata = Object.freeze({ ...base.metadata, ...(input.metadataPatch ?? {}), body: patched.source });
+      if (input.metadataPatch && ("slug" in input.metadataPatch || "body" in input.metadataPatch || "locale" in input.metadataPatch)) throw new ContentError("CONTENT_FIELD_IMMUTABLE", "Slug, body and locale cannot be changed through a field patch");
+      validateMetadata(variant.definition, metadata, variant.slug, patched.source);
+      await validateRelationFields(client, input.site, variant.definition, metadata);
       const revision: ContentRevision = Object.freeze({
         id: randomUUID(), tenantId: input.site.tenantId, siteId: input.site.siteId,
         documentId: base.documentId, variantId: base.variantId, number: nextNumber,
@@ -254,6 +287,12 @@ export class PostgresEditingRepository implements EditingRepository {
         createdAt: new Date().toISOString()
       });
       await insertRevision(client, revision, input.actorId);
+      await client.query(
+        `INSERT INTO navocms.media_references (id, tenant_id, site_id, asset_id, owner_type, owner_id, purpose, alt)
+         SELECT gen_random_uuid(), tenant_id, site_id, asset_id, owner_type, $4, purpose, alt FROM navocms.media_references
+         WHERE tenant_id=$1 AND site_id=$2 AND owner_type='content.revision' AND owner_id=$3 AND deleted_at IS NULL`,
+        [input.site.tenantId, input.site.siteId, base.id, revision.id]
+      );
       return Object.freeze({
         draft: toDraft({
           document_id: base.documentId, variant_id: base.variantId, type_name: variant.type_name,
@@ -352,16 +391,17 @@ function assertPageCursor(cursor: string | undefined): void {
 
 async function requireRevision(client: SqlClient, site: SiteDescriptor, revisionId: string): Promise<ContentRevision> {
   const row = (await client.query<RevisionRow>(
-    `SELECT id, tenant_id, site_id, document_id, variant_id, revision_number,
-            parent_revision_id, source_markdown, source_hash, ast_json,
-            metadata_json, provenance_json, created_at
-       FROM navocms.content_revisions
-      WHERE tenant_id = $1 AND site_id = $2 AND id = $3`,
+    `SELECT r.id, r.tenant_id, r.site_id, r.document_id, r.variant_id, r.revision_number,
+            r.parent_revision_id, r.source_markdown, r.source_hash, r.ast_json,
+            r.metadata_json, r.provenance_json, r.created_at, v.locale
+       FROM navocms.content_revisions r JOIN navocms.content_variants v
+         ON v.tenant_id=r.tenant_id AND v.site_id=r.site_id AND v.id=r.variant_id
+      WHERE r.tenant_id = $1 AND r.site_id = $2 AND r.id = $3`,
     [site.tenantId, site.siteId, revisionId]
   )).rows[0];
   if (!row) throw new ContentError("REVISION_NOT_FOUND", "Revision was not found");
   return Object.freeze({
-    id: row.id, tenantId: row.tenant_id, siteId: row.site_id, documentId: row.document_id,
+    id: row.id, tenantId: row.tenant_id, siteId: row.site_id, documentId: row.document_id, locale: row.locale,
     variantId: row.variant_id, number: row.revision_number,
     ...(row.parent_revision_id ? { parentRevisionId: row.parent_revision_id } : {}),
     source: row.source_markdown, sourceHash: row.source_hash, ast: row.ast_json,
@@ -393,6 +433,20 @@ async function ensureContentType(client: SqlClient, site: SiteDescriptor, defini
     throw new ContentError("CONTENT_TYPE_VERSION_CONFLICT", `Type ${definition.metadata.name} has a conflicting persisted definition`);
   }
   return row.id;
+}
+
+async function validateRelationFields(client: SqlClient, site: SiteDescriptor, definition: ContentTypeDefinition, metadata: Readonly<Record<string, unknown>>): Promise<void> {
+  for (const relation of definition.spec.relations) {
+    if (typeof relation.name !== "string" || typeof relation.target !== "string") continue;
+    const field = (definition.spec.fields as { properties?: Record<string, { format?: string }> }).properties?.[relation.name];
+    if (field?.format !== "uuid" || metadata[relation.name] === undefined) continue;
+    const target = (await client.query<{ name: string }>(
+      `SELECT t.name FROM navocms.content_documents d JOIN navocms.content_types t
+       ON t.tenant_id=d.tenant_id AND t.site_id=d.site_id AND t.id=d.content_type_id
+       WHERE d.tenant_id=$1 AND d.site_id=$2 AND d.id=$3`, [site.tenantId,site.siteId,metadata[relation.name]]
+    )).rows[0];
+    if (!target || target.name !== relation.target) throw new ContentError("RELATION_TARGET_INVALID", `Field /${relation.name} must reference a ${relation.target} in this site`, { issues: [{ path: `/${relation.name}`, message: "Target is missing, belongs to another site, or has the wrong type" }] });
+  }
 }
 
 async function insertRevision(client: SqlClient, revision: ContentRevision, actorId: string): Promise<void> {

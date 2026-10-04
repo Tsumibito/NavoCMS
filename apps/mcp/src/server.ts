@@ -10,6 +10,7 @@ import {
 
 import { createMcpHttpServer } from "./http.js";
 import { environmentInteger, environmentRolePermissions } from "./config.js";
+import { MediaUploadGateway } from "./media-upload-gateway.js";
 import { PostgresEditingRepository } from "./postgres-repository.js";
 import { PostgresMediaRepository } from "@navocms/media";
 import { McpMediaService } from "./media-service.js";
@@ -88,7 +89,11 @@ const identityResolver = database ? new PostgresIdentityResolver(database, deplo
 }) : undefined;
 // Embedded production stays read-only. The staging media mutation surface is
 // enabled only after the reviewed R2 binding and all namespace markers pass.
-const media = database ? new McpMediaService(new PostgresMediaRepository(database, r2Storage?.media), { storageInjected: Boolean(r2Storage) }) : undefined;
+const mediaRepository = database ? new PostgresMediaRepository(database, r2Storage?.media) : undefined;
+const media = database ? new McpMediaService(mediaRepository!, { storageInjected: Boolean(r2Storage),
+  ...(r2Storage && runtimePrincipalId ? { uploadGateway: new MediaUploadGateway(database, r2Storage.media, mediaRepository!, {
+    tenantId: deploymentScope.tenantId, siteId: deploymentScope.siteId, principalId: runtimePrincipalId, principalKind: "service"
+  }, new URL(resource).origin) } : {}) }) : undefined;
 
 let service: McpEditingService;
 let reviewedAstroResolver: ReviewedAstroArtifactResolver | undefined;
@@ -121,7 +126,8 @@ if (database) {
       readinessContext: deliveryRepositoryContext,
       runtimePrincipalId: runtimePrincipalId!,
       objectStorage: r2Storage!.artifacts,
-      mediaStorage: r2Storage!.media
+      mediaStorage: r2Storage!.media,
+      mediaBaseUrl: new URL(resource).origin
     });
   }
   reviewedAstroResolver = stagingComposition?.resolver;
@@ -191,6 +197,10 @@ const confirmationLogin = process.env.NAVOCMS_CONFIRMATION_CLIENT_ID && process.
   : undefined;
 const server = createMcpHttpServer({
   service,
+  ...(stagingOperations ? { delivery: {
+    snapshot: (hash: string) => stagingOperations!.publicSnapshot(hash),
+    media: (identity: string, releaseId?: string) => stagingOperations!.readMedia(identity, releaseId)
+  } } : {}),
   ...(media ? { media } : {}),
   verifier,
   resource,

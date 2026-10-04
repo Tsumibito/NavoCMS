@@ -16,6 +16,7 @@ import {
   type VerifiedAccessToken
 } from "@navocms/security";
 
+import { MEDIA_LIMITS } from "@navocms/media";
 import { createMcpServer } from "./mcp.js";
 import { MCP_LIMITS } from "./model.js";
 import { McpEditingService } from "./service.js";
@@ -23,6 +24,10 @@ import { McpMediaService } from "./media-service.js";
 
 export interface McpHttpOptions {
   readonly service: McpEditingService;
+  readonly delivery?: {
+    snapshot(hash: string): Promise<object | undefined>;
+    media(identity: string, previewReleaseId?: string): Promise<{ bytes: Uint8Array; mediaType: string; sha256: string } | undefined>;
+  };
   readonly media?: McpMediaService;
   readonly verifier: AccessTokenVerifier;
   readonly resource: string;
@@ -121,6 +126,45 @@ export function createMcpHttpServer(options: McpHttpOptions) {
     if (request.method === "GET" && request.url === metadataPath) {
       return sendJson(response, 200, metadata);
     }
+    const snapshotRoute = /^\/delivery\/([a-f0-9]{64})\.json$/.exec(request.url ?? "");
+    if (request.method === "GET" && snapshotRoute && options.delivery) {
+      const snapshot = await options.delivery.snapshot(snapshotRoute[1]!).catch(() => undefined);
+      if (!snapshot) return sendJson(response, 404, { error: "SNAPSHOT_NOT_PUBLISHED" });
+      response.setHeader("cache-control", "public, max-age=31536000, immutable");
+      return sendJson(response, 200, snapshot);
+    }
+    const mediaRoute = /^\/media\/([a-f0-9]{64})$/.exec(request.url ?? "");
+    if (request.method === "GET" && mediaRoute && options.delivery) {
+      const media = await options.delivery.media(mediaRoute[1]!).catch(() => undefined);
+      if (!media) return sendJson(response, 404, { error: "MEDIA_NOT_PUBLISHED" });
+      response.setHeader("cache-control", "public, max-age=31536000, immutable");
+      response.setHeader("etag", `"${media.sha256}"`);
+      response.setHeader("content-type", media.mediaType);
+      response.setHeader("x-content-type-options", "nosniff");
+      response.end(media.bytes); return;
+    }
+    const uploadRoute = /^\/uploads\/([A-Za-z0-9_-]{43})$/.exec(request.url ?? "");
+    if (uploadRoute && options.media) {
+      response.setHeader("cache-control", "private, no-store");
+      response.setHeader("referrer-policy", "no-referrer");
+      response.setHeader("x-robots-tag", "noindex, nofollow");
+      if (request.method === "GET") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.setHeader("content-security-policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+        response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Upload photograph</title><style>body{font:18px system-ui;max-width:600px;margin:10vh auto;padding:24px}button,input{font:inherit;margin:12px 0}output{display:block}</style><h1>Upload photograph</h1><p>Select the JPEG or PNG used to prepare this upload. Maximum 25 MB.</p><input type="file" accept="image/jpeg,image/png"><button>Upload</button><output></output><script>document.querySelector('button').onclick=async()=>{const f=document.querySelector('input').files[0],o=document.querySelector('output');if(!f)return;o.textContent='Uploading…';try{const r=await fetch(location.pathname,{method:'PUT',body:f,headers:{'content-type':f.type}});const d=await r.json();o.textContent=r.ok?'Photograph ready. Asset: '+d.assetId:'Upload rejected: '+d.error}catch{o.textContent='Connection interrupted. Retry the same file.'}};</script></html>`);
+        return;
+      }
+      if (request.method !== "PUT" || (request.headers.origin && request.headers.origin !== resourceUrl.origin)) return sendJson(response, 403, { error: "UPLOAD_REQUEST_REJECTED" });
+      try {
+        const chunks: Buffer[] = []; let size = 0;
+        for await (const chunk of request) {
+          const bytes = Buffer.from(chunk as Uint8Array); size += bytes.length;
+          if (size > MEDIA_LIMITS.maxBytes) return sendJson(response, 413, { error: "UPLOAD_TOO_LARGE" });
+          chunks.push(bytes);
+        }
+        return sendJson(response, 200, await options.media.receiveUpload(uploadRoute[1]!, Buffer.concat(chunks)));
+      } catch { return sendJson(response, 400, { error: "UPLOAD_REJECTED" }); }
+    }
     const previewRoute = request.method === "GET"
       ? /^\/previews\/([A-Za-z0-9_-]{43})(?:\/(.*))?$/.exec(request.url ?? "")
       : null;
@@ -142,7 +186,7 @@ export function createMcpHttpServer(options: McpHttpOptions) {
           const entry = pickEntryHtml(surface.built.output);
           const entryBody = entry !== undefined ? surface.built.output[entry] : undefined;
           response.end(entryBody !== undefined
-            ? bindCapabilityUrls(entryBody, `/previews/${token}`, "html", entry!)
+            ? bindCapabilityUrls(entryBody, `/previews/${token}`, "html", entry!, resourceUrl.origin)
             : surface.proof.body);
         } else {
           response.setHeader("content-type", surface.proof.mediaType);
@@ -155,15 +199,21 @@ export function createMcpHttpServer(options: McpHttpOptions) {
       let path: string;
       try { path = decodeURIComponent(rest.split("?")[0] ?? ""); }
       catch { return sendJson(response, 400, { error: "INVALID_PREVIEW_PATH" }); }
+      const previewMedia = /^media\/([a-f0-9]{64})$/.exec(path);
+      if (previewMedia && options.delivery) {
+        const media = await options.delivery.media(previewMedia[1]!, surface.releaseId).catch(() => undefined);
+        if (!media) return sendJson(response, 404, { error: "PREVIEW_MEDIA_NOT_FOUND" });
+        response.setHeader("content-type", media.mediaType); response.end(media.bytes); return;
+      }
       const body = surface.built?.output[path];
       if (!safeOutputPath(path) || body === undefined) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
       response.setHeader("content-type", outputContentType(path));
       if (path.endsWith(".html")) {
         response.setHeader("content-type", "text/html; charset=utf-8");
-        response.end(bindCapabilityUrls(body, `/previews/${token}`, "html", path));
+        response.end(bindCapabilityUrls(body, `/previews/${token}`, "html", path, resourceUrl.origin));
       } else if (path.endsWith(".css")) {
         response.setHeader("content-security-policy", "default-src 'none'");
-        response.end(bindCapabilityUrls(body, `/previews/${token}`, "css", path));
+        response.end(bindCapabilityUrls(body, `/previews/${token}`, "css", path, resourceUrl.origin));
       } else {
         response.setHeader("content-security-policy", "default-src 'none'");
         response.end(body);
@@ -293,8 +343,9 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
  * untouched; binding happens at serve time against each original output path.
  * Absolute external URLs, fragments and data URIs are left as-is.
  */
-function bindCapabilityUrls(text: string, basePath: string, kind: "html" | "css", documentPath = "index.html"): string {
+function bindCapabilityUrls(text: string, basePath: string, kind: "html" | "css", documentPath = "index.html", mediaOrigin?: string): string {
   const bind = (value: string): string => {
+    if (mediaOrigin && value.startsWith(`${mediaOrigin}/media/`) && /^[a-f0-9]{64}$/.test(value.slice(`${mediaOrigin}/media/`.length))) return `${basePath}/media/${value.slice(`${mediaOrigin}/media/`.length)}`;
     if (!value || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(value)) return value;
     const url = new URL(value, `https://preview.invalid/${documentPath}`);
     return `${basePath}${url.pathname}${url.search}${url.hash}`;
@@ -745,6 +796,12 @@ async function confirmationPreview(response: ServerResponse, options: McpHttpOpt
   let path: string;
   try { path = rest ? decodeURIComponent(rest.split("?")[0] ?? "") : pickEntryHtml(output) ?? ""; }
   catch { return sendJson(response, 400, { error: "INVALID_PREVIEW_PATH" }); }
+  const previewMedia = /^media\/([a-f0-9]{64})$/.exec(path);
+  if (previewMedia && options.delivery) {
+    const media = await options.delivery.media(previewMedia[1]!, view.releaseId).catch(() => undefined);
+    if (!media) return sendJson(response, 404, { error: "PREVIEW_MEDIA_NOT_FOUND" });
+    response.setHeader("cache-control", "private, no-store"); response.setHeader("content-type", media.mediaType); response.end(media.bytes); return;
+  }
   if (!safeOutputPath(path) || output[path] === undefined) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
   response.setHeader("cache-control", "private, no-store, max-age=0");
   response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
@@ -752,8 +809,8 @@ async function confirmationPreview(response: ServerResponse, options: McpHttpOpt
   response.setHeader("content-security-policy", REVIEW_PREVIEW_CSP);
   response.setHeader("content-type", outputContentType(path));
   const body = output[path]!;
-  response.end(path.endsWith(".html") ? bindCapabilityUrls(body, `/confirmations/${token}/preview`, "html", path)
-    : path.endsWith(".css") ? bindCapabilityUrls(body, `/confirmations/${token}/preview`, "css", path) : body);
+  response.end(path.endsWith(".html") ? bindCapabilityUrls(body, `/confirmations/${token}/preview`, "html", path, new URL(options.resource).origin)
+    : path.endsWith(".css") ? bindCapabilityUrls(body, `/confirmations/${token}/preview`, "css", path, new URL(options.resource).origin) : body);
 }
 
 function confirmationShell(title: string, body: string): string {
