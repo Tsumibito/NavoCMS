@@ -13,7 +13,7 @@ so even a valid provider refresh token could not preserve login overnight.
 ## Decision
 
 New confirmation browser sessions with a provider refresh token have a fixed
-30-day maximum lifetime in the same browser profile. Refresh does not extend
+360-day maximum lifetime in the same browser profile. Refresh does not extend
 this absolute deadline. Existing cookies retain their original deadline. A
 session without a refresh token remains bounded by the original token expiry.
 
@@ -33,7 +33,7 @@ never records a receipt or authorizes a different release automatically.
 
 ## Validation
 
-Verify login survives nine hours, refresh cookies remain small, the 30-day
+Verify login survives 359 days, refresh cookies remain small, the 360-day
 deadline does not slide and expiry returns to login. Retain tests for restart,
 refresh denial, membership removal, logout/replay and pending exact-release
 decisions. The live owner session remains part of operational acceptance.

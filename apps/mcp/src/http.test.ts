@@ -196,6 +196,7 @@ describe("real preview namespace and browser-session confirmation", () => {
           response.writeHead(400).end(JSON.stringify({ error: "invalid_grant" }));
           return;
         }
+        if (!refreshing) idpCodes.delete(params.get("code") ?? "");
         response.writeHead(200, { "content-type": "application/json" });
         const common = { iss: issuer, sub: "publisher", exp: Math.floor(Date.now() / 1000) + 120 };
         const accessToken = jwt({ ...common, sid: "session-test", aud: resource, org_id: "org-test", scope: NAVOCMS_PERMISSIONS.join(" "), ...accessOverrides });
@@ -244,11 +245,12 @@ describe("real preview namespace and browser-session confirmation", () => {
       });
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
-      const sessionCookie = (callback.headers.get("set-cookie") ?? "")
-        .split("\n").find((line) => line.includes("navocms_confirmation_session"))!.split(";")[0]!;
-      const sessionMaxAge = Number(/Max-Age=(\d+)/.exec(callback.headers.get("set-cookie")!)![1]);
-      expect(sessionMaxAge).toBeGreaterThanOrEqual(30 * 24 * 3600 - 1);
-      expect(sessionMaxAge).toBeLessThanOrEqual(30 * 24 * 3600);
+      const sessionHeader = callback.headers.getSetCookie().find(value => value.startsWith("navocms_confirmation_session="))!;
+      const sessionCookie = sessionHeader.split(";")[0]!;
+      const sessionMaxAge = Number(/Max-Age=(\d+)/.exec(sessionHeader)![1]);
+      expect(callback.headers.getSetCookie()).toContainEqual(expect.stringContaining("navocms_confirmation_oidc=;"));
+      expect(sessionMaxAge).toBeGreaterThanOrEqual(360 * 24 * 3600 - 1);
+      expect(sessionMaxAge).toBeLessThanOrEqual(360 * 24 * 3600);
       // A replacement process can read the sealed browser session without
       // returning the owner to the identity provider.
       const restarted = harness.newServer();
@@ -256,6 +258,34 @@ describe("real preview namespace and browser-session confirmation", () => {
       try {
         const restartAddress = restarted.address();
         if (!restartAddress || typeof restartAddress === "string") throw new Error("Restarted server did not bind");
+        const freshStart = await fetch(`${base}/confirmations/${confirmationToken}`, { redirect: "manual" });
+        const freshUrl = new URL(freshStart.headers.get("location")!);
+        const freshCookie = freshStart.headers.getSetCookie()[0]!.split(";")[0]!;
+        expect(freshCookie.length).toBeLessThan(4096);
+        nonce = freshUrl.searchParams.get("nonce")!;
+        idpCodes.set("restart-code", freshUrl.searchParams.get("code_challenge")!);
+        const restartCallbackUrl = `/confirmations/callback?code=restart-code&state=${freshUrl.searchParams.get("state")}`;
+        const noCookie = await fetch(`http://127.0.0.1:${restartAddress.port}${restartCallbackUrl}`, { redirect: "manual" });
+        expect(noCookie.status).toBe(400);
+        const wrongState = await fetch(`http://127.0.0.1:${restartAddress.port}/confirmations/callback?code=restart-code&state=wrong`, {
+          redirect: "manual", headers: { cookie: freshCookie }
+        });
+        expect(wrongState.status).toBe(400);
+        const tampered = await fetch(`http://127.0.0.1:${restartAddress.port}${restartCallbackUrl}`, {
+          redirect: "manual", headers: { cookie: `${freshCookie}tampered` }
+        });
+        expect(tampered.status).toBe(400);
+        const completedAfterRestart = await fetch(`http://127.0.0.1:${restartAddress.port}${restartCallbackUrl}`, {
+          redirect: "manual", headers: { cookie: freshCookie }
+        });
+        expect(completedAfterRestart.status).toBe(302);
+        expect(completedAfterRestart.headers.get("location")).toBe(`/confirmations/${confirmationToken}`);
+        // A replay on the original process reaches the provider, which must
+        // refuse a consumed code even though that process has no replay cache.
+        const crossProcessReplay = await fetch(`${base}${restartCallbackUrl}`, {
+          redirect: "manual", headers: { cookie: freshCookie }
+        });
+        expect(crossProcessReplay.status).toBe(401);
         const resumed = await fetch(`http://127.0.0.1:${restartAddress.port}/confirmations/${confirmationToken}`, {
           redirect: "manual", headers: { cookie: sessionCookie }
         });
@@ -349,7 +379,7 @@ describe("real preview namespace and browser-session confirmation", () => {
         expect(await (await fetch(`${base}${renewed.headers.get("location")}`, { headers: { cookie: sessionCookie } })).text())
           .toContain("Review publication");
         expect(harness.operations.startCount).toBe(1);
-        clockForRenewal.mockReturnValue(beforeExpiry + 9 * 3600_000);
+        clockForRenewal.mockReturnValue(beforeExpiry + 359 * 24 * 3600_000);
         const remembered = await fetch(`${base}${renewed.headers.get("location")}`, {
           redirect: "manual", headers: { cookie: sessionCookie }
         });
@@ -358,11 +388,13 @@ describe("real preview namespace and browser-session confirmation", () => {
         expect(remembered.status).toBe(410);
         expect(await remembered.text()).toContain("Get a new review link");
         const rememberedCookie = remembered.headers.getSetCookie().find(value => value.startsWith("navocms_confirmation_session="))!;
-        expect(Number(/Max-Age=(\d+)/.exec(rememberedCookie)![1])).toBeLessThan(30 * 24 * 3600 - 9 * 3600 + 1);
+        const remainingAge = Number(/Max-Age=(\d+)/.exec(rememberedCookie)![1]);
+        expect(remainingAge).toBeGreaterThanOrEqual(24 * 3600 - 2);
+        expect(remainingAge).toBeLessThan(24 * 3600 + 1);
         expect(await harness.service.releaseConfirmationStatus(harness.context, {
           releaseId: preview.releaseId, releaseHash: preview.releaseHash
         })).toMatchObject({ status: "pending" });
-        clockForRenewal.mockReturnValue(beforeExpiry + (30 * 24 * 3600 + 1) * 1000);
+        clockForRenewal.mockReturnValue(beforeExpiry + (360 * 24 * 3600 + 1) * 1000);
         const ended = await fetch(`${base}/confirmations/${confirmationToken}`, {
           redirect: "manual", headers: { cookie: sessionCookie }
         });
@@ -433,6 +465,7 @@ describe("real preview namespace and browser-session confirmation", () => {
           redirect: "manual", headers: { cookie: expiredCookie }
         });
         expect(expiredCallback.status).toBe(400);
+        expect(await expiredCallback.text()).toContain(`href="/confirmations/${confirmationToken}"`);
       } finally { clock.mockRestore(); }
 
     } finally {

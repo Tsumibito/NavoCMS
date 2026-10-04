@@ -98,10 +98,10 @@ export function createMcpHttpServer(options: McpHttpOptions) {
   const resourceUrl = new URL(options.resource);
   const metadataPath = `/.well-known/oauth-protected-resource${resourceUrl.pathname === "/" ? "" : resourceUrl.pathname}`;
   const metadataUrl = `${resourceUrl.origin}${metadataPath}`;
-  // Server-side browser-session store for the confirmation flow. Sessions are
+  // Browser authentication state for the confirmation flow. Sessions are
   // created only through the OIDC authorization-code callback below; MCP
   // bearer tokens are never exchanged for one and never accepted as one.
-  const browserAuth: BrowserAuth = { pendingLogins: new Map(), revoked: new Set() };
+  const browserAuth: BrowserAuth = { usedLoginStates: new Map(), revoked: new Set() };
 
   return createNodeServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/healthz") {
@@ -471,11 +471,11 @@ async function confirmDecision(response: ServerResponse, options: McpHttpOptions
 }
 
 interface BrowserAuth {
-  readonly pendingLogins: Map<string, { readonly verifier: string; readonly nonce: string; readonly returnUrl: string; readonly createdAt: number }>;
+  readonly usedLoginStates: Map<string, number>;
   readonly revoked: Set<string>;
 }
 
-const SESSION_TTL_SECONDS = 30 * 24 * 3600;
+const SESSION_TTL_SECONDS = 360 * 24 * 3600;
 const LOGIN_STATE_TTL_MS = 600_000;
 
 interface BrowserSession {
@@ -488,8 +488,16 @@ interface BrowserSession {
   readonly accountLabel?: string;
 }
 
-function sessionKey(secret: string): Buffer {
-  return createHash("sha256").update("navocms:browser-session:v1:").update(secret).digest();
+interface PendingBrowserLogin {
+  readonly state: string;
+  readonly verifier: string;
+  readonly nonce: string;
+  readonly returnUrl: string;
+  readonly createdAt: number;
+}
+
+function sessionKey(secret: string, purpose: string): Buffer {
+  return createHash("sha256").update(`navocms:${purpose}:v1:`).update(secret).digest();
 }
 
 function browserIdentity(verified: VerifiedAccessToken): VerifiedAccessToken {
@@ -503,14 +511,14 @@ function browserIdentity(verified: VerifiedAccessToken): VerifiedAccessToken {
   };
 }
 
-function sealSession(session: BrowserSession, secret: string): string {
+function sealBrowserValue(value: unknown, secret: string, purpose: string): string {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", sessionKey(secret), iv);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(session), "utf8"), cipher.final()]);
+  const cipher = createCipheriv("aes-256-gcm", sessionKey(secret, purpose), iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
   return `v1.${iv.toString("base64url")}.${ciphertext.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}`;
 }
 
-function openSession(value: string | undefined, secret: string | undefined): BrowserSession | undefined {
+function openBrowserValue(value: string | undefined, secret: string | undefined, purpose: string): unknown {
   if (!value || !secret || value.length > 8192) return undefined;
   const parts = value.split(".");
   if (parts.length !== 4 || parts[0] !== "v1") return undefined;
@@ -518,15 +526,33 @@ function openSession(value: string | undefined, secret: string | undefined): Bro
     const iv = Buffer.from(parts[1]!, "base64url");
     const tag = Buffer.from(parts[3]!, "base64url");
     if (iv.length !== 12 || tag.length !== 16) return undefined;
-    const decipher = createDecipheriv("aes-256-gcm", sessionKey(secret), iv);
+    const decipher = createDecipheriv("aes-256-gcm", sessionKey(secret, purpose), iv);
     decipher.setAuthTag(tag);
-    const session = JSON.parse(Buffer.concat([decipher.update(Buffer.from(parts[2]!, "base64url")), decipher.final()]).toString("utf8")) as BrowserSession;
-    if (typeof session.id !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(session.id) || typeof session.principalId !== "string" ||
-      !Number.isSafeInteger(session.expiresAt) || session.expiresAt <= Date.now() ||
-      !session.verified || session.verified.principal.kind !== "human" ||
-      typeof session.verified.principal.issuer !== "string" || typeof session.verified.principal.subject !== "string") return undefined;
-    return session;
+    return JSON.parse(Buffer.concat([decipher.update(Buffer.from(parts[2]!, "base64url")), decipher.final()]).toString("utf8"));
   } catch { return undefined; }
+}
+
+function sealSession(session: BrowserSession, secret: string): string {
+  return sealBrowserValue(session, secret, "browser-session");
+}
+
+function openSession(value: string | undefined, secret: string | undefined): BrowserSession | undefined {
+  const session = openBrowserValue(value, secret, "browser-session") as BrowserSession | undefined;
+  if (!session || typeof session.id !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(session.id) || typeof session.principalId !== "string" ||
+    !Number.isSafeInteger(session.expiresAt) || session.expiresAt <= Date.now() ||
+    !session.verified || session.verified.principal.kind !== "human" ||
+    typeof session.verified.principal.issuer !== "string" || typeof session.verified.principal.subject !== "string") return undefined;
+  return session;
+}
+
+function openPendingLogin(value: string | undefined, secret: string): PendingBrowserLogin | undefined {
+  const login = openBrowserValue(value, secret, "browser-login") as PendingBrowserLogin | undefined;
+  if (!login || typeof login.state !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(login.state) ||
+    typeof login.nonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(login.nonce) ||
+    typeof login.verifier !== "string" || !/^[A-Za-z0-9_-]{64}$/.test(login.verifier) ||
+    typeof login.returnUrl !== "string" || !/^\/confirmations\/[A-Za-z0-9_-]{43}$/.test(login.returnUrl) ||
+    !Number.isSafeInteger(login.createdAt) || login.createdAt > Date.now()) return undefined;
+  return login;
 }
 
 /**
@@ -608,14 +634,15 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   if (!login) {
     return sendHtml(response, 503, confirmationShell("Login unavailable", "Confirmation login is not configured for this deployment; the administrator must register the confirmation client with the identity provider first."));
   }
-  for (const [state, pending] of browserAuth.pendingLogins) {
-    if (Date.now() - pending.createdAt > LOGIN_STATE_TTL_MS) browserAuth.pendingLogins.delete(state);
+  for (const [state, createdAt] of browserAuth.usedLoginStates) {
+    if (Date.now() - createdAt > LOGIN_STATE_TTL_MS) browserAuth.usedLoginStates.delete(state);
   }
   const state = randomBytes(32).toString("base64url");
   const verifier = randomBytes(48).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const nonce = randomBytes(32).toString("base64url");
-  browserAuth.pendingLogins.set(state, { verifier, nonce, returnUrl: `/confirmations/${token}`, createdAt: Date.now() });
+  const pending: PendingBrowserLogin = { state, verifier, nonce, returnUrl: `/confirmations/${token}`, createdAt: Date.now() };
+  const loginCookie = sealBrowserValue(pending, login.clientSecret, "browser-login");
   const proto = request.headers["x-forwarded-proto"] === "https" || secure ? "https" : "http";
   const redirectUri = `${proto}://${request.headers.host ?? "localhost"}/confirmations/callback`;
   const authorization = new URL(login.authorizationEndpoint);
@@ -631,7 +658,7 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   if (force) authorization.searchParams.set("max_age", "0");
   response.statusCode = 302;
   response.setHeader("location", authorization.toString());
-  response.setHeader("set-cookie", `${CONFIRMATION_OIDC_STATE_COOKIE}=${state}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`);
+  response.setHeader("set-cookie", `${CONFIRMATION_OIDC_STATE_COOKIE}=${loginCookie}; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=600${secure ? "; Secure" : ""}`);
   response.end();
 }
 
@@ -643,12 +670,17 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
   const state = query.get("state");
   const code = query.get("code");
   const stateCookie = parseCookies(request.headers.cookie)[CONFIRMATION_OIDC_STATE_COOKIE];
-  const pending = state !== null && stateCookie === state ? browserAuth.pendingLogins.get(state) : undefined;
-  // Single-use, bound to the browser that started the login.
-  if (state !== null) browserAuth.pendingLogins.delete(state);
+  const saved = openPendingLogin(stateCookie, login.clientSecret);
+  const pending = saved && saved.state === state && !browserAuth.usedLoginStates.has(saved.state) ? saved : undefined;
+  // The sealed cookie survives process replacement. The provider's single-use
+  // authorization code and PKCE prevent replay across instances; this cache
+  // also rejects repeated callbacks in the same process before token exchange.
+  if (pending) browserAuth.usedLoginStates.set(pending.state, pending.createdAt);
   response.setHeader("set-cookie", `${CONFIRMATION_OIDC_STATE_COOKIE}=; HttpOnly; SameSite=Lax; Path=/confirmations; Max-Age=0${secure ? "; Secure" : ""}`);
   if (!pending || !code || Date.now() - pending.createdAt >= LOGIN_STATE_TTL_MS) {
-    return sendHtml(response, 400, confirmationShell("Login could not be completed", "This sign-in response is unknown, expired, or was already used. Open the confirmation link again."));
+    return sendHtml(response, 400, confirmationShell("Login could not be completed",
+      saved ? `This sign-in attempt expired or was already used. <a href="${escapeHtml(saved.returnUrl)}">Return to publication review</a> to continue.`
+        : "This sign-in response belongs to an expired or interrupted attempt. Open the current publication review link in the same browser where you signed in."));
   }
   const proto = request.headers["x-forwarded-proto"] === "https" || secure ? "https" : "http";
   const redirectUri = `${proto}://${request.headers.host ?? "localhost"}/confirmations/callback`;
@@ -732,7 +764,7 @@ async function loginCallback(response: ServerResponse, options: McpHttpOptions, 
     ...(typeof accountLabel === "string" && accountLabel.length < 256 ? { accountLabel } : {}) }, login.clientSecret);
   response.statusCode = 302;
   response.setHeader("location", pending.returnUrl);
-  response.setHeader("set-cookie", `${CONFIRMATION_SESSION_COOKIE}=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(1, Math.floor((expiresAt - Date.now()) / 1000))}${secure ? "; Secure" : ""}`);
+  appendCookie(response, `${CONFIRMATION_SESSION_COOKIE}=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(1, Math.floor((expiresAt - Date.now()) / 1000))}${secure ? "; Secure" : ""}`);
   response.end();
 }
 
