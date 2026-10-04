@@ -6,6 +6,9 @@
 
 **Owners:** NavoCMS maintainers
 
+The eight-hour duration below is superseded by
+[ADR 0028](0028-remember-publication-review-login.md); its other guarantees remain.
+
 ## Context
 
 The live Sprint 8.2 test proved exact-build publication and rollback. The owner
