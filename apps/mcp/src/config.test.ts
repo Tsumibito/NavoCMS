@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { environmentInteger, environmentRolePermissions } from "./config.js";
+import { environmentInteger, environmentRolePermissions, reviewWindowSeconds } from "./config.js";
 
 describe("MCP runtime numeric configuration", () => {
   it("uses the fallback when the variable is absent", () => {
     expect(environmentInteger("VALUE", 3600, 604_800, {})).toBe(3600);
   });
 
-  it("allows an explicit one-hour preview TTL", () => {
-    expect(environmentInteger("NAVOCMS_PREVIEW_TTL_SECONDS", 3600, 604_800, {
-      NAVOCMS_PREVIEW_TTL_SECONDS: "3600"
-    })).toBe(3600);
+  it("keeps review links and approval usable for at least a day despite old deployment settings", () => {
+    expect(reviewWindowSeconds("PREVIEW", 604_800, {})).toBe(86_400);
+    expect(reviewWindowSeconds("PREVIEW", 604_800, { PREVIEW: "3600" })).toBe(86_400);
+    expect(reviewWindowSeconds("APPROVAL", 86_400, { APPROVAL: "900" })).toBe(86_400);
+    expect(reviewWindowSeconds("PREVIEW", 604_800, { PREVIEW: "172800" })).toBe(172800);
+    expect(() => reviewWindowSeconds("PREVIEW", 604_800, { PREVIEW: "604801" })).toThrow();
   });
 
   it("keeps database pools bounded independently", () => {

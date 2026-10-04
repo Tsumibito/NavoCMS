@@ -190,8 +190,8 @@ export class McpEditingService {
     this.#releaseConfig = Object.freeze({
       environmentKey: releaseConfig.environmentKey ?? "development",
       previewBaseUrl: (releaseConfig.previewBaseUrl ?? "https://preview.example.test").replace(/\/$/, ""),
-      previewTtlSeconds: releaseConfig.previewTtlSeconds ?? 3600,
-      approvalTtlSeconds: releaseConfig.approvalTtlSeconds ?? 900,
+      previewTtlSeconds: releaseConfig.previewTtlSeconds ?? 86_400,
+      approvalTtlSeconds: releaseConfig.approvalTtlSeconds ?? 86_400,
       approvalPolicyVersion: releaseConfig.approvalPolicyVersion ?? "navocms.release-approval.v1"
     });
   }

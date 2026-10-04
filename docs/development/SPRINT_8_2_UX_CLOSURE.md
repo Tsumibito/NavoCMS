@@ -17,13 +17,15 @@ expires. Refresh never extends the 360-day deadline. Browser profiles, including
 Chrome and Codex, do not share their remembered login. Restarting the CMS does
 not end a still-valid session. An in-progress login also survives process
 replacement under [ADR 0029](../architecture/0029-restart-safe-browser-login.md),
-within its separate ten-minute authorization window. Removing site
+within its separate 24-hour authorization window. Review links, decision receipts
+and browser form cookies also last 24 hours by default, under
+[ADR 0030](../architecture/0030-day-long-owner-review.md). Removing site
 membership, permission, or the current session's revocation record blocks
 publication. The account link signs out locally and uses the provider logout
 endpoint when configured. A rejected account can switch through the same UI.
 
-An expired review link has a button to issue a new link for the same saved
-output. No new build occurs. A changed release policy or unavailable artifact
+An authenticated owner opening an expired review link automatically renews the
+same bookmark for the same saved output. No new build or decision occurs. A changed release policy or unavailable artifact
 requires a new candidate. The confirmation capability never authorizes a
 decision by itself, and the MCP bearer cannot submit the browser form.
 

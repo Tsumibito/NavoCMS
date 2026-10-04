@@ -34,6 +34,7 @@ trust boundaries, persistence, security, compatibility, or major dependencies.
 | [0027](0027-publication-review-session.md) | Accepted | Persistent browser review sessions, one-action approval, and link renewal |
 | [0028](0028-remember-publication-review-login.md) | Accepted | Remember browser login for at most 360 days without automatic release approval |
 | [0029](0029-restart-safe-browser-login.md) | Accepted | Preserve an in-progress browser login across deployment restarts |
+| [0030](0030-day-long-owner-review.md) | Accepted | Day-long owner review and recovery from expired provider codes |
 
 The [research reference map](REFERENCES.md) records the external projects and standards that inform
 these decisions without making them undeclared runtime dependencies.
