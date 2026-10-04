@@ -205,8 +205,10 @@ export function createMcpHttpServer(options: McpHttpOptions) {
         if (!media) return sendJson(response, 404, { error: "PREVIEW_MEDIA_NOT_FOUND" });
         response.setHeader("content-type", media.mediaType); response.end(media.bytes); return;
       }
-      const body = surface.built?.output[path];
-      if (!safeOutputPath(path) || body === undefined) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
+      const outputPath = surface.built && resolveOutputPath(surface.built.output, path);
+      if (!outputPath) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
+      path = outputPath;
+      const body = surface.built!.output[path]!;
       response.setHeader("content-type", outputContentType(path));
       if (path.endsWith(".html")) {
         response.setHeader("content-type", "text/html; charset=utf-8");
@@ -802,7 +804,9 @@ async function confirmationPreview(response: ServerResponse, options: McpHttpOpt
     if (!media) return sendJson(response, 404, { error: "PREVIEW_MEDIA_NOT_FOUND" });
     response.setHeader("cache-control", "private, no-store"); response.setHeader("content-type", media.mediaType); response.end(media.bytes); return;
   }
-  if (!safeOutputPath(path) || output[path] === undefined) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
+  const outputPath = resolveOutputPath(output, path);
+  if (!outputPath) return sendJson(response, 404, { error: "PREVIEW_NOT_FOUND" });
+  path = outputPath;
   response.setHeader("cache-control", "private, no-store, max-age=0");
   response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
   response.setHeader("referrer-policy", "no-referrer");
@@ -837,6 +841,15 @@ function outputContentType(path: string): string {
 function safeOutputPath(value: string): boolean {
   return value.length > 0 && value.length <= 512 && !value.startsWith("/") && !value.includes("\\") &&
     !value.includes("//") && !value.split("/").some((part) => !part || part === "." || part === "..");
+}
+
+/** Resolve generated directory routes within the same immutable capability tree. */
+function resolveOutputPath(output: Readonly<Record<string, string>>, requested: string): string | undefined {
+  const path = requested.endsWith("/") ? requested.slice(0, -1) : requested;
+  if (!safeOutputPath(path)) return undefined;
+  if (Object.hasOwn(output, path)) return path;
+  const index = `${path}/index.html`;
+  return safeOutputPath(index) && Object.hasOwn(output, index) ? index : undefined;
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {
