@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
-import type { StructuralPatchOperation } from "@navocms/content";
+import { ContentError, type StructuralPatchOperation } from "@navocms/content";
 import {
   createReleaseManifest,
   DomainEventFactory,
@@ -10,7 +10,7 @@ import {
   type EventStore,
   type ReleaseProvider
 } from "@navocms/kernel";
-import { assertSafeProjection, requirePermission } from "@navocms/security";
+import { assertSafeProjection, effectivePermissions, requirePermission } from "@navocms/security";
 import type { PostgresDatabase } from "@navocms/persistence-postgres";
 
 import { McpEditingError } from "./errors.js";
@@ -107,7 +107,8 @@ export interface ReviewedArtifactSummary {
 
 /** Internal runtime boundary; it is never registered in MCP tool discovery. */
 export interface StagingAstroOperations {
-  prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision): Promise<AstroRenderInput>;
+  siteContext?(repository: RepositoryContext): Promise<object>;
+  prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision, additional?: readonly ContentRevision[]): Promise<AstroRenderInput>;
   persistPreviewInput(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease, render: AstroRenderInput): Promise<void>;
   /** Starts or resumes the durable pre-review build job; never runs inside a request effect. */
   startBuild(repository: RepositoryContext, release: StoredRelease): Promise<PreviewBuildStatus>;
@@ -355,6 +356,37 @@ export class McpEditingService {
     });
   }
 
+  public async sitePassport(context: McpRequestContext): Promise<object> {
+    const repository = await this.requireSite(context, "content:read");
+    const types = await this.#repository.listTypes(repository);
+    const delivery = await this.#stagingAstro?.siteContext?.(repository);
+    return safe({ schema: "io.navocms.site-passport.v1", site: repository.site,
+      permissions: [...effectivePermissions(context.authorization.layers)], versions: { passport: "v1", content: "v1", delivery: "v1" },
+      ...(delivery ? { delivery } : { delivery: { status: "unconfigured", routes: [] } }),
+      types, contractDigest: inputFingerprint(types), components: ["section-shell", "story-card", "signal-button"], capabilities: ["content.search", "content.schema", "content.draft", "content.fields", "release.preview", "release.publish", "release.rollback"],
+      sourceOfTruth: "NavoCMS immutable revisions", publicationDecision: "independent-human-browser-session",
+      limits: { types: 64, selectedRoutes: 100 }, rules: { immutableFields: ["slug", "locale", "body"], schemaChanges: "reviewed-migration" } });
+  }
+
+  public async contentSchema(context: McpRequestContext, typeName: string): Promise<object> {
+    const repository = await this.requireSite(context, "content:read");
+    const definition = (await this.#repository.listTypes(repository)).find(type => type.metadata.name === typeName);
+    if (!definition) throw new McpEditingError("CONTENT_TYPE_NOT_REGISTERED", "Read site_passport for this site's registered types");
+    return safe({ definition, contractDigest: inputFingerprint(definition), sourceOfTruth: "reviewed-content-type-registry" });
+  }
+
+  public async dependencies(context: McpRequestContext, documentId: string, cursor?: string): Promise<object> {
+    const repository = await this.requireSite(context, "content:read");
+    if (!await this.#repository.findDocument(repository, documentId)) throw new McpEditingError("DOCUMENT_NOT_FOUND", "Document was not found in this site");
+    const page = await this.#repository.search(repository, "", 20, cursor);
+    const affected = [];
+    for (const hit of page.items) {
+      const revision = await this.#repository.getRevision(repository, hit.revisionId);
+      if (Object.values(revision.metadata).some(value => value === documentId || (Array.isArray(value) && value.includes(documentId)))) affected.push(hit);
+    }
+    return safe({ documentId, affected, scanned: page.items.length, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) });
+  }
+
   public async createDraft(context: McpRequestContext, input: {
     readonly typeName: string;
     readonly slug: string;
@@ -364,7 +396,9 @@ export class McpEditingService {
     readonly metadata?: Readonly<Record<string, unknown>> | undefined;
     readonly idempotencyKey: string;
   }): Promise<object> {
-    const { site } = await this.requireSite(context, "content:draft");
+    const repository = await this.requireSite(context, "content:draft");
+    const { site } = repository;
+    await this.validateRelations(repository, input.typeName, input.metadata ?? {});
     return this.idempotent({ tenantId: site.tenantId, siteId: site.siteId, principalId: context.authorization.principal.id }, "draft_create", input.idempotencyKey, input, async () => {
       const draft = await this.#repository.createDraft({
         site,
@@ -390,15 +424,25 @@ export class McpEditingService {
     readonly revisionId: string;
     readonly baseSourceHash: string;
     readonly operations: readonly StructuralPatchOperation[];
+    readonly metadataPatch?: Readonly<Record<string, unknown>> | undefined;
     readonly idempotencyKey: string;
   }): Promise<object> {
-    const { site } = await this.requireSite(context, "content:draft");
+    if (input.operations.length === 0 && (!input.metadataPatch || Object.keys(input.metadataPatch).length === 0)) throw new McpEditingError("PATCH_EMPTY", "Supply a field or Markdown change");
+    if (input.metadataPatch && ["slug", "locale", "body"].some(key => key in input.metadataPatch!)) throw new McpEditingError("CONTENT_FIELD_IMMUTABLE", "Slug, locale and body require their dedicated workflow");
+    const repository = await this.requireSite(context, "content:draft");
+    const { site } = repository;
+    if (input.metadataPatch) {
+      const base = await this.#repository.getRevision(repository, input.revisionId);
+      const document = await this.#repository.findDocument(repository, base.documentId);
+      if (document) await this.validateRelations(repository, document.typeName, { ...base.metadata, ...input.metadataPatch });
+    }
     return this.idempotent({ tenantId: site.tenantId, siteId: site.siteId, principalId: context.authorization.principal.id }, "revision_patch", input.idempotencyKey, input, async () => {
       const result = await this.#repository.patchDraft({
         site,
         revisionId: input.revisionId,
         baseSourceHash: input.baseSourceHash,
         operations: input.operations,
+        ...(input.metadataPatch ? { metadataPatch: input.metadataPatch } : {}),
         actorId: context.authorization.principal.id
       });
       await this.appendEvent(context, "io.navocms.content.revision.patched.v1", result.draft.revisionId, input.idempotencyKey, {
@@ -406,7 +450,8 @@ export class McpEditingService {
         baseRevisionId: input.revisionId,
         revisionId: result.draft.revisionId,
         sourceHash: result.draft.sourceHash,
-        operationCount: input.operations.length
+        operationCount: input.operations.length,
+        changedFields: Object.keys(input.metadataPatch ?? {}).sort()
       }, "G1", result.draft.id);
       return safe({ draft: result.draft, diff: boundDiff(result.diff) });
     });
@@ -417,17 +462,17 @@ export class McpEditingService {
     return safe({ fromRevisionId, toRevisionId, diff: boundDiff(await this.#repository.compare(repositoryContext, fromRevisionId, toRevisionId)) });
   }
 
-  public async preparePreview(context: McpRequestContext, revisionId: string, idempotencyKey: string): Promise<PreviewPreparation> {
+  public async preparePreview(context: McpRequestContext, revisionId: string, idempotencyKey: string, additionalRevisionIds: readonly string[] = []): Promise<PreviewPreparation> {
     const repositoryContext = await this.requireSite(context, "content:draft");
     const preview = await this.idempotent<PreviewPreparation>({
       tenantId: repositoryContext.site.tenantId,
       siteId: repositoryContext.site.siteId,
       principalId: context.authorization.principal.id
-    }, "preview_create", idempotencyKey, { revisionId }, async () => {
+    }, "preview_create", idempotencyKey, { revisionId, additionalRevisionIds }, async () => {
       const revision = await this.#repository.getRevision(repositoryContext, revisionId);
       const workflow = await this.#repository.workflowFor(repositoryContext, revision.id);
       const environmentId = await this.#releases.environmentId(repositoryContext, this.#releaseConfig.environmentKey);
-      const stagingRender = this.#stagingAstro ? await this.#stagingAstro.prepare(context, repositoryContext.site, revision) : undefined;
+      const stagingRender = this.#stagingAstro ? await this.#stagingAstro.prepare(context, repositoryContext.site, revision, await Promise.all(additionalRevisionIds.map(id => this.#repository.getRevision(repositoryContext, id)))) : undefined;
       const { manifest, releaseHash } = createReleaseManifest({
         tenantId: repositoryContext.site.tenantId,
         siteId: repositoryContext.site.siteId,
@@ -880,6 +925,18 @@ export class McpEditingService {
     }
     await this.#releases.markVerified(repositoryContext, releaseId, publication.id);
     return publication;
+  }
+
+  private async validateRelations(repository: RepositoryContext, typeName: string, metadata: Readonly<Record<string, unknown>>): Promise<void> {
+    const type = (await this.#repository.listTypes(repository)).find(item => item.metadata.name === typeName);
+    if (!type) return;
+    const fields = (type.spec.fields as { properties?: Record<string, { format?: string }> }).properties;
+    for (const relation of type.spec.relations) {
+      if (typeof relation.name !== "string" || typeof relation.target !== "string" || fields?.[relation.name]?.format !== "uuid" || metadata[relation.name] === undefined) continue;
+      const id = metadata[relation.name];
+      const target = typeof id === "string" ? await this.#repository.findDocument(repository, id) : undefined;
+      if (!target || target.typeName !== relation.target) throw new ContentError("RELATION_TARGET_INVALID", `Field /${relation.name} must reference ${relation.target} in this site`, { issues: [{ path: `/${relation.name}`, message: "Reference a document of the declared type in this site" }] });
+    }
   }
 
   private async requireSite(context: McpRequestContext, permission: "content:read" | "content:draft" | "content:publish"): Promise<RepositoryContext> {

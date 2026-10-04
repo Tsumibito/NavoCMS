@@ -7,20 +7,20 @@ import type { SiteDescriptor } from "./model.js";
 
 const layoutSource = `---
 import '../styles/navocms.css';
-const { title, locale } = Astro.props;
+const { title, locale, navigation = [], languages = [] } = Astro.props;
 ---
-<!doctype html><html lang={locale}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1"><title>{title}</title><script is:inline src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"></script></head><body><slot /></body></html>
+<!doctype html><html lang={locale}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta data-navocms-consent-bridge="io.navocms.consent-bridge.v1"><meta data-navocms-analytics-bootstrap="io.navocms.analytics-bootstrap.v1"><title>{title}</title><script is:inline src="/cdn-cgi/zaraz/i.js" data-navocms-zaraz-loader="v1"></script></head><body><header><a href="/">Navo Catalogue</a><nav aria-label="Main navigation">{navigation.map(item => <a href={item.path}>{item.title}</a>)}</nav><nav aria-label="Language">{languages.map(item => <a href={item.path} lang={item.locale}>{item.locale.toUpperCase()}</a>)}</nav></header><slot /><footer>Navo Catalogue · Demonstration</footer></body></html>
 `;
 const registrations = Object.freeze([
   Object.freeze({ id: "signal-button", module: "./components/SignalButton.astro", source: "<button><slot /></button>" }),
   Object.freeze({ id: "story-card", module: "./components/StoryCard.astro", source: "<article><slot /></article>" }),
   Object.freeze({ id: "section-shell", module: "./components/SectionShell.astro", source: "<section><slot /></section>" })
 ]);
-const css = ":root { --navocms-page: #ffffff; --navocms-ink: #12263a; }\nbody { margin: 0; background: var(--navocms-page); color: var(--navocms-ink); }\n";
+const css = ":root { --navocms-page: #ffffff; --navocms-ink: #12263a; }\nbody { margin: 0; font-family: system-ui, sans-serif; background: var(--navocms-page); color: var(--navocms-ink); }\nheader, footer, main { padding: 24px; max-width: 1120px; margin: auto; } nav { display: flex; gap: 16px; flex-wrap: wrap; } img { max-width: 100%; height: auto; }\n";
 const designDigest = digest({ schema: "io.navocms.staging-design.v1", css, registrations });
-const governanceDigest = digest({ schema: "io.navocms.staging-governance.v1", semanticMarkdown: true, rawHtml: false, directivePolicy: "content-type-declared" });
+export const STAGING_ASTRO_GOVERNANCE_DIGEST = digest({ schema: "io.navocms.staging-governance.v1", semanticMarkdown: true, rawHtml: false, directivePolicy: "content-type-declared" });
 const deliveryDigest = `sha256:${contentHash(layoutSource)}`;
-export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-astro-policy.v1", designDigest, deliveryDigest, governanceDigest, registrations, css });
+export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-astro-policy.v1", designDigest, deliveryDigest, STAGING_ASTRO_GOVERNANCE_DIGEST, registrations, css });
 
 /**
  * Reviewed kernel policy for the first staging site. It accepts only one
@@ -32,18 +32,18 @@ export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-
 export class StagingAstroPreviewPreparer {
   public prepare(site: SiteDescriptor, revision: ContentRevision, media: readonly AstroMediaBinding[] = []): AstroRenderInput {
     if (revision.tenantId !== site.tenantId || revision.siteId !== site.siteId) throw new McpEditingError("STAGING_ASTRO_SCOPE_DENIED", "Staging Astro preview input is outside the authorized site");
-    const locale = typeof revision.metadata.locale === "string" && /^[A-Za-z0-9-]{2,20}$/.test(revision.metadata.locale)
-      ? revision.metadata.locale : site.primaryLocale;
+    const locale = revision.locale ?? (typeof revision.metadata.locale === "string" && /^[A-Za-z0-9-]{2,20}$/.test(revision.metadata.locale)
+      ? revision.metadata.locale : site.primaryLocale);
     const slug = typeof revision.metadata.slug === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(revision.metadata.slug)
       ? revision.metadata.slug : undefined;
     const title = typeof revision.metadata.title === "string" && revision.metadata.title.length > 0 && revision.metadata.title.length <= 256
       ? revision.metadata.title : "Untitled";
     if (!slug || !site.locales.includes(locale)) throw new McpEditingError("STAGING_ASTRO_REVISION_INVALID", "Staging Astro preview requires a supported locale and canonical slug");
-    const route = Object.freeze({ id: revision.documentId, path: slug === "home" ? "/" : `/${slug}`, locale, revisionId: revision.id,
+    const route = Object.freeze({ id: revision.documentId, path: `${locale === site.primaryLocale ? "" : `/${locale.toLowerCase()}`}${slug === "home" ? "/" : `/${slug}`}`, locale, revisionId: revision.id,
       componentId: "section-shell", title, source: revision.source, sourceHash: revision.sourceHash, directives: [], media: [...media] });
     const render: AstroRenderInput = Object.freeze({ tenantId: site.tenantId, siteId: site.siteId,
-      locales: Object.freeze({ default: locale, supported: Object.freeze([locale]) }),
-      anchors: Object.freeze({ content: astroContentDigest([route]), design: designDigest, delivery: deliveryDigest, governance: governanceDigest }),
+      locales: Object.freeze({ default: site.primaryLocale, coverage: "available" as const, supported: Object.freeze([...site.locales]) }),
+      anchors: Object.freeze({ content: astroContentDigest([route]), design: designDigest, delivery: deliveryDigest, governance: STAGING_ASTRO_GOVERNANCE_DIGEST }),
       deliveryLayout: Object.freeze({ schema: "io.navocms.delivery-layout.v1", source: layoutSource, digest: deliveryDigest }),
       expectedMediaDigest: astroMediaDigest([route]),
       design: Object.freeze({ digest: designDigest, css, components: new Map(registrations.map((item) => [item.id, item])), recipes: [] }),

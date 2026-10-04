@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navocms.io/schemas/public-site-snapshot-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "snapshot",
+    "snapshotHash"
+  ],
+  "properties": {
+    "snapshotHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "siteId",
+        "releaseHash",
+        "locales",
+        "routes",
+        "redirects"
+      ],
+      "properties": {
+        "schema": {
+          "const": "io.navocms.public-site-snapshot.v1"
+        },
+        "siteId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "releaseHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "locales": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "default",
+            "supported"
+          ],
+          "properties": {
+            "default": {
+              "type": "string"
+            },
+            "supported": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,32}$"
+              }
+            },
+            "coverage": {
+              "enum": [
+                "complete",
+                "available"
+              ]
+            }
+          }
+        },
+        "redirects": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "from",
+              "to",
+              "status"
+            ],
+            "properties": {
+              "from": {
+                "type": "string",
+                "pattern": "^/[a-z0-9/_-]+$"
+              },
+              "to": {
+                "type": "string",
+                "pattern": "^/[a-z0-9/_-]*$"
+              },
+              "status": {
+                "const": 301
+              }
+            }
+          }
+        },
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "locale",
+              "revisionId",
+              "documentId",
+              "typeName",
+              "title",
+              "markdown",
+              "html",
+              "fields",
+              "media"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/[a-z0-9/_-]*$",
+                "maxLength": 512
+              },
+              "locale": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,32}$"
+              },
+              "revisionId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "documentId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "typeName": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "markdown": {
+                "type": "string",
+                "maxLength": 262144
+              },
+              "html": {
+                "type": "string",
+                "maxLength": 524288
+              },
+              "fields": {
+                "type": "object"
+              },
+              "media": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "assetId",
+                    "variantIdentity",
+                    "url",
+                    "alt"
+                  ],
+                  "properties": {
+                    "assetId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "variantIdentity": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "url": {
+                      "type": "string",
+                      "pattern": "^https://[^/?#]+/media/[a-f0-9]{64}$",
+                      "maxLength": 512
+                    },
+                    "alt": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    "sources": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "variantIdentity",
+                          "url",
+                          "mediaType"
+                        ],
+                        "properties": {
+                          "variantIdentity": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "url": {
+                            "type": "string",
+                            "pattern": "^https://[^/?#]+/media/[a-f0-9]{64}$",
+                            "maxLength": 512
+                          },
+                          "mediaType": {
+                            "enum": [
+                              "image/webp",
+                              "image/jpeg",
+                              "image/avif"
+                            ]
+                          },
+                          "media": {
+                            "type": "string",
+                            "pattern": "^\\(max-width: [1-9][0-9]{0,4}px\\)$"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -108,6 +108,7 @@ export interface FinalizeUploadInput {
  * resource is re-validated and then routed through upload-intent finalization.
  */
 export interface MediaReferenceInput {
+  readonly alt?: string;
   readonly assetId: string;
   readonly ownerType: string;
   readonly ownerId: string;

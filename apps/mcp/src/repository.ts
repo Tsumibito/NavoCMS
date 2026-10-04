@@ -4,6 +4,7 @@ import {
   ContentEngine,
   foundationPacks,
   type ContentRevision,
+  type ContentTypeDefinition,
   type RevisionDiff,
   type StructuralPatchOperation
 } from "@navocms/content";
@@ -47,6 +48,7 @@ export interface PatchDraftInput {
   readonly revisionId: string;
   readonly baseSourceHash: string;
   readonly operations: readonly StructuralPatchOperation[];
+  readonly metadataPatch?: Readonly<Record<string, unknown>>;
   readonly actorId: string;
 }
 
@@ -61,6 +63,7 @@ export interface RepositoryPage<T> {
 }
 
 export interface EditingRepository {
+  listTypes(context: RepositoryContext): Awaitable<readonly ContentTypeDefinition[]>;
   getSite(scope: RepositoryScope): Awaitable<SiteDescriptor | undefined>;
   search(context: RepositoryContext, query: string, limit: number, cursor?: string): Awaitable<RepositoryPage<ContentHit>>;
   findDocument(context: RepositoryContext, documentId: string): Awaitable<ContentHit | undefined>;
@@ -87,6 +90,10 @@ export class InMemoryEditingRepository implements EditingRepository {
     if (this.#sites.has(key)) throw new Error(`Site ${site.siteId} is already registered`);
     this.#sites.set(key, Object.freeze({ ...site, locales: Object.freeze([...site.locales]) }));
     for (const pack of foundationPacks) this.#engine.registerPack(site, pack);
+  }
+
+  public listTypes({ site }: RepositoryContext): readonly ContentTypeDefinition[] {
+    return this.#engine.listTypes(site);
   }
 
   public getSite(scope: RepositoryScope): SiteDescriptor | undefined {
@@ -141,19 +148,17 @@ export class InMemoryEditingRepository implements EditingRepository {
   }
 
   public getRevision({ site }: RepositoryContext, revisionId: string): ContentRevision {
-    return this.#engine.getRevision(site, revisionId);
+    const revision = this.#engine.getRevision(site, revisionId);
+    const variant = this.#variants.get(variantKey(site, revision.variantId));
+    return { ...revision, ...(variant ? { locale: variant.locale } : {}) };
   }
 
   public createDraft(input: CreateDraftInput): DraftSummary {
-    const created = this.#engine.createDocument({
-      ...input.site,
-      typeName: input.typeName,
-      slug: input.slug,
-      locale: input.locale,
-      source: input.source,
-      metadata: metadataFor(input.typeName, input.slug, input.title, input.source, input.metadata),
-      provenance: { kind: "agent", actorId: input.actorId, note: "Created through MCP" }
-    });
+    const existing = this.#engine.listDocuments(input.site).find(document => document.slug === input.slug);
+    if (existing && existing.typeName !== input.typeName) throw new Error("DOCUMENT_SLUG_CONFLICT");
+    const data = { ...input.site, typeName: input.typeName, slug: input.slug, locale: input.locale, source: input.source,
+      metadata: metadataFor(input.typeName,input.slug,input.title,input.source,input.metadata), provenance: { kind: "agent" as const,actorId: input.actorId,note: "Created through MCP" } };
+    const created = existing ? { document: existing, ...this.#engine.createVariant({ ...data, documentId: existing.id }) } : this.#engine.createDocument(data);
     const indexed = Object.freeze({
       documentId: created.document.id,
       variantId: created.variant.id,
@@ -175,6 +180,7 @@ export class InMemoryEditingRepository implements EditingRepository {
       revisionId: input.revisionId,
       baseSourceHash: input.baseSourceHash,
       operations: input.operations,
+      ...(input.metadataPatch ? { metadata: { ...current.metadata, ...input.metadataPatch } } : {}),
       provenance: { kind: "agent", actorId: input.actorId, note: "Patched through MCP" }
     });
     this.#drafts.set(draftKey(input.site, current.documentId), changed.revision.id);

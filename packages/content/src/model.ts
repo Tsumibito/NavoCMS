@@ -63,6 +63,7 @@ export interface RevisionProvenance {
 }
 
 export interface ContentRevision extends ContentScope {
+  readonly locale?: string;
   readonly id: string;
   readonly documentId: string;
   readonly variantId: string;

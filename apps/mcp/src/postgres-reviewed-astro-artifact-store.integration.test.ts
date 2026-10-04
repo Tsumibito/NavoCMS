@@ -13,18 +13,18 @@ import { LocalDeterministicMediaStorage } from "@navocms/media";
 import { McpEditingError } from "./errors.js";
 import { EmbeddedReleaseProvider } from "./release-repository.js";
 import { McpEditingService, type IdempotencyStore, type StagingAstroOperations } from "./service.js";
-import { PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
+import { bootstrapSite, PostgresDatabase, PostgresEventStore, PostgresIdempotencyStore } from "@navocms/persistence-postgres";
 import { createReleaseManifest, renderMarkdownProofArtifact, sha256, type EventStore } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, type AuthorizationContext } from "@navocms/security";
 import type { AstroArtifact } from "@navocms/design-astro";
-import { afterAll, describe, expect, it } from "vitest";
+import { beforeAll, afterAll, describe, expect, it } from "vitest";
 
 const databaseUrl = process.env.NAVOCMS_INTEGRATION_DATABASE_URL;
 const adminDatabaseUrl = process.env.NAVOCMS_INTEGRATION_ADMIN_DATABASE_URL;
 const integration = describe.skipIf(!databaseUrl);
 const policyIntegration = describe.skipIf(!databaseUrl || !adminDatabaseUrl);
 const tenantId = "a2af348f-58b8-4efe-b873-8bd032ecbc5c";
-const siteId = "2e0bcd4f-6780-470c-844b-d72abb6737ca";
+const siteId = randomUUID();
 const humanPrincipalId = "016ef382-bf28-406b-9321-1fc580b6ea00";
 const servicePrincipalId = "216ef382-bf28-406b-9321-1fc580b6ea01";
 const database = databaseUrl ? new PostgresDatabase({ connectionString: databaseUrl, applicationName: "navocms-reviewed-astro-integration", maxConnections: 4 }) : undefined;
@@ -44,6 +44,10 @@ const binding = Object.freeze({
   cloudflare: { accountId: "test-account", projectId: "test-pages", productionBranch: "staging", previewBranch: "preview", previewHostnameSuffix: ".pages.dev", allowedHostname: "staging.example.test", tokenSecretRef: "secret:delivery/cloudflare-token" }
 });
 
+beforeAll(async () => {
+  if (!databaseUrl || !adminDatabaseUrl) return;
+  await bootstrapSite(adminDatabaseUrl, { tenantId, tenantSlug: "sprint-seven", tenantName: "Integration", siteId, siteSlug: `astro-${siteId}`, siteName: "Astro isolation", primaryLocale: "en", locales: ["en"], environmentId: randomUUID(), environmentKind: "staging", environmentKey: "default", principal: { id: humanPrincipalId, issuer: "urn:navocms:integration", subject: "sprint-6", kind: "human", siteRole: "owner" } });
+});
 afterAll(async () => { await database?.close(); await adminDatabase?.close(); });
 
 integration("reviewed Astro artifact PostgreSQL boundary", () => {

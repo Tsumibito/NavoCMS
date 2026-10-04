@@ -8,16 +8,19 @@ import type {
 } from "@navocms/media";
 import { assertSafeProjection, requirePermission } from "@navocms/security";
 
+import type { MediaUploadGateway } from "./media-upload-gateway.js";
 import { McpEditingError } from "./errors.js";
 import type { McpRequestContext } from "./model.js";
 
 export class McpMediaService {
   readonly #repository: MediaRepository;
   readonly #storageInjected: boolean;
+  readonly #uploadGateway: MediaUploadGateway | undefined;
 
-  public constructor(repository: MediaRepository, options: { readonly storageInjected: boolean }) {
+  public constructor(repository: MediaRepository, options: { readonly storageInjected: boolean; readonly uploadGateway?: MediaUploadGateway }) {
     this.#repository = repository;
     this.#storageInjected = options.storageInjected;
+    this.#uploadGateway = options.uploadGateway;
   }
 
   public get storageInjected(): boolean { return this.#storageInjected; }
@@ -44,7 +47,14 @@ export class McpMediaService {
       ...input,
       provenance: { ...input.provenance, receivedBy: scope.principalId }
     });
-    return project(result);
+    const uploadUrl = result.kind === "upload-intent" && this.#uploadGateway
+      ? await this.#uploadGateway.create(scope, result.intentId, result.expiresAt) : undefined;
+    return project({ ...result, ...(uploadUrl ? { uploadUrl } : {}) });
+  }
+
+  public async receiveUpload(token: string, bytes: Uint8Array): Promise<object> {
+    if (!this.#uploadGateway) throw new McpEditingError("UPLOAD_UNAVAILABLE", "Browser uploads are unavailable");
+    return this.#uploadGateway.receive(token, bytes);
   }
 
   public async finalize(context: McpRequestContext, input: FinalizeUploadInput): Promise<object> {

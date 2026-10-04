@@ -1,0 +1,91 @@
+{
+  "apiVersion": "navocms.io/v0alpha1",
+  "kind": "ContentType",
+  "metadata": {
+    "name": "catalog-item",
+    "version": "0.1.0",
+    "title": "Catalogue item",
+    "description": "Public pilot catalogue content."
+  },
+  "spec": {
+    "fields": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "slug",
+        "body",
+        "category"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 180
+        },
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "body": {
+          "type": "string",
+          "contentMediaType": "text/markdown"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "category": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "relations": [
+      {
+        "name": "category",
+        "target": "catalog-category",
+        "cardinality": "one",
+        "onDelete": "restrict"
+      }
+    ],
+    "localization": {
+      "mode": "document",
+      "requiredLocales": []
+    },
+    "indexes": [
+      {
+        "name": "catalog_item_slug_unique",
+        "fields": [
+          "slug",
+          "locale"
+        ],
+        "unique": true
+      }
+    ],
+    "rendererCapabilities": [
+      "content.markdown",
+      "component.asset"
+    ],
+    "defaultWorkflow": "navocms.editorial.standard.v1",
+    "permissions": {
+      "read": [
+        "viewer",
+        "editor",
+        "publisher",
+        "site-admin"
+      ],
+      "draft": [
+        "editor",
+        "publisher",
+        "site-admin"
+      ],
+      "publish": [
+        "publisher",
+        "site-admin"
+      ]
+    },
+    "retentionClass": "published-history"
+  }
+}

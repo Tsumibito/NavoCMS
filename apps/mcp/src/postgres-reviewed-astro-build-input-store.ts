@@ -44,6 +44,7 @@ interface StoredRow extends Record<string, unknown> {
 }
 
 interface StoredRender {
+  readonly redirects?: AstroRenderInput["redirects"];
   readonly tenantId: string;
   readonly siteId: string;
   readonly locales: AstroRenderInput["locales"];
@@ -268,11 +269,11 @@ function normalizedRender(input: AstroRenderInput): AstroRenderInput {
   return decoded;
 }
 function storedRender(render: AstroRenderInput): StoredRender {
-  return { tenantId: render.tenantId, siteId: render.siteId, locales: structuredClone(render.locales), anchors: structuredClone(render.anchors), deliveryLayout: structuredClone(render.deliveryLayout), expectedMediaDigest: render.expectedMediaDigest,
+  return { ...(render.redirects ? { redirects: structuredClone(render.redirects) } : {}), tenantId: render.tenantId, siteId: render.siteId, locales: structuredClone(render.locales), anchors: structuredClone(render.anchors), deliveryLayout: structuredClone(render.deliveryLayout), expectedMediaDigest: render.expectedMediaDigest,
     design: { digest: render.design.digest, css: render.design.css, components: [...render.design.components.values()].map((item) => ({ id: item.id, module: item.module, source: item.source, exportName: item.exportName ?? null })), recipes: structuredClone(render.design.recipes), legacyComponentIds: [] }, routes: structuredClone(render.routes) };
 }
 function readStoredRender(value: unknown): AstroRenderInput {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, ["tenantId", "siteId", "locales", "anchors", "deliveryLayout", "expectedMediaDigest", "design", "routes"])) throw new McpEditingError("REVIEWED_ASTRO_BUILD_INPUT_CORRUPT", "Reviewed Astro render snapshot is invalid");
+  if (!value || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, ["tenantId", "siteId", "locales", "anchors", "deliveryLayout", "expectedMediaDigest", "design", "routes", ...("redirects" in value ? ["redirects"] : [])])) throw new McpEditingError("REVIEWED_ASTRO_BUILD_INPUT_CORRUPT", "Reviewed Astro render snapshot is invalid");
   const stored = value as StoredRender;
   if (!stored.design || typeof stored.design !== "object" || !exactKeys(stored.design, ["digest", "css", "components", "recipes", "legacyComponentIds"]) || !Array.isArray(stored.design.components) || !Array.isArray(stored.design.recipes) || !Array.isArray(stored.design.legacyComponentIds) || stored.design.components.length > 64) throw new McpEditingError("REVIEWED_ASTRO_BUILD_INPUT_CORRUPT", "Reviewed Astro render snapshot is invalid");
   const ids = new Set<string>();
@@ -280,7 +281,7 @@ function readStoredRender(value: unknown): AstroRenderInput {
     if (!component || typeof component !== "object" || Array.isArray(component) || !exactKeys(component, ["id", "module", "source", "exportName"]) || typeof component.id !== "string" || typeof component.source !== "string" || ids.has(component.id)) throw new McpEditingError("REVIEWED_ASTRO_BUILD_INPUT_CORRUPT", "Reviewed Astro render snapshot is invalid");
     ids.add(component.id);
   }
-  return freeze({ tenantId: stored.tenantId, siteId: stored.siteId, locales: structuredClone(stored.locales), anchors: structuredClone(stored.anchors), deliveryLayout: structuredClone(stored.deliveryLayout), expectedMediaDigest: stored.expectedMediaDigest,
+  return freeze({ ...(stored.redirects ? { redirects: structuredClone(stored.redirects) } : {}), tenantId: stored.tenantId, siteId: stored.siteId, locales: structuredClone(stored.locales), anchors: structuredClone(stored.anchors), deliveryLayout: structuredClone(stored.deliveryLayout), expectedMediaDigest: stored.expectedMediaDigest,
     design: { digest: stored.design.digest as `sha256:${string}`, css: stored.design.css, components: new Map(stored.design.components.map((component) => [component.id, freeze({ id: component.id, module: component.module, source: component.source, ...(component.exportName === null ? {} : { exportName: component.exportName }) })])), recipes: structuredClone(stored.design.recipes) }, routes: structuredClone(stored.routes) });
 }
 function freeze<T>(value: T): T { if (value && typeof value === "object" && !Object.isFrozen(value)) { Object.freeze(value); for (const child of Object.values(value as object)) freeze(child); } return value; }

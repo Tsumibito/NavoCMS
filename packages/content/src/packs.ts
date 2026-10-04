@@ -170,8 +170,29 @@ export const businessPack: ContentPack = Object.freeze<ContentPack>({
   }
 });
 
+/** Reviewed pilot pack: a public catalogue with an explicit category reference. */
+export const cataloguePack: ContentPack = Object.freeze<ContentPack>({
+  id: "catalogue", version: "0.1.0",
+  types: ["catalog-category", "catalog-item"].map(name => ({
+    apiVersion: "navocms.io/v0alpha1", kind: "ContentType",
+    metadata: { name, version: "0.1.0", title: name === "catalog-item" ? "Catalogue item" : "Catalogue category", description: "Public pilot catalogue content." },
+    spec: {
+      fields: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: false,
+        required: name === "catalog-item" ? ["title", "slug", "body", "category"] : ["title", "slug", "body"],
+        properties: { title: { type: "string", minLength: 1, maxLength: 180 }, slug: { type: "string", pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+          body: { type: "string", contentMediaType: "text/markdown" }, description: { type: "string", maxLength: 500 },
+          ...(name === "catalog-item" ? { category: { type: "string", format: "uuid" } } : {}) } },
+      relations: name === "catalog-item" ? [{ name: "category", target: "catalog-category", cardinality: "one", onDelete: "restrict" }] : [],
+      localization: { mode: "document", requiredLocales: [] }, indexes: [{ name: `${name.replaceAll("-", "_")}_slug_unique`, fields: ["slug", "locale"], unique: true }],
+      rendererCapabilities: ["content.markdown", "component.asset"], defaultWorkflow: "navocms.editorial.standard.v1", permissions, retentionClass: "published-history"
+    }
+  })),
+  directives: { "catalog-category": sharedDirectives, "catalog-item": sharedDirectives }
+});
+
 export const foundationPacks: readonly ContentPack[] = Object.freeze([
   editorialPack,
   marketingPack,
-  businessPack
+  businessPack,
+  cataloguePack
 ]);

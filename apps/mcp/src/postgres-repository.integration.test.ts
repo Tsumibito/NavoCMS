@@ -1,4 +1,5 @@
 import {
+  bootstrapSite,
   PostgresDatabase,
   PostgresEventStore,
   PostgresIdentityResolver,
@@ -43,6 +44,53 @@ afterAll(async () => {
 });
 
 integration("Neon production persistence", () => {
+  it("rejects a stale site snapshot before any provider call and isolates snapshot records", async () => {
+    const suffix = randomUUID();
+    const { siteId, request } = await isolatedSite("snapshot");
+    const provider = new RecoverableVerifyProvider(); provider.verificationSucceeds = true;
+    const editing = service(new PostgresEventStore(database!), undefined, provider);
+    const baseline = await approvedRelease(editing, suffix, "snapshot-baseline", request);
+    await editing.publishRelease(request, { ...baseline, idempotencyKey: `snapshot-baseline-${suffix}` });
+    const first = await approvedRelease(editing, suffix, "snapshot-first", request);
+    const stale = await approvedRelease(editing, suffix, "snapshot-stale", request);
+    await database!.withScope({ tenantId, siteId, principalId }, async client => {
+      for (const release of [first, stale]) await client.query(
+        `INSERT INTO navocms.site_release_snapshots (tenant_id,site_id,release_id,base_publication_id,governance_digest)
+         SELECT $1,$2,$3,p.id,$4 FROM navocms.release_publications p WHERE p.release_id=$5`,
+        [tenantId,siteId,release.releaseId,`sha256:${"a".repeat(64)}`,baseline.releaseId]);
+    });
+    await editing.publishRelease(request, { ...first, idempotencyKey: `snapshot-first-${suffix}` });
+    await expect(editing.publishRelease(request, { ...stale, idempotencyKey: `snapshot-stale-${suffix}` })).rejects.toMatchObject({ code: "SITE_SNAPSHOT_STALE" });
+    expect(provider.publishCalls).toBe(2);
+    const releases = new PostgresReleaseWorkflowRepository(database!);
+    const site = (await new PostgresEditingRepository(database!).getSite({ tenantId,siteId,principalId }))!;
+    const pending = await releases.rollback({ site,principalId }, first.releaseId, first.releaseHash);
+    await expect(releases.beginPublication({ site,principalId }, stale.releaseId, stale.releaseHash)).rejects.toMatchObject({ code: "SITE_PUBLICATION_IN_PROGRESS" });
+    await releases.completeRollback({ site,principalId }, first.releaseId, pending.current.id, pending.target.id);
+    const foreign = await database!.withScope({ tenantId, siteId: randomUUID(), principalId }, async client => (await client.query("SELECT release_id FROM navocms.site_release_snapshots")).rows);
+    expect(foreign).toEqual([]);
+    await expect(database!.withScope({ tenantId, siteId, principalId }, client => client.query("UPDATE navocms.site_release_snapshots SET base_publication_id=NULL WHERE release_id=$1", [first.releaseId]))).rejects.toThrow();
+  });
+
+  it("validates registered catalogue fields and adds a locale to the same scoped document", async () => {
+    const suffix = randomUUID();
+    const { siteId } = await isolatedSite("catalogue");
+    const repository = new PostgresEditingRepository(database!);
+    const site = { tenantId, siteId, name: "Catalogue test", primaryLocale: "en", locales: ["en", "fr"] };
+    const input = { site, typeName: "catalog-category", slug: `category-${suffix}`, locale: "en", title: "Sailing", source: "# Sailing\n", actorId: principalId };
+    const category = await repository.createDraft(input);
+    const french = await repository.createDraft({ ...input, locale: "fr", title: "Voile", source: "# Voile\n" });
+    expect(french.id).toBe(category.id);
+    expect(french.revisionId).not.toBe(category.revisionId);
+    expect((await repository.getRevision({ site, principalId }, french.revisionId)).locale).toBe("fr");
+    await expect(repository.createDraft(input)).rejects.toThrow();
+    const item = await repository.createDraft({ ...input, typeName: "catalog-item", slug: `item-${suffix}`, title: "Aurora", metadata: { category: category.id } });
+    const patch = await repository.patchDraft({ site, revisionId: item.revisionId, baseSourceHash: item.sourceHash, operations: [], metadataPatch: { title: "Aurora II" }, actorId: principalId });
+    expect((await repository.getRevision({ site, principalId }, patch.draft.revisionId)).metadata.title).toBe("Aurora II");
+    await expect(repository.patchDraft({ site, revisionId: patch.draft.revisionId, baseSourceHash: patch.draft.sourceHash, operations: [], metadataPatch: { unknownField: true }, actorId: principalId })).rejects.toThrow();
+    await expect(repository.createDraft({ ...input, typeName: "catalog-item", slug: `foreign-${suffix}`, metadata: { category: randomUUID() } })).rejects.toThrow();
+  });
+
   it("persists site-scoped drafts, events, and idempotent responses across service instances", async () => {
     const first = service();
     const input = {
@@ -607,22 +655,30 @@ integration("Neon production persistence", () => {
 
   it("denies publishing recovery after the validated approval is revoked", async () => {
     const suffix = randomUUID().replace(/-/g, "");
+    const isolatedSiteId = randomUUID();
+    await bootstrapSite(adminDatabaseUrl!, {
+      tenantId, tenantSlug: "sprint-seven", tenantName: "Integration",
+      siteId: isolatedSiteId, siteSlug: `revoked-${suffix}`, siteName: "Revoked approval isolation",
+      primaryLocale: "en", locales: ["en"], environmentId: randomUUID(), environmentKind: "staging", environmentKey: "default",
+      principal: { id: principalId, issuer: "urn:navocms:integration", subject: "sprint-6", kind: "human", siteRole: "owner" }
+    });
+    const request = { authorization: { ...context().authorization, siteId: isolatedSiteId } };
     const provider = new InterruptingPublishProvider();
     const firstService = service(new PostgresEventStore(database!), undefined, provider);
-    const release = await approvedRelease(firstService, suffix, "approval-revoked");
-    await expect(firstService.publishRelease(context(), {
+    const release = await approvedRelease(firstService, suffix, "approval-revoked", request);
+    await expect(firstService.publishRelease(request, {
       releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `publish-${suffix}-approval-revoked`
     })).rejects.toThrow("injected publish interruption");
-    await database!.withScope({ tenantId, siteId, principalId }, async (client) => {
+    await database!.withScope({ tenantId, siteId: isolatedSiteId, principalId }, async (client) => {
       await client.query(
         `UPDATE navocms.release_approvals
             SET revoked_at = now(), revoked_by = $4, revocation_reason = 'integration recovery denial proof'
           WHERE tenant_id = $1 AND site_id = $2 AND release_id = $3`,
-        [tenantId, siteId, release.releaseId, principalId]
+        [tenantId, isolatedSiteId, release.releaseId, principalId]
       );
     });
     const restartedService = service(new PostgresEventStore(database!), undefined, provider);
-    await expect(restartedService.reconcileRelease(context(), {
+    await expect(restartedService.reconcileRelease(request, {
       releaseId: release.releaseId, releaseHash: release.releaseHash, idempotencyKey: `reconcile-${suffix}-approval-revoked`
     })).rejects.toMatchObject({ code: "RELEASE_APPROVAL_CHECKPOINT_INVALID" });
     expect(provider.publishCalls).toBe(1);
@@ -911,13 +967,13 @@ function service(
   );
 }
 
-async function approvedRelease(releaseService: McpEditingService, suffix: string, label: string): Promise<{ releaseId: string; releaseHash: string }> {
-  const created = await releaseService.createDraft(context(), {
+async function approvedRelease(releaseService: McpEditingService, suffix: string, label: string, request = context()): Promise<{ releaseId: string; releaseHash: string }> {
+  const created = await releaseService.createDraft(request, {
     typeName: "article", slug: `rollback-${label}-${suffix}`, locale: "en", title: `Rollback ${label}`,
     markdown: `# Rollback ${label}\n`, idempotencyKey: `draft-${suffix}-${label}`
   }) as { draft: { revisionId: string } };
-  const preview = await releaseService.preparePreview(context(), created.draft.revisionId, `preview-${suffix}-${label}`);
-  await releaseService.approveRelease(context(), { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `approve-${suffix}-${label}` });
+  const preview = await releaseService.preparePreview(request, created.draft.revisionId, `preview-${suffix}-${label}`);
+  await releaseService.approveRelease(request, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: `approve-${suffix}-${label}` });
   return preview;
 }
 
@@ -955,4 +1011,10 @@ function context(): { authorization: AuthorizationContext } {
       ]
     }
   };
+}
+
+async function isolatedSite(label: string) {
+  const isolatedSiteId = randomUUID();
+  await bootstrapSite(adminDatabaseUrl!, { tenantId, tenantSlug: "sprint-seven", tenantName: "Integration", siteId: isolatedSiteId, siteSlug: `${label}-${isolatedSiteId}`, siteName: "Pilot integration", primaryLocale: "en", locales: ["en", "fr"], environmentId: randomUUID(), environmentKind: "staging", environmentKey: "default", principal: { id: principalId, issuer: "urn:navocms:integration", subject: "sprint-6", kind: "human", siteRole: "owner" } });
+  return { siteId: isolatedSiteId, request: { authorization: { ...context().authorization, siteId: isolatedSiteId } } };
 }

@@ -99,7 +99,7 @@ export interface AstroMediaBinding {
 export interface AstroRenderInput {
   readonly tenantId: string;
   readonly siteId: string;
-  readonly locales: Readonly<{ default: string; supported: readonly string[] }>;
+  readonly locales: Readonly<{ default: string; supported: readonly string[]; coverage?: "complete" | "available" }>;
   readonly anchors: Readonly<{ content: string; design: string; delivery: string; governance: string }>;
   /** A reviewed, versioned shared layout source; its digest is the delivery anchor. */
   readonly deliveryLayout: Readonly<{ schema: "io.navocms.delivery-layout.v1"; source: string; digest: string }>;
@@ -107,6 +107,7 @@ export interface AstroRenderInput {
   readonly expectedMediaDigest: string;
   readonly design: AstroDesignAdapter;
   readonly routes: readonly AstroRenderRoute[];
+  readonly redirects?: readonly Readonly<{ from: string; to: string; status: 301 }>[];
 }
 
 export interface AstroArtifactManifest {
@@ -128,7 +129,7 @@ export interface AstroArtifact {
 /** Emits a complete, static Astro project; compilation/deployment stay external capabilities. */
 export function renderAstroArtifact(input: AstroRenderInput): AstroArtifact {
   assertInput(input);
-  const content = astroContentDigest(input.routes);
+  const content = astroContentDigest(input.routes, input.redirects);
   const media = astroMediaDigest(input.routes);
   const registrations = astroRegistrationDigest(input.design.components.values());
   if (input.anchors.content !== content || input.anchors.design !== input.design.digest || input.anchors.delivery !== input.deliveryLayout.digest || input.expectedMediaDigest !== media) throw new AstroDesignAdapterError("Renderer input digest drift");
@@ -140,8 +141,9 @@ export function renderAstroArtifact(input: AstroRenderInput): AstroArtifact {
   };
   for (const registration of [...input.design.components.values()].sort((left, right) => left.id.localeCompare(right.id))) files[`src/components/${registration.id}.astro`] = registration.source;
   for (const route of [...input.routes].sort((left, right) => left.path.localeCompare(right.path))) {
-    files[`src/pages${pagePath(route.path)}.astro`] = page(route, input.design.components.get(route.componentId)!, renderSemanticMarkdownHtml(route.source, route.directives));
+    files[`src/pages${pagePath(route.path)}.astro`] = page(route, input.design.components.get(route.componentId)!, renderSemanticMarkdownHtml(route.source, route.directives), input.routes);
   }
+  if (input.redirects?.length) files["public/_redirects"] = input.redirects.map(item => `${item.from} ${item.to} 301`).join("\n") + "\n";
   const entries = Object.entries(files).sort(([left], [right]) => left.localeCompare(right)).map(([path, body]) => Object.freeze({ path, sha256: digest(body).slice(7) }));
   const manifest = Object.freeze({ schema: "io.navocms.astro-artifact.v1" as const, format: "navocms-astro-source-bundle/v1" as const, tenantId: input.tenantId, siteId: input.siteId, digests: Object.freeze({ content, design: input.design.digest, delivery: input.anchors.delivery, governance: input.anchors.governance, registrations, media }), files: Object.freeze(entries) });
   const complete = Object.freeze({ ...files, "navocms-artifact-manifest.json": canonical(manifest) });
@@ -179,6 +181,7 @@ export function verifyBuiltAstroOutput(output: Readonly<Record<string, string>>,
   const actualRoutes = new Set(pages.map(([path]) => path));
   if (expectedRoutes.size < 1 || actualRoutes.size !== expectedRoutes.size || [...expectedRoutes].some((path) => !actualRoutes.has(path))) throw new AstroDesignAdapterError("Built Astro route parity invalid");
   for (const [, html] of pages) verifyDeliveryLayoutHtml(html);
+  if (artifact.files["public/_redirects"] !== output["_redirects"]) throw new AstroDesignAdapterError("Built Astro redirect parity invalid");
 }
 
 /** Validates actual built HTML elements with parse5, never text, comments, templates, or raw-text contents. */
@@ -217,7 +220,7 @@ export async function materializeAstroArtifact(directory: string, artifact: Astr
   }
 }
 
-export function astroContentDigest(routes: readonly AstroRenderRoute[]): `sha256:${string}` { return digest([...routes].map((route) => ({ id: route.id, revisionId: route.revisionId, sourceHash: route.sourceHash, title: route.title, componentId: route.componentId, locale: route.locale, path: route.path, directives: normalizedDirectives(route.directives), media: sortedMedia(route.media) })).sort(routeOrder)); }
+export function astroContentDigest(routes: readonly AstroRenderRoute[], redirects?: AstroRenderInput["redirects"]): `sha256:${string}` { const routesDigest = digest([...routes].map((route) => ({ id: route.id, revisionId: route.revisionId, sourceHash: route.sourceHash, title: route.title, componentId: route.componentId, locale: route.locale, path: route.path, directives: normalizedDirectives(route.directives), media: sortedMedia(route.media) })).sort(routeOrder)); return redirects?.length ? digest({ routesDigest, redirects }) : routesDigest; }
 export function astroMediaDigest(routes: readonly AstroRenderRoute[]): `sha256:${string}` { return digest(routes.flatMap((route) => route.media.map((item) => ({ ...item, route: route.id, locale: route.locale, path: route.path }))).sort(mediaOrder)); }
 export function astroRegistrationDigest(registrations: Iterable<AstroComponentRegistration>): `sha256:${string}` { return digest([...registrations].map(({ id, module, source, exportName }) => ({ id, module, source, exportName })).sort((left, right) => left.id.localeCompare(right.id))); }
 
@@ -226,6 +229,11 @@ function assertInput(input: AstroRenderInput): void {
   if (input.routes.length < 1 || input.routes.length > ASTRO_RENDER_LIMITS.routes || input.locales.supported.length < 1 || input.locales.supported.length > ASTRO_RENDER_LIMITS.locales || !/^[A-Za-z0-9_-]{1,128}$/.test(input.tenantId) || !/^[A-Za-z0-9_-]{1,128}$/.test(input.siteId) || !digestPattern.test(input.anchors.content) || !digestPattern.test(input.anchors.design) || !digestPattern.test(input.anchors.delivery) || !digestPattern.test(input.anchors.governance) || !digestPattern.test(input.expectedMediaDigest) || input.locales.supported.some((locale) => !/^[a-z0-9-]{1,32}$/.test(locale)) || new Set(input.locales.supported).size !== input.locales.supported.length || !input.locales.supported.includes(input.locales.default)) throw new AstroDesignAdapterError("Renderer locale or anchor input invalid");
   const layout = input.deliveryLayout;
   if (layout.schema !== "io.navocms.delivery-layout.v1" || byteLength(layout.source) < 1 || byteLength(layout.source) > ASTRO_RENDER_LIMITS.layoutBytes || layout.digest !== digest(layout.source)) throw new AstroDesignAdapterError("Renderer delivery layout invalid");
+  const redirectPaths = new Set<string>();
+  for (const redirect of input.redirects ?? []) {
+    if ((input.redirects?.length ?? 0) > 100 || redirect.status !== 301 || !/^\/[a-z0-9/_-]+$/.test(redirect.from) || redirect.from.includes("//") || redirect.from === redirect.to || redirectPaths.has(redirect.from) || input.routes.some(route => route.path === redirect.from) || !input.routes.some(route => route.path === redirect.to)) throw new AstroDesignAdapterError("Renderer redirect invalid");
+    redirectPaths.add(redirect.from);
+  }
   const paths = new Set<string>(); const localized = new Map<string, Set<string>>();
   for (const route of input.routes) {
     const outputPath = `src/pages${pagePath(route.path)}.astro`;
@@ -239,11 +247,11 @@ function assertInput(input: AstroRenderInput): void {
     if (!validDirectives(route.directives)) throw new AstroDesignAdapterError("Renderer directive input invalid");
     try { renderSemanticMarkdownHtml(route.source, route.directives); } catch (error) { throw new AstroDesignAdapterError(`Renderer content unsupported: ${error instanceof Error ? error.message : "invalid markdown"}`); }
   }
-  for (const locales of localized.values()) if (locales.size !== input.locales.supported.length || input.locales.supported.some((locale) => !locales.has(locale))) throw new AstroDesignAdapterError("Renderer locale missing");
+  for (const locales of localized.values()) if (input.locales.coverage !== "available" && (locales.size !== input.locales.supported.length || input.locales.supported.some((locale) => !locales.has(locale)))) throw new AstroDesignAdapterError("Renderer locale missing");
 }
 function pagePath(path: string): string { return path === "/" ? "/index" : `${path.replace(/\/$/, "")}/index`; }
 function builtRoutePath(pagePath: string): string { return pagePath === "src/pages/index.astro" ? "index.html" : `${pagePath.slice("src/pages/".length, -".astro".length)}.html`; }
-function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string): string { const depth = route.path.split("/").filter(Boolean).length; return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\nconst title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media)};\n---\n<SiteLayout title={title} locale=${JSON.stringify(route.locale)}><RouteComponent><main data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}><Fragment set:html={contentHtml} />{media.map((item) => <picture>{(item.sources ?? []).map((source) => <source srcset={source.url} type={source.mediaType} media={source.media} data-navocms-variant={source.variantIdentity} />)}<img src={item.url} alt={item.alt} data-navocms-variant={item.variantIdentity} /></picture>)}</main></RouteComponent></SiteLayout>\n`; }
+function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string, routes: readonly AstroRenderRoute[]): string { const depth = route.path.split("/").filter(Boolean).length; return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\nconst title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media)};\nconst navigation = ${JSON.stringify(routes.filter(item => item.locale === route.locale).map(item => ({ path: item.path, title: item.title })))};\nconst languages = ${JSON.stringify(routes.filter(item => item.id === route.id).map(item => ({ path: item.path, locale: item.locale })))};\n---\n<SiteLayout title={title} navigation={navigation} languages={languages} locale=${JSON.stringify(route.locale)}><RouteComponent><main data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}><Fragment set:html={contentHtml} />{media.map((item) => <picture>{(item.sources ?? []).map((source) => <source srcset={source.url} type={source.mediaType} media={source.media} data-navocms-variant={source.variantIdentity} />)}<img src={item.url} alt={item.alt} data-navocms-variant={item.variantIdentity} /></picture>)}</main></RouteComponent></SiteLayout>\n`; }
 function canonical(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`; return JSON.stringify(value); }
 function digest(value: unknown): `sha256:${string}` { return `sha256:${createHash("sha256").update(typeof value === "string" ? value : canonical(value)).digest("hex")}`; }
 function byteLength(value: string): number { return Buffer.byteLength(value, "utf8"); }
@@ -252,6 +260,7 @@ function safeArtifactPath(value: unknown): value is string { return typeof value
 function validMediaUrl(value: unknown): value is string {
   if (typeof value !== "string" || byteLength(value) > 512 * 1024) return false;
   if (value.startsWith("/")) return !value.startsWith("//");
+  if (/^https:\/\/[^/?#]+\/media\/[a-f0-9]{64}$/.test(value)) { const url = new URL(value); return !url.username && !url.password && !url.port; }
   return /^data:image\/(?:avif|webp|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
 }
 function hasExactKeys(value: unknown, expected: readonly string[]): boolean { return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).sort().join(",") === [...expected].sort().join(","); }

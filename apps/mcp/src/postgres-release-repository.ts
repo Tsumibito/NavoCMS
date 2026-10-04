@@ -253,7 +253,22 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
   public async beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string) {
     return this.#database.withScope(databaseScope(context), async (client) => {
       const release = await requireExactRelease(client, context, releaseId, releaseHash, true);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`publish:${release.environment_id}`]);
+      const competing = (await client.query<{ id: string }>(
+        `SELECT c.id FROM navocms.release_candidates c WHERE c.tenant_id=$1 AND c.site_id=$2 AND c.environment_id=$3 AND c.id<>$4
+         AND (c.status='publishing' OR EXISTS (SELECT 1 FROM navocms.workflow_runs w WHERE w.tenant_id=c.tenant_id AND w.site_id=c.site_id AND w.release_id=c.id AND w.status='running' AND w.current_step='rollback.pending')) LIMIT 1`,
+        [context.site.tenantId, context.site.siteId, release.environment_id, releaseId]
+      )).rows[0];
+      if (competing) throw new McpEditingError("SITE_PUBLICATION_IN_PROGRESS", "Reconcile the active publication before publishing another site snapshot");
       if (release.status !== "publishing") {
+        const snapshot = (await client.query<{ base_publication_id: string | null }>(
+          `SELECT base_publication_id FROM navocms.site_release_snapshots WHERE tenant_id=$1 AND site_id=$2 AND release_id=$3`,
+          [context.site.tenantId, context.site.siteId, releaseId]
+        )).rows[0];
+        if (snapshot && snapshot.base_publication_id !== ((await activePublication(client, context, release.environment_id))?.id ?? null)) {
+          throw new McpEditingError("SITE_SNAPSHOT_STALE", "A newer site release was published; prepare and review a fresh snapshot");
+        }
+
         // Approval gates the durable transition into publication. Once that
         // exact release hash is checkpointed as publishing, a restarted
         // reconciler must be able to finish it even if the approval expires
@@ -373,6 +388,13 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
   public async rollback(context: RepositoryContext, releaseId: string, releaseHash: string) {
     return this.#database.withScope(databaseScope(context), async (client) => {
       const release = await requireExactRelease(client, context, releaseId, releaseHash, true);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`publish:${release.environment_id}`]);
+      const competing = (await client.query(
+        `SELECT c.id FROM navocms.release_candidates c WHERE c.tenant_id=$1 AND c.site_id=$2 AND c.environment_id=$3 AND c.id<>$4
+         AND (c.status='publishing' OR EXISTS (SELECT 1 FROM navocms.workflow_runs w WHERE w.tenant_id=c.tenant_id AND w.site_id=c.site_id AND w.release_id=c.id AND w.status='running' AND w.current_step='rollback.pending')) LIMIT 1`,
+        [context.site.tenantId,context.site.siteId,release.environment_id,releaseId]
+      )).rows[0];
+      if (competing) throw new McpEditingError("SITE_PUBLICATION_IN_PROGRESS", "Reconcile the active site publication before rollback");
       if (release.status !== "published" && release.status !== "verification_failed") {
         throw new McpEditingError("ROLLBACK_NOT_AVAILABLE", "Only an applied release can be rolled back");
       }
@@ -406,6 +428,8 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
   public async completeRollback(context: RepositoryContext, releaseId: string, currentPublicationId: string, targetPublicationId: string): Promise<StoredRelease> {
     return this.#database.withScope(databaseScope(context), async (client) => {
       const release = await requireRelease(client, context, releaseId, true);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`publish:${release.environment_id}`]);
+      if ((await activePublication(client, context, release.environment_id))?.id !== currentPublicationId) throw new McpEditingError("ROLLBACK_TARGET_MISMATCH", "The active site publication changed");
       releaseTransition(release.status, "rolled_back");
       const current = (await client.query<PublicationRow>(
         `${publicationSelect()} WHERE p.tenant_id = $1 AND p.site_id = $2 AND p.id = $3 AND p.release_id = $4 FOR UPDATE`,
