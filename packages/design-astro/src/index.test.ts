@@ -122,6 +122,21 @@ describe("Astro design adapter", () => {
     expect(() => renderAstroArtifact(renderInput(adapter, invalidRoutes))).toThrow(/media input invalid/i);
   });
 
+  it("checks and builds legacy and modern media together in a real Astro project", async () => {
+    const adapter = createAstroDesignAdapter(await design(), registrations);
+    const legacy: AstroMediaBinding = { assetId: "legacy", variantIdentity: "a".repeat(64), url: "data:image/jpeg;base64,AA==", alt: "Legacy", sources: [{ variantIdentity: "b".repeat(64), url: "data:image/webp;base64,AA==", mediaType: "image/webp", media: "(max-width: 480px)" }] };
+    const modern: AstroMediaBinding = { assetId: "modern", variantIdentity: "c".repeat(64), url: "https://cms.example.test/media/" + "c".repeat(64), alt: "Modern", width: 1280, height: 960, sizes: "(max-width: 1200px) 100vw, 1200px", sources: [320, 640, 1920].flatMap((width, i) => (["image/avif", "image/webp"] as const).map((mediaType, j) => ({ variantIdentity: String(i * 2 + j + 1).repeat(64), url: "https://cms.example.test/media/" + String(i * 2 + j + 1).repeat(64), mediaType, width }))) };
+    const routes = [legacy, modern].map((media, i) => ({ id: `page-${i}`, path: `/page-${i}`, locale: "en", revisionId: `revision-${i}`, componentId: "section-shell", title: "Media", source: "A safe page", sourceHash: contentHash("A safe page"), media: [media] }));
+    const directory = await mkdtemp(join(tmpdir(), "navocms-responsive-build-"));
+    try {
+      const output = await materializeAndBuild(directory, renderAstroArtifact({ ...renderInput(adapter, routes), locales: { default: "en", supported: ["en"] } }));
+      expect(output["page-1/index.html"]).toContain("1920w");
+      expect(output["page-1/index.html"]).toContain('sizes="(max-width: 1200px) 100vw, 1200px"');
+      expect(output["page-1/index.html"]).toContain('width="1280"');
+      expect(output["page-0/index.html"]).toContain("image/webp");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }, 120_000);
+
   it("materializes clean pinned projects and produces byte-identical full dist output", async () => {
     const adapter = createAstroDesignAdapter(await design(), registrations);
     const routes = ["en", "fr"].map((locale) => ({ id: "home", path: `/${locale}`, locale, revisionId: `${locale}-revision`, componentId: "section-shell", title: "Home", source: semanticMarkdown, sourceHash: contentHash(semanticMarkdown), directives, media: [] }));

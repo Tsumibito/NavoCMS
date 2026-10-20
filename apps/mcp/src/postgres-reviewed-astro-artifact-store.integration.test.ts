@@ -93,17 +93,7 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
         [tenantId, siteId, preview.releaseId]
       )).rows);
     expect(jobs).toEqual([{ attempt: 2, status: "succeeded" }]);
-    // Synthetic provider publication supplies the durable published snapshot for discovery.
-    const workflow = new PostgresReleaseWorkflowRepository(database!);
-    const release = await workflow.getRelease(humanRepositoryContext, preview.releaseId);
-    await workflow.approve(humanRepositoryContext, release.id, release.releaseHash, { actorKind: "human", policyVersion: "navocms.release-approval.v1", evidence: {}, expiresAt: new Date(Date.now()+60_000).toISOString(), scope: { tenantId, siteId, environmentId: release.environmentId } });
-    await workflow.beginPublication(humanRepositoryContext, release.id, release.releaseHash);
-    const publication = await workflow.completePublication(humanRepositoryContext, release.id, { artifactHash: release.artifact.hash, providerKey: "test.passport.v1", providerReference: "test:passport" });
-    await workflow.markVerified(humanRepositoryContext, release.id, publication.id);
-    const revision = await new PostgresEditingRepository(database!).getRevision(humanRepositoryContext, draft.draft.revisionId);
-    expect(revision.documentId).not.toBe(revision.variantId);
-    const passportContext = await restarted.siteContext(serviceRepositoryContext);
-    expect(passportContext.routes).toEqual([expect.objectContaining({ documentId: revision.documentId, variantId: revision.variantId, sectionId: `${revision.variantId}:main`, revisionId: revision.id })]);
+
   });
 
   it("registers as a human, resolves after restart as a service, and rejects replay drift", async () => {
@@ -272,6 +262,18 @@ integration("reviewed Astro build-input PostgreSQL boundary", () => {
     await expect(restarted.get({ tenantId, siteId, environment: "staging", environmentKey: "default", releaseId: bound.release.id })).resolves.toMatchObject({ releaseHash: bound.release.releaseHash, bindingDigest: first.bindingDigest });
     await expect(store.register(requestContext(), { ...input, idempotencyKey: `astro-drift-${randomUUID()}`, releaseHash: "f".repeat(64) })).rejects.toMatchObject({ code: "REVIEWED_ASTRO_RELEASE_BINDING_MISMATCH" });
     await expect(store.register(requestContext(), { ...input, idempotencyKey: `astro-anchor-${randomUUID()}`, render: { ...bound.render, anchors: { ...bound.render.anchors, governance: `sha256:${"f".repeat(64)}` } } })).rejects.toMatchObject({ code: "REVIEWED_ASTRO_BUILD_INPUT_INVALID" });
+    // Embedded synthetic provider fixture: exercise published discovery without real delivery.
+    const workflow = new PostgresReleaseWorkflowRepository(database!);
+    const release = bound.release;
+    await workflow.approve(humanRepositoryContext, release.id, release.releaseHash, { actorKind: "human", policyVersion: "navocms.release-approval.v1", evidence: {}, expiresAt: new Date(Date.now()+60_000).toISOString(), scope: { tenantId, siteId, environmentId: release.environmentId } });
+    await workflow.beginPublication(humanRepositoryContext, release.id, release.releaseHash);
+    const publication = await workflow.completePublication(humanRepositoryContext, release.id, { artifactHash: release.artifact.hash, providerKey: "test.passport.v1", providerReference: "test:passport" });
+    await workflow.markVerified(humanRepositoryContext, release.id, publication.id);
+    const revision = await new PostgresEditingRepository(database!).getRevision(humanRepositoryContext, bound.release.revisionId);
+    expect(revision.documentId).not.toBe(revision.variantId);
+    const runtime = new StagingOperationalRuntime({ database: database!, environmentKey: "default", reviewedSourceCommit: "c".repeat(40), toolchainDirectory: "/unused", readinessContext: serviceRepositoryContext, runtimePrincipalId: servicePrincipalId });
+    const passportContext = await runtime.siteContext(serviceRepositoryContext);
+    expect(passportContext.routes).toEqual([expect.objectContaining({ documentId: revision.documentId, variantId: revision.variantId, sectionId: `${revision.variantId}:main`, revisionId: revision.id })]);
   });
 
   it("rolls back snapshot, idempotency, ledger and outbox when event append fails", async () => {
