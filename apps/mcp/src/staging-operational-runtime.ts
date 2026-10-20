@@ -86,8 +86,8 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
     const base = await this.snapshotBase(repository);
     const input = base ? await new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey).get({ tenantId: repository.site.tenantId, siteId: repository.site.siteId, environment: "staging", environmentKey: this.#environmentKey, releaseId: base.release_id }) : undefined;
     const routes = input?.render.routes ?? [];
-    const records = await this.#database.withScope(serviceScope(repository), async client => (await client.query<{ id: string; document_id: string; type_name: string; fields: string[] }>(
-      `SELECT r.id,r.document_id,t.name AS type_name,ARRAY(SELECT jsonb_object_keys(r.metadata_json)) AS fields
+    const records = await this.#database.withScope(serviceScope(repository), async client => (await client.query<{ id: string; document_id: string; variant_id: string; type_name: string; fields: string[] }>(
+      `SELECT r.id,r.document_id,r.variant_id,t.name AS type_name,ARRAY(SELECT jsonb_object_keys(r.metadata_json)) AS fields
        FROM navocms.content_revisions r JOIN navocms.content_documents d ON d.tenant_id=r.tenant_id AND d.site_id=r.site_id AND d.id=r.document_id
        JOIN navocms.content_types t ON t.tenant_id=d.tenant_id AND t.site_id=d.site_id AND t.id=d.content_type_id
        WHERE r.tenant_id=$1 AND r.site_id=$2 AND r.id=ANY($3::uuid[])`, [repository.site.tenantId, repository.site.siteId, routes.map(route => route.revisionId)]
@@ -97,8 +97,8 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         const record = records.find(record => record.id === route.revisionId);
         if (record && (record.fields.length > 64 || record.fields.some(field => field.length > 128))) throw new McpEditingError("SITE_PASSPORT_BOUNDS", "Published field inventory exceeds the passport budget");
         if (!record) throw new McpEditingError("SITE_SNAPSHOT_REVISION_MISSING", "Published revision is missing");
-        return { path: route.path, locale: route.locale, documentId: record.document_id, variantId: route.id, revisionId: route.revisionId,
-          typeName: record.type_name, sectionId: `${route.id}:main`, componentId: route.componentId, dataSource: "content.revision", fields: [...new Set([...record.fields, "media"])].sort() };
+        return { path: route.path, locale: route.locale, documentId: record.document_id, variantId: record.variant_id, revisionId: route.revisionId,
+          typeName: record.type_name, sectionId: `${record.variant_id}:main`, componentId: route.componentId, dataSource: "content.revision", fields: [...new Set([...record.fields, "media"])].sort() };
       }), redirects: input?.render.redirects ?? [], components: STAGING_SITE_COMPONENTS,
       integrations: { build: "reviewed-astro", media: "injected-immutable-storage" }, policyDigest: STAGING_ASTRO_POLICY_DIGEST };
   }
