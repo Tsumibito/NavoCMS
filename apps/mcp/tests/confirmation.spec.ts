@@ -97,6 +97,34 @@ test("anonymous navigation leads to login; a real browser login records the deci
   }
 });
 
+test("a read-only account can switch through provider logout and return to review without deciding", async ({ browser }) => {
+  const harness = await confirmationHarness({ readOnlyFirstLogin: true });
+  const preview = await prepare(harness);
+  const token = preview.confirmationUrl.split("/confirmations/")[1]!;
+  await new Promise<void>(resolve => harness.server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(harness.server.address() as { port: number }).port}`;
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.goto(`${base}/confirmations/${token}`);
+    await expect(page.getByRole("heading", { name: "Not authorized" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Publish", exact: true })).toHaveCount(0);
+    await page.getByRole("link", { name: "Use another account" }).click();
+    await expect(page.getByRole("heading", { name: "Review publication" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Publish", exact: true })).toHaveCount(1);
+    expect(harness.logoutCount()).toBe(1);
+    await page.setViewportSize({ width: 375, height: 812 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+    expect(await harness.service.releaseConfirmationStatus(harness.context, {
+      releaseId: preview.releaseId, releaseHash: preview.releaseHash
+    })).toMatchObject({ status: "pending" });
+  } finally {
+    await context.close();
+    await new Promise<void>(resolve => harness.server.close(() => resolve()));
+    await new Promise<void>(resolve => harness.idp.close(() => resolve()));
+  }
+});
+
 test("a delegated agent identity cannot sign in for the confirmation", async ({ browser }) => {
   const harness = await confirmationHarness({ agentLogin: true });
   const preview = await prepare(harness);
@@ -133,10 +161,11 @@ interface ConfirmationHarness {
   readonly server: ReturnType<typeof createMcpHttpServer>;
   readonly service: McpEditingService;
   readonly idp: ReturnType<typeof createHttpServer>;
+  readonly logoutCount: () => number;
   readonly context: { authorization: { tenantId: string; siteId: string; principal: { id: string; kind: "human"; issuer: string; subject: string }; layers: readonly { name: string; permissions: readonly string[] }[] } };
 }
 
-async function confirmationHarness(options: { readonly agentLogin?: boolean } = {}): Promise<ConfirmationHarness> {
+async function confirmationHarness(options: { readonly agentLogin?: boolean; readonly readOnlyFirstLogin?: boolean } = {}): Promise<ConfirmationHarness> {
   // The fake identity provider: /authorize records the code's PKCE challenge,
   // signs the user in server-side, and redirects back; /token verifies the
   // exchange's code_verifier and issues the identity's access token.
@@ -146,9 +175,12 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
   const codes = new Map<string, string>();
   const nonces = new Map<string, string>();
   const issuedNonces = new Map<string, string>();
+  let loginCount = 0;
+  let logoutCount = 0;
   const idp = createHttpServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (url.pathname === "/authorize") {
+      loginCount += 1;
       const code = `code-${randomId()}`;
       codes.set(code, url.searchParams.get("code_challenge") ?? "");
       nonces.set(code, url.searchParams.get("nonce") ?? "");
@@ -158,6 +190,12 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
       back.searchParams.set("state", url.searchParams.get("state") ?? "");
       response.writeHead(302, { location: back.toString() });
       response.end();
+      return;
+    }
+    if (url.pathname === "/logout") {
+      if (url.searchParams.get("session_id") !== "browser-test-session") { response.writeHead(400).end(); return; }
+      logoutCount += 1;
+      response.writeHead(302, { location: url.searchParams.get("return_to")! }).end();
       return;
     }
     if (url.pathname === "/token") {
@@ -217,8 +255,8 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
     verify: async (token: string) => {
       if (token !== `idp-token-for-${identity.subject}`) throw new Error("unknown token");
       return {
-        claims: { iss: "https://identity.example", sub: identity.subject, aud: "confirmation-client", exp: Math.floor(Date.now() / 1000) + 3600 },
-        scopes: [...NAVOCMS_PERMISSIONS],
+        claims: { iss: "https://identity.example", sub: identity.subject, aud: "confirmation-client", sid: "browser-test-session", exp: Math.floor(Date.now() / 1000) + 3600 },
+        scopes: options.readOnlyFirstLogin && loginCount === 1 ? ["content:read"] : [...NAVOCMS_PERMISSIONS],
         tenantId: site.tenantId,
         siteId: site.siteId,
         principal: { id: identity.id, kind: identity.kind, issuer: "https://identity.example", subject: identity.subject }
@@ -240,10 +278,11 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean } = 
       clientId: "confirmation-client",
       clientSecret: "confirmation-secret",
       authorizationEndpoint: `http://127.0.0.1:${idpPort}/authorize`,
-      tokenEndpoint: `http://127.0.0.1:${idpPort}/token`
+      tokenEndpoint: `http://127.0.0.1:${idpPort}/token`,
+      logoutEndpoint: `http://127.0.0.1:${idpPort}/logout`
     }
   });
-  return { server, service, idp, context };
+  return { server, service, idp, context, logoutCount: () => logoutCount };
 }
 
 function randomId(): string {

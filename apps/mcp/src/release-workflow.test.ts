@@ -58,11 +58,11 @@ describe("durable release workflow", () => {
     const context = requestContext();
 
     const first = await draftPreviewApprove(service, context, "first-release", "First release", "first");
-    await service.publishRelease(context, {
+    await expect(service.publishRelease(context, {
       releaseId: first.releaseId,
       releaseHash: first.releaseHash,
       idempotencyKey: "publish-first-release-001"
-    });
+    })).resolves.toMatchObject({ release: { status: "published" }, publication: { status: "verified" } });
 
     const second = await draftPreviewApprove(service, context, "second-release", "Second release", "second");
     provider.verifyLive = false;
@@ -250,7 +250,7 @@ describe("durable release workflow", () => {
     const context = requestContext();
     const preview = await draftPreviewApprove(first, context, "restart-approved", "Restart approved", "restart-approved");
     const restarted = new McpEditingService(repository, events, undefined, releases, provider, {}, undefined, undefined, undefined);
-    await expect(restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approved-restart-001" })).resolves.toMatchObject({ release: { status: "published" } });
+    await expect(restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approved-restart-001" })).resolves.toMatchObject({ release: { status: "published" }, publication: { status: "verified" } });
     expect(provider.publishCount).toBe(1);
     await restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approved-restart-002" });
     expect(provider.publishCount).toBe(1);
@@ -270,7 +270,7 @@ describe("durable release workflow", () => {
       await expect(first.publishRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "publish-approval-expiry-001" })).rejects.toThrow("interrupted publish");
       vi.advanceTimersByTime(2_000);
       const restarted = new McpEditingService(repository, events, undefined, releases, provider, { approvalTtlSeconds: 1 });
-      await expect(restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approval-expiry-001" })).resolves.toMatchObject({ release: { status: "published" } });
+      await expect(restarted.reconcileRelease(context, { releaseId: preview.releaseId, releaseHash: preview.releaseHash, idempotencyKey: "reconcile-approval-expiry-001" })).resolves.toMatchObject({ release: { status: "published" }, publication: { status: "verified" } });
       expect(provider.publishCount).toBe(2);
     } finally {
       vi.useRealTimers();

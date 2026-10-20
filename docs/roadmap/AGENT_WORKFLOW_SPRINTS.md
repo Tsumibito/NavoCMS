@@ -3,8 +3,11 @@
 Дата планирования: 2026-09-05. Статус: **Sprint 8.1 accepted** — PR #53 объединён,
 staging обновлён, независимая операционная проверка завершена.
 [Приёмка](../operations/SPRINT_8_1_ACCEPTANCE.md).
-Sprint 8.2 прошёл живую проверку публикации и отката 2026-09-12. Закрытие UX
-подтверждения находится в работе; Sprint 8.3 начнётся после его приёмки.
+На 2026-10-20 код 8.2/8.3 выпущен, полный staging цикл обновления и отката
+многостраничного сайта и потребителя Sites проверен. Финальная UX-приёмка
+владельцем отделена от технического результата; реальные второй аккаунт WorkOS
+и браузерная визуальная проверка остаются ограничениями.
+[Проверки 8.2/8.3](../operations/SPRINT_8_2_8_3_ACCEPTANCE_2026_10_20.md).
 
 Основание: аудит `main` на `1b02acd29cab60bb74c9a80a401606c8540260b5` и поручение владельца
 подготовить задания исполнителю. Этот документ задаёт ближайший порядок работ вместо перехода
@@ -342,8 +345,8 @@ CI/deployment IDs, выполненными сценариями и решени
 | Спринт | Состояние | Условие старта |
 | --- | --- | --- |
 | 8.1 | Accepted | — |
-| 8.2 | Live technical cycle passed; UX closure in review | Приёмка одного действия Publish и восстановления входа |
-| 8.3 | Planned | 8.2 accepted |
-| 9.1 | Planned | 8.3 accepted + pilot bundle |
+| 8.2 | Implemented; live release/restart/rollback passed; final UX review pending | Owner UX sign-off; real second-account check remains |
+| 8.3 | Implemented; full-site/media update and CMS/Sites restore passed | Technical evidence recorded; owner sign-off follows 8.2 |
+| 9.1 | Core tools implemented; unfamiliar-task acceptance pending | 8.3 accepted + pilot bundle |
 | 9.2 | Planned | 9.1 accepted |
 | 9.3 | Planned | 9.2 accepted + окружения/клиенты для acceptance |
