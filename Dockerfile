@@ -55,7 +55,7 @@ ENV NAVOCMS_REVIEWED_SOURCE_COMMIT=${SOURCE_COMMIT}
 WORKDIR /app
 COPY --from=runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
-COPY --from=runtime /usr/local/bin/dotenvx /usr/local/bin/dotenvx
+RUN ln -s /usr/local/lib/node_modules/@dotenvx/dotenvx/src/cli/dotenvx.js /usr/local/bin/dotenvx
 COPY --from=runtime /usr/local/bin/navocms-entrypoint /usr/local/bin/navocms-entrypoint
 COPY --from=runtime --chown=postgres:postgres /app /app
 USER postgres
