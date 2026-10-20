@@ -93,6 +93,17 @@ integration("reviewed Astro artifact PostgreSQL boundary", () => {
         [tenantId, siteId, preview.releaseId]
       )).rows);
     expect(jobs).toEqual([{ attempt: 2, status: "succeeded" }]);
+    // Synthetic provider publication supplies the durable published snapshot for discovery.
+    const workflow = new PostgresReleaseWorkflowRepository(database!);
+    const release = await workflow.getRelease(humanRepositoryContext, preview.releaseId);
+    await workflow.approve(humanRepositoryContext, release.id, release.releaseHash, { actorKind: "human", policyVersion: "navocms.release-approval.v1", evidence: {}, expiresAt: new Date(Date.now()+60_000).toISOString(), scope: { tenantId, siteId, environmentId: release.environmentId } });
+    await workflow.beginPublication(humanRepositoryContext, release.id, release.releaseHash);
+    const publication = await workflow.completePublication(humanRepositoryContext, release.id, { artifactHash: release.artifact.hash, providerKey: "test.passport.v1", providerReference: "test:passport" });
+    await workflow.markVerified(humanRepositoryContext, release.id, publication.id);
+    const revision = await new PostgresEditingRepository(database!).getRevision(humanRepositoryContext, draft.draft.revisionId);
+    expect(revision.documentId).not.toBe(revision.variantId);
+    const passportContext = await restarted.siteContext(serviceRepositoryContext);
+    expect(passportContext.routes).toEqual([expect.objectContaining({ documentId: revision.documentId, variantId: revision.variantId, sectionId: `${revision.variantId}:main`, revisionId: revision.id })]);
   });
 
   it("registers as a human, resolves after restart as a service, and rejects replay drift", async () => {
