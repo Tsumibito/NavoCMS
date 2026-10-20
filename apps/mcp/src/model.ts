@@ -37,6 +37,7 @@ export interface PreviewPreparation {
   readonly artifactHash: string;
   readonly workflow: string;
   readonly previewUrl: string;
+  readonly pagePath?: string;
   readonly confirmationUrl?: string;
   readonly build: PreviewBuildStatus;
   readonly expiresAt: string;
