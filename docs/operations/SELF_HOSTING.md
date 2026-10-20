@@ -166,7 +166,8 @@ reviewed release first, followed by a separately tested upgrade.
 ## Schedule, alert and recovery objectives
 
 Install the provided systemd units only after the first manual backup/restore
-succeeds. The examples assume /opt/navocms and /var/backups/navocms. Keep all
+succeeds. The examples assume /opt/navocms and /var/backups/navocms. The latest archive
+link uses NAVOCMS_BACKUP_DIRECTORY, matching the Compose mount. Keep all
 backup generations; the owner defines off-host encrypted copies and retention.
 An archive on the CMS host alone does not protect against host loss.
 
@@ -188,3 +189,14 @@ and repeated after material changes; no production RTO is promised from fixture
 timing. Record snapshot time, restored table/object hashes, elapsed time, human
 interventions, off-host availability and the reviewed source SHA in the submission.
 Seven days of owner use and real model/client evaluations remain separate gates.
+
+## Companion for an existing Coolify runtime
+
+Use `deploy/self-host/operations.compose.yml` when the CMS is already managed by
+Coolify. Set NAVOCMS_COMPOSE_FILE to that path in the protected systemd coordinate
+file. This file contains only the operations service, so backup/monitor cannot
+start a second CMS or require its runtime decryption key. Pin the deployed source
+SHA, the encrypted operations environment and backup directory.
+Only DOTENV_OPS_PRIVATE_KEY enters the operations container. Build the operations
+image at that source, run doctor, backup and monitor manually before enabling the
+timers. The existing runtime is not restarted by this companion profile.

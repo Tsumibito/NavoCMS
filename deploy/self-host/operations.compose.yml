@@ -1,0 +1,16 @@
+# Operations companion for an existing Coolify runtime; no CMS service or runtime keys.
+services:
+  operations:
+    profiles: [operations]
+    image: navocms-operations:${NAVOCMS_SOURCE_COMMIT:?pin a reviewed commit}
+    build:
+      context: ../..
+      target: operations
+      args:
+        SOURCE_COMMIT: ${NAVOCMS_SOURCE_COMMIT}
+    environment:
+      DOTENV_PRIVATE_KEY: ${DOTENV_OPS_PRIVATE_KEY:-}
+      NAVOCMS_ENV_FILE: /run/navocms/operations.env
+    volumes:
+      - ${NAVOCMS_OPS_ENV_FILE:?encrypted operations file}:/run/navocms/operations.env:ro
+      - ${NAVOCMS_BACKUP_DIRECTORY:?private backup directory}:/backups

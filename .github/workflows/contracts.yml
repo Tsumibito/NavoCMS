@@ -118,6 +118,7 @@ jobs:
         run: |
           docker build --build-arg SOURCE_COMMIT=${{ github.sha }} --tag navocms:${{ github.sha }} .
           docker build --build-arg SOURCE_COMMIT=${{ github.sha }} --target operations --tag navocms-operations:${{ github.sha }} .
+          docker run --rm --entrypoint test navocms-operations:${{ github.sha }} -s /etc/ssl/certs/ca-certificates.crt
           docker run --rm --entrypoint pg_dump navocms-operations:${{ github.sha }} --version
           docker run --rm --entrypoint pg_restore navocms-operations:${{ github.sha }} --version
           docker run --rm --entrypoint dotenvx navocms-operations:${{ github.sha }} --version

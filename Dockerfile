@@ -53,6 +53,7 @@ FROM postgres:18-bookworm AS operations
 ARG SOURCE_COMMIT
 ENV NAVOCMS_REVIEWED_SOURCE_COMMIT=${SOURCE_COMMIT}
 WORKDIR /app
+COPY --from=runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/@dotenvx/dotenvx/src/cli/dotenvx.js /usr/local/bin/dotenvx
