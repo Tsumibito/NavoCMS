@@ -105,7 +105,16 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     this.#assertProject(input.projectKey);
     assertImmutableFiles(input.reference, input.files);
     await this.#preflightBranch(branch, environment);
-    const fileEntries = Object.entries(input.files).sort(([left], [right]) => left.localeCompare(right));
+    const redirects = input.files._redirects;
+    if (redirects !== undefined) parseRedirects(redirects);
+    const uploadFiles = { ...input.files };
+    if (redirects !== undefined) {
+      const proofPath = redirectProofPath(sha256(redirects));
+      if (Object.hasOwn(input.files, proofPath)) throw new CloudflareDeliveryError("CLOUDFLARE_REDIRECT_PROOF_COLLISION", "Redirect proof path already exists");
+      delete uploadFiles._redirects;
+      uploadFiles[proofPath] = redirects;
+    }
+    const fileEntries = Object.entries(uploadFiles).sort(([left], [right]) => left.localeCompare(right));
     const hashes = fileEntries.map(([path, body]) => pagesAssetHash(path, body));
     if (fileEntries.length !== input.reference.fileCount || hashes.length < 1 || hashes.length > 512) throw new CloudflareDeliveryError("CLOUDFLARE_ASSET_BOUNDS", "Cloudflare asset manifest exceeds delivery bounds");
 
@@ -129,6 +138,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     form.set("manifest", JSON.stringify(Object.fromEntries(fileEntries.map(([path, body]) => [`/${path}`, pagesAssetHash(path, body)]))));
     // This file is derived solely from the immutable reference and lets a bounded HTTPS probe
     // confirm the deployed output without trusting a mutable preview URL or response body.
+    if (redirects !== undefined) form.set("_redirects", new Blob([redirects], { type: "text/plain" }), "_redirects");
     form.set("_headers", new Blob([headersFile(input.reference, input.referenceHash, environment)], { type: "text/plain" }), "_headers");
     const response = await providerPhase("DEPLOY", () => this.#api(`/accounts/${this.#accountId}/pages/projects/${this.#projectKey}/deployments`, {
       method: "POST", body: form
@@ -159,7 +169,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     const files: ImmutableArtifactFile[] = [];
     let headers: Headers | undefined;
     for (const expected of input.reference.files) {
-      const live = await this.#request(new URL(livePath(expected.path), url.endsWith("/") ? url : `${url}/`), { method: "GET", redirect: "error", headers: { "accept": "*/*" } }, async (response, signal) => {
+      const live = await this.#request(new URL(expected.path === "_redirects" ? redirectProofPath(expected.sha256) : livePath(expected.path), url.endsWith("/") ? url : `${url}/`), { method: "GET", redirect: "error", headers: { "accept": "*/*" } }, async (response, signal) => {
         if (!response.ok) return { status: response.status, headers: response.headers };
         return { status: response.status, headers: response.headers, body: await boundedBody(response, expected.byteSize, signal) };
       }, remaining(deadline));
@@ -169,6 +179,12 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
       if (body === undefined) throw new CloudflareDeliveryError("CLOUDFLARE_LIVE_BODY_MISSING", "Cloudflare live response has no body");
       const digest = sha256(body);
       if (digest !== expected.sha256 || Buffer.byteLength(body, "utf8") !== expected.byteSize) throw new CloudflareDeliveryError("CLOUDFLARE_LIVE_BYTES_MISMATCH", "Cloudflare live bytes do not match the immutable artifact reference");
+      if (expected.path === "_redirects") {
+        for (const rule of parseRedirects(body)) {
+          const redirect = await this.#request(new URL(rule.from, url), { method: "GET", redirect: "manual" }, async response => ({ status: response.status, location: response.headers.get("location") }), remaining(deadline));
+          if (redirect.status !== 301 || !redirect.location || new URL(redirect.location, url).href !== new URL(rule.to, url).href) throw new CloudflareDeliveryError("CLOUDFLARE_LIVE_REDIRECT_MISMATCH", "Cloudflare redirect does not match the reviewed rule");
+        }
+      }
       files.push(Object.freeze({ path: expected.path, sha256: digest, byteSize: expected.byteSize }));
     }
     return Object.freeze({
@@ -314,6 +330,19 @@ function deploymentStatus(row: Record<string, unknown>): CloudflareDeployment["s
   return "queued";
 }
 
+// Pages consumes _redirects rather than serving it; verify a byte-identical
+// proof asset and the actual 301 behavior without changing the reviewed bundle.
+function redirectProofPath(digest: string): string { return `navocms-delivery/redirects-${digest}.txt`; }
+function parseRedirects(body: string): readonly { from: string; to: string }[] {
+  const lines = body.trim().split("\n");
+  if (lines.length < 1 || lines.length > 100) throw new CloudflareDeliveryError("CLOUDFLARE_REDIRECTS_INVALID", "Redirect rules exceed bounds");
+  return lines.map(line => {
+    const match = /^(\/[a-z0-9/_-]+) (\/[a-z0-9/_-]*) 301$/.exec(line);
+    if (!match || match[1]!.includes("//") || match[2]!.includes("//")) throw new CloudflareDeliveryError("CLOUDFLARE_REDIRECTS_INVALID", "Only reviewed local permanent redirects are supported");
+    return { from: match[1]!, to: match[2]! };
+  });
+}
+
 function headersFile(reference: ImmutableArtifactReference, referenceHash: string, environment: "preview" | "production"): string {
   const cacheControl = environment === "preview" ? "private, no-store" : "public, max-age=300, must-revalidate";
   return `/*\n  X-NavoCMS-Artifact-Reference: ${referenceHash}\n  X-NavoCMS-Release-Hash: ${reference.releaseHash}\n  X-NavoCMS-Output-Hash: ${reference.outputHash}\n  Cache-Control: ${cacheControl}\n`;
@@ -381,7 +410,7 @@ function pagesAssetHash(path: string, body: string): string {
   const identity = `${Buffer.from(body).toString("base64")}${extension}`;
   return blake3(identity).toString("hex").slice(0, 32);
 }
-function safeOutputPath(value: string): boolean { return /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*\/$)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && Buffer.byteLength(value, "utf8") <= 512; }
+function safeOutputPath(value: string): boolean { return value === "_redirects" || /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*\/$)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && Buffer.byteLength(value, "utf8") <= 512; }
 function canonical(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; if (value !== null && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`; return JSON.stringify(value) ?? "null"; }
 
 async function parseResponse(response: Response, signal: AbortSignal): Promise<Record<string, unknown>> {

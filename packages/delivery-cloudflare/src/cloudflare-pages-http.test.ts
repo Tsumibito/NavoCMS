@@ -64,6 +64,40 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     await expect((form.get("_headers") as Blob).text()).resolves.toContain(`X-NavoCMS-Artifact-Reference: ${referenceHash}`);
   });
 
+
+  it("uploads redirect configuration separately and verifies both its bytes and live behavior", async () => {
+    const redirectBody = "/old /en/ 301\n";
+    const proofPath = `navocms-delivery/redirects-${sha256(redirectBody)}.txt`;
+    const files = { _redirects: redirectBody, "en/index.html": "<html>en</html>" };
+    const complete = { ...reference, outputHash: sha256(JSON.stringify(files)), fileCount: 2, byteSize: Buffer.byteLength(redirectBody) + 15,
+      files: Object.entries(files).map(([path, body]) => ({ path, sha256: sha256(body), byteSize: Buffer.byteLength(body) })) };
+    const calls: { url: string; init: RequestInit }[] = [];
+    const responses = [json({ result: { production_branch: "main" } }), json({ result: { jwt: "upload-token-0123456789" } }),
+      json({ result: [] }), json({ result: { id: "production-1", environment: "production", latest_stage: { status: "success" } } })];
+    const transport = new FetchCloudflarePagesTransport({ accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
+      fetcher: async (url, init = {}) => { calls.push({ url: String(url), init }); return responses.shift()!; } });
+    await transport.deployProduction({ projectKey: "pages-project", productionBranch: "main", reference: complete, referenceHash, files });
+    const form = calls.at(-1)!.init.body as FormData;
+    expect(await (form.get("_redirects") as Blob).text()).toBe(redirectBody);
+    const uploadedManifest = JSON.parse(String(form.get("manifest")));
+    expect(uploadedManifest).not.toHaveProperty("/_redirects");
+    expect(uploadedManifest).toHaveProperty(`/${proofPath}`);
+    for (const mode of ["valid", "wrong-rule", "wrong-bytes"] as const) {
+      const paths: string[] = [];
+      const live = new FetchCloudflarePagesTransport({ accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
+        fetcher: async url => {
+          const path = new URL(String(url)).pathname; paths.push(path);
+          if (String(url).startsWith("https://api.cloudflare.com/")) return json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: ["https://production.pages.dev/"] } } });
+          if (path === `/${proofPath}`) return new Response(mode === "wrong-bytes" ? "/bad /en/ 301\n" : redirectBody, { headers: { "x-navocms-artifact-reference": referenceHash } });
+          if (path === "/old") return new Response(null, { status: 301, headers: { location: mode === "wrong-rule" ? "/elsewhere/" : "/en/" } });
+          return new Response("<html>en</html>");
+        } });
+      const probe = live.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference: complete });
+      if (mode === "valid") { await expect(probe).resolves.toMatchObject({ status: 200, files: complete.files }); expect(paths).toContain("/old"); }
+      else await expect(probe).rejects.toMatchObject({ code: mode === "wrong-rule" ? "CLOUDFLARE_LIVE_REDIRECT_MISMATCH" : "CLOUDFLARE_LIVE_BYTES_MISMATCH" });
+    }
+  });
+
   it("rejects another project before the transport can receive a request", async () => {
     const transport = new FetchCloudflarePagesTransport({
       accountId: "account-1", projectKey: "pages-project", productionBranch: "main", apiToken: async () => "api-token-0123456789",
