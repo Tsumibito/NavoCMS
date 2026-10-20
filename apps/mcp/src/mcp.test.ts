@@ -412,6 +412,17 @@ describe("MCP editing service", () => {
       .rejects.toMatchObject({ code: "METADATA_KEY_NOT_FOUND" });
   });
 
+  it("applies reviewed design and reads durable comments/preview through MCP",async()=>{
+    const {service,context}=fixture("editor");const server=createMcpServer(service,context);const client=new Client({name:"page-design-acceptance",version:"1.0.0"});const [a,b]=InMemoryTransport.createLinkedPair();await Promise.all([server.connect(b),client.connect(a)]);
+    try{const created=await service.createDraft(context,{typeName:"article",slug:"design-transport",locale:"en",title:"Design transport",markdown:"# Transport\n",idempotencyKey:"design-transport-create-001"})as DraftResult;
+      const read=await client.callTool({name:"page_design_get",arguments:{revisionId:created.draft.revisionId}});expect(read.isError).not.toBe(true);const model=read.structuredContent as any;
+      const saved=await client.callTool({name:"page_change_apply",arguments:{revisionId:model.revisionId,baseSourceHash:model.baseSourceHash,designOperations:[{op:"variant",elementId:model.composition.sections[0].id,value:"compact"}],idempotencyKey:"design-transport-save-001"}});expect(saved.isError).not.toBe(true);const change=saved.structuredContent as any;
+      const comment=await client.callTool({name:"page_comment_create",arguments:{revisionId:change.draft.revisionId,elementId:model.composition.sections[0].id,field:"body",text:"Compact transport comment",idempotencyKey:"design-transport-comment-001"}});expect(comment.isError).not.toBe(true);
+      const comments=await client.callTool({name:"page_comments_list",arguments:{revisionId:change.draft.revisionId}});expect(comments.structuredContent).toMatchObject({comments:[{text:"Compact transport comment",status:"open"}]});
+      const preview=await client.callTool({name:"page_change_preview",arguments:{changeSetId:change.changeSet.id}});expect(preview.isError).not.toBe(true);const status=await client.callTool({name:"page_change_status",arguments:{changeSetId:change.changeSet.id}});expect(status.structuredContent).toMatchObject({changeSet:{status:"saved"},preview:{sourceHash:created.draft.sourceHash}});
+    }finally{await client.close();await server.close();}
+  });
+
   it("advertises and reads omitted metadata through the MCP transport", async () => {
     const { service, context } = fixture("editor");
     const server = createMcpServer(service, context);

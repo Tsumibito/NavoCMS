@@ -21,6 +21,6 @@ ALTER TABLE page_editor_records FORCE ROW LEVEL SECURITY;
 CREATE POLICY site_scope ON page_editor_records TO navocms_app
  USING (tenant_id=current_tenant_id() AND site_id=current_site_id())
  WITH CHECK (tenant_id=current_tenant_id() AND site_id=current_site_id());
-REVOKE ALL ON page_editor_records FROM PUBLIC,navocms_plugin;
+REVOKE ALL ON page_editor_records FROM PUBLIC,navocms_plugin,navocms_app;
 GRANT SELECT,INSERT ON page_editor_records TO navocms_app;
 COMMIT;

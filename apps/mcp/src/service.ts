@@ -459,7 +459,7 @@ export class McpEditingService {
     const revision = await this.#repository.getRevision(repository, revisionId);
     const content = await this.getContent(context, revisionId);
     let nodeBytes = 0;
-    const editableNodes = revision.ast.nodes.filter(node => ["paragraph","heading"].includes(node.type) && node.text.length <= 20000).filter(node => { nodeBytes += Buffer.byteLength(node.text); return nodeBytes <= 48*1024; }).slice(0,32);
+    const editableNodes = revision.ast.nodes.filter(node => ["paragraph","heading"].includes(node.type)).map(node => ({ ...node,text: revision.source.slice(node.start,node.end) })).filter(node => node.text.length <= 20000).filter(node => { nodeBytes += Buffer.byteLength(node.text); return nodeBytes <= 48*1024; }).slice(0,32);
     return safe({ editableNodes,revisionId, documentId: revision.documentId, variantId: revision.variantId, baseSourceHash: revision.sourceHash,
       composition: revision.composition ?? defaultPageComposition(revision.variantId), policy: PAGE_DESIGN_POLICY, content,
       editorUrl: `${this.#releaseConfig.previewBaseUrl}/editor/${revisionId}`, permissions: effectivePermissions(context.authorization.layers), status: "draft-or-saved-revision" });
