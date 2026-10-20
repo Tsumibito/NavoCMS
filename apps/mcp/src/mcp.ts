@@ -13,6 +13,7 @@ import { KernelError } from "@navocms/kernel";
 import { effectivePermissions, SecurityError, type Permission } from "@navocms/security";
 import { z } from "zod";
 
+import { pageChangeShape, pageCommentShape } from "./page-editing.js";
 import { McpEditingError } from "./errors.js";
 import type { McpRequestContext } from "./model.js";
 import { McpMediaService } from "./media-service.js";
@@ -60,6 +61,13 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     title: "Read site schemas and capabilities", description: "Read the bounded canonical site model, registered field schemas, relations, locales and release rules before creating or changing structured content.",
     inputSchema: {}, annotations: readOnlyAnnotations()
   }, safeTool(async () => result("Site passport loaded", await service.sitePassport(context))));
+
+  if (canRead) server.registerTool("page_design_get", { title: "Read editable page design", description: "Read stable sections, slots, fields and allowed recipes/variants. Includes a protected web editor link; no runtime code is accepted.", inputSchema: { revisionId: z.string().uuid() }, annotations: readOnlyAnnotations() }, safeTool(async ({ revisionId }) => result("Page design loaded",await service.pageDesign(context,revisionId))));
+  if (canDraft) server.registerTool("page_change_apply", { title: "Save text and approved design changes", description: "Create an immutable revision and durable change-set from the exact base revision/hash. Unsupported design becomes a development request and never installs CSS/JS.", inputSchema: pageChangeShape, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, safeTool(async input => result("Page change recorded",await service.applyPageChange(context,input))));
+  if (canRead) server.registerTool("page_change_status", { title: "Read a durable page change", description: "Read before/after, affected objects, validation and any saved preview. Safe to continue from another conversation.", inputSchema: { changeSetId: z.string().uuid() }, annotations: readOnlyAnnotations() }, safeTool(async ({ changeSetId }) => result("Page change loaded",await service.pageChangeStatus(context,changeSetId))));
+  if (canDraft) server.registerTool("page_change_preview", { title: "Preview a saved page change", description: "Prepare the real site preview for a saved change-set. This does not publish or record a human decision.", inputSchema: { changeSetId: z.string().uuid() }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, safeTool(async ({ changeSetId }) => result("Page change preview prepared",await service.previewPageChange(context,changeSetId))));
+  if (canDraft) server.registerTool("page_comment_create", { title: "Comment on a page element", description: "Store a site/revision/element/field anchor and optional viewport. Removed elements remain explicitly orphaned.", inputSchema: pageCommentShape, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, safeTool(async input => result("Page comment saved",await service.addPageComment(context,input))));
+  if (canRead) server.registerTool("page_comments_list", { title: "Read anchored page comments", description: "Read 20 comments for this page and their anchor status against the selected revision. Follow nextCursor.", inputSchema: { revisionId: z.string().uuid(), cursor: z.string().uuid().optional() }, annotations: readOnlyAnnotations() }, safeTool(async ({ revisionId,cursor }) => result("Page comments loaded",await service.pageComments(context,revisionId,cursor))));
 
   if (canRead) server.registerTool("site_components", {
     title: "Read reviewed site components", description: "Read canonical component IDs, slots, field bindings and safe examples from the trusted design policy. Editorial text never defines components.",
@@ -196,7 +204,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     description: "Build an expiring noindex capability URL and bind it to the exact release and artifact hashes. This does not publish.",
     inputSchema: { revisionId: z.string().min(1),
       additionalRevisionIds: z.array(z.string().uuid()).max(99).optional(), idempotencyKey: idempotencyKeySchema() },
-    annotations: writeAnnotations()
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async ({ revisionId, idempotencyKey, additionalRevisionIds }) => result("Protected preview created; nothing was published", await service.preparePreview(context, revisionId, idempotencyKey, additionalRevisionIds))));
 
   if (canRead) server.registerTool("release_status", {
@@ -224,21 +232,21 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     title: "Approve an exact confirmed release",
     description: "Checkpoint the independent human confirmation into the durable approval for the supplied release hash. Requires a current browser confirmation receipt whose output manifest digest still matches the registered build; the MCP bearer alone can never approve. A stale or changed hash fails closed.",
     inputSchema: exactReleaseInput(),
-    annotations: writeAnnotations()
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async (input) => result("Exact release approved; it is not published yet", await service.approveRelease(context, input))));
 
   if (canPublish) server.registerTool("release_publish", {
     title: "Publish and verify an approved release",
     description: "Publish the identical previewed artifact, verify its hash, and checkpoint the durable workflow. Requires content:publish.",
     inputSchema: exactReleaseInput(),
-    annotations: writeAnnotations()
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async (input) => result("Approved release published and verified", await service.publishRelease(context, input)), { effectful: true }));
 
   if (canPublish) server.registerTool("release_reconcile", {
     title: "Reconcile an incomplete publication",
     description: "Resume or verify a partially completed publication without duplicating an already checkpointed effect.",
     inputSchema: exactReleaseInput(),
-    annotations: writeAnnotations()
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async (input) => result("Release workflow reconciled", await service.reconcileRelease(context, input)), { effectful: true }));
 
   if (canPublish) server.registerTool("release_rollback", {
@@ -314,7 +322,7 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
       provenance: z.object({ kind: z.enum(["upload", "remote-ingest", "import"]), sourceUrl: z.string().url().max(2048).optional(), receivedAt: z.string().datetime() }).strict(),
       rights: z.object({ license: z.string().min(1).max(200), holder: z.string().max(200).optional(), expiresAt: z.string().datetime().optional(), restricted: z.boolean() }).strict(),
       idempotencyKey: z.string().min(16).max(128)
-    }, annotations: writeAnnotations()
+    }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async ({ expectedMediaType, provenance, ...input }) => result("Media upload intent created", await media.prepare(context, {
     ...input,
     provenance: {
@@ -327,7 +335,7 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
   server.registerTool("media_upload_finalize", {
     title: "Finalize a verified media upload",
     description: "Verify the bounded storage object and persist its immutable original. Requires media:write. No binary payload is accepted.",
-    inputSchema: { intentId: z.string().uuid(), uploadedStorageKey: z.string().min(1).max(512), idempotencyKey: z.string().min(16).max(128) }, annotations: writeAnnotations()
+    inputSchema: { intentId: z.string().uuid(), uploadedStorageKey: z.string().min(1).max(512), idempotencyKey: z.string().min(16).max(128) }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async (input) => result("Media upload finalized", await media.finalize(context, input))));
   server.registerTool("media_variant_generate", {
     title: "Generate a verified responsive media variant",
@@ -341,7 +349,7 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
       crop: z.enum(["center", "focal"]).optional(),
       focalPoint: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }).strict().optional(),
       idempotencyKey: z.string().min(16).max(128)
-    }, annotations: writeAnnotations()
+    }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async ({ crop, focalPoint, ...input }) => result("Media variant generated", await media.generateVariant(context, {
     ...input,
     ...(crop ? { crop } : {}),
@@ -355,7 +363,7 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
   server.registerTool("media_reference_create", {
     title: "Create a media reference",
     description: "Attach an existing asset to a bounded owner reference. Requires media:write.",
-    inputSchema: { assetId: z.string().uuid(), ownerType: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), ownerId: z.string().uuid(), alt: z.string().min(1).max(512).optional(), purpose: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), idempotencyKey: z.string().min(16).max(128) }, annotations: writeAnnotations()
+    inputSchema: { assetId: z.string().uuid(), ownerType: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), ownerId: z.string().uuid(), alt: z.string().min(1).max(512).optional(), purpose: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), idempotencyKey: z.string().min(16).max(128) }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async ({ alt, ...input }) => result("Media reference created", await media.createReference(context, { ...input, ...(alt ? { alt } : {}) }))));
   server.registerTool("media_reference_remove", {
     title: "Remove a media reference",
@@ -439,7 +447,7 @@ function registerReviewTools(server: McpServer, service: McpEditingService, cont
     title: "Show preview handoff",
     description: "Render whether an immutable revision is safely bound and ready for the protected preview workflow.",
     inputSchema: { revisionId: z.string().min(1), idempotencyKey: idempotencyKeySchema() },
-    annotations: writeAnnotations(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: appMeta
   }, safeTool(async ({ revisionId, idempotencyKey }) => {
     const preview = await service.preparePreview(context, revisionId, idempotencyKey) as unknown as Record<string, unknown>;

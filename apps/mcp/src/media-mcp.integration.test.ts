@@ -1,3 +1,4 @@
+import { defaultPageComposition } from "@navocms/content";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 
@@ -47,7 +48,7 @@ integration("MCP media PostgreSQL bridge", () => {
     const site = { tenantId: scope.tenantId, siteId: scope.siteId, name: "Media test", primaryLocale: "en", locales: ["en"] };
     const draft = await editing.createDraft({ site, typeName: "landing-page", slug: `media-patch-${suffix}`, title: "Media patch", source: "# Media patch\n", locale: "en", actorId: scope.principalId });
     await repository.createReference({ ...scope, principalKind: "human" }, { assetId: received.assetId, ownerType: "content.revision", ownerId: draft.revisionId, purpose: "hero", alt: "Sailing photograph", idempotencyKey: `reference-${suffix}` });
-    const patched = await editing.patchDraft({ site, revisionId: draft.revisionId, baseSourceHash: draft.sourceHash, operations: [], metadataPatch: { title: "Updated media patch" }, actorId: scope.principalId });
+    const patched = await editing.patchDraft({ site, revisionId: draft.revisionId, baseSourceHash: draft.sourceHash, operations: [], metadataPatch: { title: "Updated media patch" }, composition: defaultPageComposition((await editing.getRevision({site,principalId:scope.principalId},draft.revisionId)).variantId), actorId: scope.principalId });
     const refs = await database!.withScope(scope, async client => (await client.query<{ owner_id: string; alt: string; purpose: string }>("SELECT owner_id,alt,purpose FROM navocms.media_references WHERE asset_id=$1", [received.assetId])).rows);
     expect(refs).toEqual(expect.arrayContaining([{ owner_id: draft.revisionId, alt: "Sailing photograph", purpose: "hero" }, { owner_id: patched.draft.revisionId, alt: "Sailing photograph", purpose: "hero" }]));
     const runtime = new StagingOperationalRuntime({ database: database!, environmentKey: "default", reviewedSourceCommit: "a".repeat(40), toolchainDirectory: "/unused", readinessContext: { site, principalId: scope.principalId }, runtimePrincipalId: scope.principalId, mediaStorage: storage, mediaBaseUrl: "https://cms.example.test", runner: { attest: async () => { throw new Error("Media-boundary test does not build Astro"); }, build: async () => { throw new Error("Unexpected build"); } } });

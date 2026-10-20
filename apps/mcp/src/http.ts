@@ -20,6 +20,10 @@ import { MEDIA_LIMITS } from "@navocms/media";
 import { createMcpServer } from "./mcp.js";
 import { MCP_LIMITS } from "./model.js";
 import { McpEditingService } from "./service.js";
+import { renderPageEditor } from "./page-editor-ui.js";
+import { pageChangeSchema, pageCommentSchema } from "./page-editing.js";
+import { ContentError } from "@navocms/content";
+import { McpEditingError } from "./errors.js";
 import { McpMediaService } from "./media-service.js";
 
 export interface McpHttpOptions {
@@ -126,6 +130,8 @@ export function createMcpHttpServer(options: McpHttpOptions) {
     if (request.method === "GET" && request.url === metadataPath) {
       return sendJson(response, 200, metadata);
     }
+    const editorRoute = /^\/editor\/([a-f0-9-]{36})$/.exec(new URL(request.url ?? "/",resourceUrl.origin).pathname);
+    if (editorRoute) return servePageEditor(response,options,browserAuth,request,editorRoute[1]!);
     const snapshotRoute = /^\/delivery\/([a-f0-9]{64})\.json$/.exec(request.url ?? "");
     if (request.method === "GET" && snapshotRoute && options.delivery) {
       const snapshot = await options.delivery.snapshot(snapshotRoute[1]!).catch(() => undefined);
@@ -371,7 +377,7 @@ function sendHtml(response: ServerResponse, status: number, body: string): void 
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.setHeader("cache-control", "private, no-store, max-age=0");
   response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
-  response.setHeader("content-security-policy", CONFIRMATION_CSP);
+  if (!response.hasHeader("content-security-policy")) response.setHeader("content-security-policy", CONFIRMATION_CSP);
   response.setHeader("referrer-policy", "no-referrer");
   response.end(body);
 }
@@ -386,6 +392,51 @@ async function readBody(request: IncomingMessage, maximumBytes: number): Promise
     chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+async function servePageEditor(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, request: IncomingMessage, revisionId: string): Promise<void> {
+  response.setHeader("cache-control","private, no-store"); response.setHeader("referrer-policy","no-referrer"); response.setHeader("x-robots-tag","noindex, nofollow");
+  if (!["GET","POST"].includes(request.method ?? "")) return sendJson(response,405,{ error: "METHOD_NOT_ALLOWED" });
+  const session = await resolveBrowserSession(response,options,browserAuth,request,undefined,"content:read");
+  if (session.error) {
+    if (session.error.status === 401 && request.method === "GET") return startLogin(response,options,browserAuth,"",request,isSecureRequest(request),false,`/editor/${revisionId}`);
+    return request.method === "GET" ? sendHtml(response,session.error.status,confirmationShell(session.error.title,escapeHtml(session.error.body))) : sendJson(response,session.error.status,{ error: "EDITOR_SESSION_REQUIRED",nextAction: "Reopen this editor link and sign in" });
+  }
+  const context = { authorization: session.context! }; const path = `/editor/${revisionId}`;
+  try {
+    const model = await options.service.pageDesign(context,revisionId);
+    if (request.method === "GET") {
+      const nonce = randomBytes(24).toString("base64url");
+      const csrf = sealBrowserValue({ sessionId: session.sessionId,revisionId,nonce,expiresAt: Date.now()+86400000 },options.confirmationLogin!.clientSecret,"editor-csrf");
+      appendCookie(response,`navocms_editor_csrf=${csrf}; HttpOnly; SameSite=Strict; Path=${path}; Max-Age=86400${isSecureRequest(request)?"; Secure":""}`);
+      response.setHeader("content-security-policy",`default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
+      const comments = await options.service.pageComments(context,revisionId) as { comments: Record<string,unknown>[] };
+      let changeSetId = new URL(request.url ?? path,"http://localhost").searchParams.get("change") ?? "";
+      if (changeSetId) { if (!/^[a-f0-9-]{36}$/.test(changeSetId)) throw new McpEditingError("PAGE_CHANGE_NOT_FOUND","Invalid change ID"); const change = await options.service.pageChangeStatus(context,changeSetId) as { changeSet: { resultRevisionId: string } }; if (change.changeSet.resultRevisionId !== revisionId) throw new McpEditingError("PAGE_CHANGE_NOT_FOUND","Change belongs to another revision"); }
+      return sendHtml(response,200,renderPageEditor(model,comments.comments,csrf,nonce,effectivePermissions(session.context!.layers).includes("content:draft"),changeSetId));
+    }
+    if (request.headers.origin !== new URL(options.resource).origin) return sendJson(response,403,{ error: "EDITOR_ORIGIN_REJECTED" });
+    const body = JSON.parse(await readBody(request,64*1024)) as Record<string,unknown>;
+    const cookie = parseCookies(request.headers.cookie).navocms_editor_csrf;
+    const csrf = openBrowserValue(cookie,options.confirmationLogin!.clientSecret,"editor-csrf") as { sessionId?: string; revisionId?: string; expiresAt?: number } | undefined;
+    if (!cookie || !csrf || body.csrf !== cookie || csrf.sessionId !== session.sessionId || csrf.revisionId !== revisionId || !csrf.expiresAt || csrf.expiresAt <= Date.now()) return sendJson(response,403,{ error: "EDITOR_CSRF_REJECTED" });
+    const { action,csrf: _csrf,...input } = body;
+    if ((action === "save" || action === "comment") && input.revisionId !== revisionId) return sendJson(response,403,{ error: "EDITOR_REVISION_MISMATCH" });
+    if (action === "save") return sendJson(response,200,await options.service.applyPageChange(context,pageChangeSchema.parse(input)));
+    if (action === "comment") return sendJson(response,200,await options.service.addPageComment(context,pageCommentSchema.parse(input)));
+    if (action === "preview") {
+      if (typeof input.changeSetId === "string") { const change = await options.service.pageChangeStatus(context,input.changeSetId) as { changeSet: { resultRevisionId: string } }; if (change.changeSet.resultRevisionId !== revisionId) return sendJson(response,403,{ error: "EDITOR_REVISION_MISMATCH" }); }
+      const preview = typeof input.changeSetId === "string" ? await options.service.previewPageChange(context,input.changeSetId) : { preview: await options.service.preparePreview(context,revisionId,String(input.idempotencyKey ?? "")) };
+      return sendJson(response,200,preview);
+    }
+    if (action === "previewStatus" && typeof input.releaseId === "string" && /^[a-f0-9-]{36}$/.test(input.releaseId)) return sendJson(response,200,await options.service.releaseBuildStatus(context,input.releaseId));
+    return sendJson(response,400,{ error: "EDITOR_ACTION_INVALID" });
+  } catch(error) {
+    const code = error instanceof ContentError || error instanceof McpEditingError || error instanceof SecurityError ? error.code : "EDITOR_INPUT_INVALID";
+    const conflict = code === "REVISION_NOT_CURRENT" || code === "SOURCE_HASH_MISMATCH";
+    const current = error instanceof ContentError ? error.details.currentRevisionId : undefined;
+    return sendJson(response,conflict ? 409 : code.includes("NOT_FOUND") ? 404 : error instanceof SecurityError ? 403 : 400,{ error: code,...(typeof current === "string" ? { currentRevisionId: current } : {}),nextAction: conflict ? "Keep your input, open the current revision and reapply the change" : "Check the selected element, allowed design options and your access" });
+  }
 }
 
 async function confirmationPage(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean): Promise<void> {
@@ -561,7 +612,7 @@ function openPendingLogin(value: string | undefined, secret: string): PendingBro
   if (!login || typeof login.state !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(login.state) ||
     typeof login.nonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(login.nonce) ||
     typeof login.verifier !== "string" || !/^[A-Za-z0-9_-]{64}$/.test(login.verifier) ||
-    typeof login.returnUrl !== "string" || !/^\/confirmations\/[A-Za-z0-9_-]{43}$/.test(login.returnUrl) ||
+    typeof login.returnUrl !== "string" || !/^(?:\/confirmations\/[A-Za-z0-9_-]{43}|\/editor\/[a-f0-9-]{36})$/.test(login.returnUrl) ||
     !Number.isSafeInteger(login.createdAt) || login.createdAt > Date.now()) return undefined;
   return login;
 }
@@ -575,7 +626,7 @@ function openPendingLogin(value: string | undefined, secret: string): PendingBro
  * delegated agent identities, foreign sites, and read-only principals are
  * rejected before any form or decision exists.
  */
-async function resolveBrowserSession(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, request: IncomingMessage, view: { tenantId: string; siteId: string }): Promise<{ principal?: { principalId?: string; issuer: string; subject: string }; accountLabel?: string; error?: { status: number; title: string; body: string } }> {
+async function resolveBrowserSession(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, request: IncomingMessage, view: { tenantId: string; siteId: string } | undefined, permission: Permission = "content:publish"): Promise<{ context?: AuthorizationContext; sessionId?: string; principal?: { principalId?: string; issuer: string; subject: string }; accountLabel?: string; error?: { status: number; title: string; body: string } }> {
   const cookie = parseCookies(request.headers.cookie)[CONFIRMATION_SESSION_COOKIE];
   const record = openSession(cookie, options.confirmationLogin?.clientSecret);
   if (!record) {
@@ -622,10 +673,10 @@ async function resolveBrowserSession(response: ServerResponse, options: McpHttpO
   if (context.principal.kind !== "human" || verified.principal.kind !== "human") {
     return { error: { status: 403, title: "Not authorized", body: "A delegated agent session cannot record this decision; the confirmation must come from your own logged-in human session." } };
   }
-  if (context.tenantId !== view.tenantId || context.siteId !== view.siteId) {
+  if (view && (context.tenantId !== view.tenantId || context.siteId !== view.siteId)) {
     return { error: { status: 403, title: "Not authorized", body: "Your session belongs to another site; this confirmation is scoped to the release's site." } };
   }
-  if (!effectivePermissions(context.layers).includes("content:publish")) {
+  if (!effectivePermissions(context.layers).includes(permission)) {
     return { error: { status: 403, title: "Not authorized", body: "Your session does not hold publication authority for this site." } };
   }
   const scope = { id: record.id, tenantId: context.tenantId, siteId: context.siteId, principalId: context.principal.id };
@@ -636,11 +687,11 @@ async function resolveBrowserSession(response: ServerResponse, options: McpHttpO
     return { error: { status: 401, title: "Human session required", body: "This session was signed out. Sign in again." } };
   }
   if (refreshedCookie) appendCookie(response, `${CONFIRMATION_SESSION_COOKIE}=${refreshedCookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(1, Math.floor((record.expiresAt - Date.now()) / 1000))}${isSecureRequest(request) ? "; Secure" : ""}`);
-  return { principal: { principalId: context.principal.id, issuer: context.principal.issuer, subject: context.principal.subject }, accountLabel: record.accountLabel ?? context.principal.subject };
+  return { context,sessionId: record.id,principal: { principalId: context.principal.id, issuer: context.principal.issuer, subject: context.principal.subject }, accountLabel: record.accountLabel ?? context.principal.subject };
 }
 
 /** Starts the OIDC authorization-code login (PKCE S256, single-use state). */
-function startLogin(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean, force = false): void {
+function startLogin(response: ServerResponse, options: McpHttpOptions, browserAuth: BrowserAuth, token: string, request: IncomingMessage, secure: boolean, force = false, returnPath?: string): void {
   const login = options.confirmationLogin;
   if (!login) {
     return sendHtml(response, 503, confirmationShell("Login unavailable", "Confirmation login is not configured for this deployment; the administrator must register the confirmation client with the identity provider first."));
@@ -652,7 +703,7 @@ function startLogin(response: ServerResponse, options: McpHttpOptions, browserAu
   const verifier = randomBytes(48).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const nonce = randomBytes(32).toString("base64url");
-  const pending: PendingBrowserLogin = { state, verifier, nonce, returnUrl: `/confirmations/${token}`, createdAt: Date.now() };
+  const pending: PendingBrowserLogin = { state, verifier, nonce, returnUrl: returnPath ?? `/confirmations/${token}`, createdAt: Date.now() };
   const loginCookie = sealBrowserValue(pending, login.clientSecret, "browser-login");
   const proto = request.headers["x-forwarded-proto"] === "https" || secure ? "https" : "http";
   const redirectUri = `${proto}://${request.headers.host ?? "localhost"}/confirmations/callback`;

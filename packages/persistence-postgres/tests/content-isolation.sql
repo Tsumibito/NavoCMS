@@ -25,6 +25,10 @@ INSERT INTO content_revisions (
   ('33400000-0000-4000-8000-000000000003', '30000000-0000-4000-8000-000000000003', '33000000-0000-4000-8000-000000000003', '33200000-0000-4000-8000-000000000003', '33300000-0000-4000-8000-000000000003', 1, '# One', repeat('a', 64), '{}', '{}'),
   ('44400000-0000-4000-8000-000000000004', '40000000-0000-4000-8000-000000000004', '44000000-0000-4000-8000-000000000004', '44200000-0000-4000-8000-000000000004', '44300000-0000-4000-8000-000000000004', 1, '# Two', repeat('b', 64), '{}', '{}');
 
+INSERT INTO page_editor_records(id,tenant_id,site_id,variant_id,revision_id,kind,data_json) VALUES
+ ('33500000-0000-4000-8000-000000000003','30000000-0000-4000-8000-000000000003','33000000-0000-4000-8000-000000000003','33300000-0000-4000-8000-000000000003','33400000-0000-4000-8000-000000000003','comment','{}'),
+ ('44500000-0000-4000-8000-000000000004','40000000-0000-4000-8000-000000000004','44000000-0000-4000-8000-000000000004','44300000-0000-4000-8000-000000000004','44400000-0000-4000-8000-000000000004','comment','{}');
+
 SET ROLE navocms_app;
 SELECT set_config('navocms.tenant_id', '30000000-0000-4000-8000-000000000003', true);
 SELECT set_config('navocms.site_id', '33000000-0000-4000-8000-000000000003', true);
@@ -34,6 +38,15 @@ DO $assertions$
 DECLARE visible_documents integer;
 DECLARE visible_revisions integer;
 BEGIN
+  IF (SELECT count(*) FROM navocms.page_editor_records) <> 1 THEN RAISE EXCEPTION 'editor records leaked across sites'; END IF;
+  BEGIN
+    INSERT INTO navocms.page_editor_records(id,tenant_id,site_id,variant_id,revision_id,kind,data_json) VALUES
+    ('44600000-0000-4000-8000-000000000004','40000000-0000-4000-8000-000000000004','44000000-0000-4000-8000-000000000004','44300000-0000-4000-8000-000000000004','44400000-0000-4000-8000-000000000004','comment','{}');
+    RAISE EXCEPTION 'foreign editor record insert succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN
+    UPDATE navocms.page_editor_records SET data_json='{}'; RAISE EXCEPTION 'editor record rewrite succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
   SELECT count(*) INTO visible_documents FROM navocms.content_documents;
   IF visible_documents <> 1 THEN RAISE EXCEPTION 'RLS exposed % documents instead of 1', visible_documents; END IF;
 

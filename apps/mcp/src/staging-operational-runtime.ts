@@ -98,7 +98,7 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         if (record && (record.fields.length > 64 || record.fields.some(field => field.length > 128))) throw new McpEditingError("SITE_PASSPORT_BOUNDS", "Published field inventory exceeds the passport budget");
         if (!record) throw new McpEditingError("SITE_SNAPSHOT_REVISION_MISSING", "Published revision is missing");
         return { path: route.path, locale: route.locale, documentId: record.document_id, variantId: record.variant_id, revisionId: route.revisionId,
-          typeName: record.type_name, sectionId: `${record.variant_id}:main`, componentId: route.componentId, dataSource: "content.revision", fields: [...new Set([...record.fields, "media"])].sort() };
+          ...(route.composition ? { sections: route.composition.sections } : {}), typeName: record.type_name, sectionId: `${record.variant_id}:main`, componentId: route.componentId, dataSource: "content.revision", fields: [...new Set([...record.fields, "media"])].sort() };
       }), redirects: input?.render.redirects ?? [], components: STAGING_SITE_COMPONENTS,
       integrations: { build: "reviewed-astro", media: "injected-immutable-storage" }, policyDigest: STAGING_ASTRO_POLICY_DIGEST };
   }
@@ -150,7 +150,7 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
       )).rows[0];
       if (!row) throw new McpEditingError("SITE_SNAPSHOT_REVISION_MISSING", "Published revision is missing");
       return { path: route.path, locale: route.locale, revisionId: route.revisionId, documentId: row.document_id,
-        typeName: row.type_name, title: route.title, markdown: route.source, html: renderSemanticMarkdownHtml(route.source, route.directives), fields: row.metadata_json, media: route.media };
+        typeName: row.type_name, title: route.title, markdown: route.source, html: renderSemanticMarkdownHtml(route.source, route.directives), fields: row.metadata_json, media: route.media, ...(route.composition ? { composition: route.composition } : {}) };
     })));
     const snapshot = { schema: "io.navocms.public-site-snapshot.v1", siteId: repository.site.siteId, releaseHash,
       locales: input.render.locales, redirects: input.render.redirects ?? [], routes };

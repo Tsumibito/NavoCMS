@@ -4,3 +4,5 @@ export * from "./markdown.js";
 export * from "./model.js";
 export * from "./packs.js";
 export * from "./patches.js";
+
+export * from "./composition.js";

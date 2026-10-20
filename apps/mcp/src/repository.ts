@@ -44,6 +44,8 @@ export interface CreateDraftInput {
 }
 
 export interface PatchDraftInput {
+  readonly actorKind?: "human" | "agent";
+  readonly composition?: import("@navocms/content").PageComposition;
   readonly site: SiteDescriptor;
   readonly revisionId: string;
   readonly baseSourceHash: string;
@@ -62,7 +64,11 @@ export interface RepositoryPage<T> {
   readonly nextCursor?: string;
 }
 
+export interface EditorRecord { readonly id: string; readonly kind: "change" | "comment" | "preview"; readonly variantId: string; readonly revisionId: string; readonly data: Readonly<Record<string, unknown>>; }
 export interface EditingRepository {
+  saveEditorRecord(context: RepositoryContext, record: EditorRecord): Awaitable<void>;
+  getEditorRecord(context: RepositoryContext, id: string, kind?: EditorRecord["kind"]): Awaitable<EditorRecord | undefined>;
+  listEditorComments(context: RepositoryContext, variantId: string, cursor?: string): Awaitable<RepositoryPage<EditorRecord>>;
   listTypes(context: RepositoryContext): Awaitable<readonly ContentTypeDefinition[]>;
   getSite(scope: RepositoryScope): Awaitable<SiteDescriptor | undefined>;
   search(context: RepositoryContext, query: string, limit: number, cursor?: string): Awaitable<RepositoryPage<ContentHit>>;
@@ -76,6 +82,7 @@ export interface EditingRepository {
 }
 
 export class InMemoryEditingRepository implements EditingRepository {
+  readonly #editorRecords = new Map<string, EditorRecord>();
   readonly #engine: ContentEngine;
   readonly #sites = new Map<string, SiteDescriptor>();
   readonly #variants = new Map<string, VariantIndex>();
@@ -83,6 +90,14 @@ export class InMemoryEditingRepository implements EditingRepository {
 
   public constructor(engine = new ContentEngine()) {
     this.#engine = engine;
+  }
+
+  public saveEditorRecord(context: RepositoryContext, record: EditorRecord): void { this.#editorRecords.set(`${scopeKey(context.site.tenantId, context.site.siteId)}:${record.kind}:${record.id}`, structuredClone(record)); }
+  public getEditorRecord(context: RepositoryContext, id: string, kind: EditorRecord["kind"] = "change"): EditorRecord | undefined { return this.#editorRecords.get(`${scopeKey(context.site.tenantId, context.site.siteId)}:${kind}:${id}`); }
+  public listEditorComments(context: RepositoryContext, variantId: string, cursor?: string): RepositoryPage<EditorRecord> {
+    const prefix = scopeKey(context.site.tenantId, context.site.siteId) + ":";
+    const rows = [...this.#editorRecords.entries()].filter(([key, r]) => key.startsWith(prefix) && r.kind === "comment" && r.variantId === variantId && (!cursor || r.id > cursor)).map(([, r]) => r).sort((a, b) => a.id.localeCompare(b.id));
+    return { items: rows.slice(0, 20), ...(rows.length > 20 ? { nextCursor: rows[19]!.id } : {}) };
   }
 
   public registerSite(site: SiteDescriptor): void {
@@ -180,8 +195,9 @@ export class InMemoryEditingRepository implements EditingRepository {
       revisionId: input.revisionId,
       baseSourceHash: input.baseSourceHash,
       operations: input.operations,
+      ...(input.composition ? { composition: input.composition } : {}),
       ...(input.metadataPatch ? { metadata: { ...current.metadata, ...input.metadataPatch } } : {}),
-      provenance: { kind: "agent", actorId: input.actorId, note: "Patched through MCP" }
+      provenance: { kind: input.actorKind ?? "agent", actorId: input.actorId, note: "Patched through shared editing service" }
     });
     this.#drafts.set(draftKey(input.site, current.documentId), changed.revision.id);
     return Object.freeze({ draft: toDraft(indexed, changed.revision), diff: changed.diff });

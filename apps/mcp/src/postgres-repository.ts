@@ -7,6 +7,7 @@ import {
   compareMarkdown,
   foundationPacks,
   validateMetadata,
+  validatePageComposition,
   type ContentPack,
   type ContentRevision,
   type ContentTypeDefinition,
@@ -44,6 +45,7 @@ interface HitRow extends Record<string, unknown> {
   readonly revision_number: number;
   readonly source_hash: string;
   readonly source_markdown: string;
+  readonly composition_json?: import("@navocms/content").PageComposition;
   readonly metadata_json: Record<string, unknown>;
   readonly created_at: Date | string;
 }
@@ -59,6 +61,7 @@ interface RevisionRow extends Record<string, unknown> {
   readonly source_markdown: string;
   readonly source_hash: string;
   readonly ast_json: ContentRevision["ast"];
+  readonly composition_json?: import("@navocms/content").PageComposition;
   readonly metadata_json: Record<string, unknown>;
   readonly provenance_json: RevisionProvenance;
   readonly created_at: Date | string;
@@ -86,6 +89,18 @@ export class PostgresEditingRepository implements EditingRepository {
 
   public constructor(database: PostgresDatabase) {
     this.#database = database;
+  }
+
+  public async saveEditorRecord(context: RepositoryContext, record: import("./repository.js").EditorRecord): Promise<void> {
+    await this.#database.withScope(databaseScope(context), client => client.query("INSERT INTO navocms.page_editor_records(id,tenant_id,site_id,variant_id,revision_id,kind,data_json) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)", [record.id,context.site.tenantId,context.site.siteId,record.variantId,record.revisionId,record.kind,JSON.stringify(record.data)]));
+  }
+  public async getEditorRecord(context: RepositoryContext, id: string, kind: import("./repository.js").EditorRecord["kind"] = "change"): Promise<import("./repository.js").EditorRecord | undefined> {
+    const row = await this.#database.withScope(databaseScope(context), async client => (await client.query<{ id: string; kind: "change" | "comment" | "preview"; variant_id: string; revision_id: string; data_json: Record<string, unknown> }>("SELECT id,kind,variant_id,revision_id,data_json FROM navocms.page_editor_records WHERE tenant_id=$1 AND site_id=$2 AND id=$3 AND kind=$4", [context.site.tenantId,context.site.siteId,id,kind])).rows[0]);
+    return row && { id: row.id,kind: row.kind,variantId: row.variant_id,revisionId: row.revision_id,data: row.data_json };
+  }
+  public async listEditorComments(context: RepositoryContext, variantId: string, cursor?: string): Promise<import("./repository.js").RepositoryPage<import("./repository.js").EditorRecord>> {
+    const rows = await this.#database.withScope(databaseScope(context), async client => (await client.query<{ id: string; revision_id: string; data_json: Record<string, unknown> }>("SELECT id,revision_id,data_json FROM navocms.page_editor_records WHERE tenant_id=$1 AND site_id=$2 AND variant_id=$3 AND kind='comment' AND ($4::uuid IS NULL OR id>$4::uuid) ORDER BY id LIMIT 21", [context.site.tenantId,context.site.siteId,variantId,cursor ?? null])).rows);
+    return { items: rows.slice(0,20).map(row => ({ id: row.id,kind: "comment" as const,variantId,revisionId: row.revision_id,data: row.data_json })), ...(rows.length>20 ? { nextCursor: rows[19]!.id } : {}) };
   }
 
   public async listTypes(context: RepositoryContext): Promise<readonly ContentTypeDefinition[]> {
@@ -231,6 +246,7 @@ export class PostgresEditingRepository implements EditingRepository {
   public async patchDraft(input: PatchDraftInput): Promise<{ readonly draft: DraftSummary; readonly diff: ReturnType<typeof compareMarkdown> }> {
     return this.#database.withScope({ ...input.site, principalId: input.actorId }, async (client) => {
       const base = await requireRevision(client, input.site, input.revisionId);
+      if (input.composition) validatePageComposition(input.composition, base.variantId);
       const variant = (await client.query<VariantTypeRow>(
         `SELECT t.name AS type_name, d.slug, v.locale, t.directive_definitions, t.definition
            FROM navocms.content_variants v
@@ -244,7 +260,7 @@ export class PostgresEditingRepository implements EditingRepository {
         source: base.source,
         baseSourceHash: input.baseSourceHash,
         operations: input.operations,
-        allowEmpty: Boolean(input.metadataPatch && Object.keys(input.metadataPatch).length),
+        allowEmpty: Boolean(input.composition || (input.metadataPatch && Object.keys(input.metadataPatch).length)),
         directives: variant.directive_definitions
       });
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [base.variantId]);
@@ -273,7 +289,7 @@ export class PostgresEditingRepository implements EditingRepository {
       }
       const nextNumber = head.revision_number + 1;
       const provenance: RevisionProvenance = Object.freeze({
-        kind: "agent", actorId: input.actorId, note: "Patched through MCP"
+        kind: input.actorKind ?? "agent", actorId: input.actorId, note: "Patched through shared editing service"
       });
       const metadata = Object.freeze({ ...base.metadata, ...(input.metadataPatch ?? {}), body: patched.source });
       if (input.metadataPatch && ("slug" in input.metadataPatch || "body" in input.metadataPatch || "locale" in input.metadataPatch)) throw new ContentError("CONTENT_FIELD_IMMUTABLE", "Slug, body and locale cannot be changed through a field patch");
@@ -284,6 +300,7 @@ export class PostgresEditingRepository implements EditingRepository {
         documentId: base.documentId, variantId: base.variantId, number: nextNumber,
         parentRevisionId: base.id, source: patched.source, sourceHash: patched.sourceHash,
         ast: patched.ast, metadata, provenance,
+        ...(input.composition ?? base.composition ? { composition: input.composition ?? base.composition } : {}),
         createdAt: new Date().toISOString()
       });
       await insertRevision(client, revision, input.actorId);
@@ -393,7 +410,7 @@ async function requireRevision(client: SqlClient, site: SiteDescriptor, revision
   const row = (await client.query<RevisionRow>(
     `SELECT r.id, r.tenant_id, r.site_id, r.document_id, r.variant_id, r.revision_number,
             r.parent_revision_id, r.source_markdown, r.source_hash, r.ast_json,
-            r.metadata_json, r.provenance_json, r.created_at, v.locale
+            r.metadata_json, r.composition_json, r.provenance_json, r.created_at, v.locale
        FROM navocms.content_revisions r JOIN navocms.content_variants v
          ON v.tenant_id=r.tenant_id AND v.site_id=r.site_id AND v.id=r.variant_id
       WHERE r.tenant_id = $1 AND r.site_id = $2 AND r.id = $3`,
@@ -405,6 +422,7 @@ async function requireRevision(client: SqlClient, site: SiteDescriptor, revision
     variantId: row.variant_id, number: row.revision_number,
     ...(row.parent_revision_id ? { parentRevisionId: row.parent_revision_id } : {}),
     source: row.source_markdown, sourceHash: row.source_hash, ast: row.ast_json,
+    ...(row.composition_json ? { composition: row.composition_json } : {}),
     metadata: Object.freeze(row.metadata_json), provenance: Object.freeze(row.provenance_json),
     createdAt: iso(row.created_at)
   });
@@ -454,12 +472,12 @@ async function insertRevision(client: SqlClient, revision: ContentRevision, acto
     `INSERT INTO navocms.content_revisions (
        id, tenant_id, site_id, document_id, variant_id, revision_number,
        parent_revision_id, source_markdown, source_hash, ast_json,
-       metadata_json, provenance_json, created_by, created_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,$13,$14)`,
+       metadata_json, provenance_json, created_by, created_at, composition_json
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,$13,$14,$15::jsonb)`,
     [revision.id, revision.tenantId, revision.siteId, revision.documentId, revision.variantId,
       revision.number, revision.parentRevisionId ?? null, revision.source, revision.sourceHash,
       JSON.stringify(revision.ast), JSON.stringify(revision.metadata), JSON.stringify(revision.provenance),
-      actorId, revision.createdAt]
+      actorId, revision.createdAt, revision.composition ? JSON.stringify(revision.composition) : null]
   );
 }
 

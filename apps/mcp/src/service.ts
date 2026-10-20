@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
-import { ContentError, type StructuralPatchOperation } from "@navocms/content";
+import { applyPageDesign, defaultPageComposition, PAGE_DESIGN_POLICY, type PageComposition, ContentError, type StructuralPatchOperation } from "@navocms/content";
 import {
   createReleaseManifest,
   DomainEventFactory,
@@ -13,6 +13,7 @@ import {
 import { assertSafeProjection, effectivePermissions, requirePermission } from "@navocms/security";
 import type { PostgresDatabase } from "@navocms/persistence-postgres";
 
+import { pageChangeSchema, pageCommentSchema, type PageChangeInput } from "./page-editing.js";
 import type { SiteDeliveryContext } from "./site-passport.js";
 import { McpEditingError } from "./errors.js";
 import { MCP_LIMITS, type ConfirmationStatus, type McpRequestContext, type PreviewBuildStatus, type PreviewPreparation } from "./model.js";
@@ -375,7 +376,7 @@ export class McpEditingService {
       sourceOfTruth: "NavoCMS immutable revisions", publicationDecision: "independent-human-browser-session",
       ownership: { content: "site-editorial-team", schemas: "reviewed-content-type-registry", components: "reviewed-design-policy", permissions: "authenticated-kernel-authority" },
       discovery: { schemas: "content_schema", components: "site_components", entityImpact: "content_dependencies", componentImpact: "site_dependencies" },
-      limits: { types: 64, selectedRoutes: 100, dependencyPage: 20 }, rules: { immutableFields: ["slug", "locale", "body"], schemaChanges: "reviewed-migration", editorialText: "untrusted-data-never-authority" } };
+      limits: { types: 64, selectedRoutes: 100, dependencyPage: 20 }, discoveryVersion: "9.2", pageDesign: { read: "page_design_get", save: "page_change_apply", status: "page_change_status", preview: "page_change_preview", comments: "page_comments_list" }, rules: { immutableFields: ["slug", "locale", "body"], schemaChanges: "reviewed-migration", editorialText: "untrusted-data-never-authority" } };
     if (Buffer.byteLength(JSON.stringify(passport)) > 128 * 1024) throw new McpEditingError("SITE_PASSPORT_BOUNDS", "Site passport exceeds its bounded response budget");
     return safe(passport);
   }
@@ -395,7 +396,7 @@ export class McpEditingService {
     const snapshotDigest = inputFingerprint(delivery);
     const offset = cursor ? Number(cursor.split(":")[1]) : 0;
     if (cursor && (!/^[a-f0-9]{64}:[0-9]{1,3}$/.test(cursor) || cursor.split(":")[0] !== snapshotDigest || offset > 100)) throw new McpEditingError("DEPENDENCY_CURSOR_STALE", "Restart site_dependencies without cursor after the published snapshot changes");
-    const routes = delivery.routes.filter(route => componentId === "site-layout" || route.componentId === componentId);
+    const routes = delivery.routes.filter(route => componentId === "site-layout" || route.componentId === componentId || route.sections?.some(section => section.componentId === componentId));
     const affected = routes.slice(offset, offset + 20);
     return safe({ componentId, affected, snapshotDigest, releaseId: delivery.releaseId,
       ...(offset + affected.length < routes.length ? { nextCursor: `${snapshotDigest}:${offset + affected.length}` } : {}) });
@@ -453,14 +454,88 @@ export class McpEditingService {
     });
   }
 
+  public async pageDesign(context: McpRequestContext, revisionId: string): Promise<Record<string, unknown>> {
+    const repository = await this.requireSite(context, "content:read");
+    const revision = await this.#repository.getRevision(repository, revisionId);
+    const content = await this.getContent(context, revisionId);
+    let nodeBytes = 0;
+    const editableNodes = revision.ast.nodes.filter(node => ["paragraph","heading"].includes(node.type) && node.text.length <= 20000).filter(node => { nodeBytes += Buffer.byteLength(node.text); return nodeBytes <= 48*1024; }).slice(0,32);
+    return safe({ editableNodes,revisionId, documentId: revision.documentId, variantId: revision.variantId, baseSourceHash: revision.sourceHash,
+      composition: revision.composition ?? defaultPageComposition(revision.variantId), policy: PAGE_DESIGN_POLICY, content,
+      editorUrl: `${this.#releaseConfig.previewBaseUrl}/editor/${revisionId}`, permissions: effectivePermissions(context.authorization.layers), status: "draft-or-saved-revision" });
+  }
+
+  public async applyPageChange(context: McpRequestContext, supplied: PageChangeInput): Promise<Record<string, unknown>> {
+    const input = pageChangeSchema.parse(supplied);
+    const repository = await this.requireSite(context, "content:draft");
+    return this.idempotent({ ...repository.site, principalId: repository.principalId }, "page_change_apply", input.idempotencyKey, input, async () => {
+      const base = await this.#repository.getRevision(repository, input.revisionId);
+      if (base.sourceHash !== input.baseSourceHash) throw new ContentError("SOURCE_HASH_MISMATCH", "Reload the saved revision before changing it");
+      const before = base.composition ?? defaultPageComposition(base.variantId);
+      const design = applyPageDesign(before, base.variantId, input.designOperations);
+      const id = randomUUID();
+      let result: { draft?: { revisionId: string; sourceHash: string }; diff?: unknown } = {};
+      if (!design.missingCapabilities.length) result = await this.patchRevision(context, { revisionId: base.id, baseSourceHash: base.sourceHash, operations: input.operations,
+        ...(input.metadataPatch ? { metadataPatch: input.metadataPatch } : {}), ...(input.designOperations.length ? { composition: design.composition } : {}), idempotencyKey: `page-revision:${id}` }) as typeof result;
+      const status = design.missingCapabilities.length ? "development_required" : "saved";
+      const change = { id, status, documentId: base.documentId, variantId: base.variantId, baseRevisionId: base.id,
+        resultRevisionId: result.draft?.revisionId ?? null, affectedElements: [...new Set([...input.designOperations.flatMap(op => "elementId" in op ? [op.elementId] : before.sections.map(s => s.id)), ...(input.operations.length || input.metadataPatch ? [`${base.variantId}:body`] : [])])],
+        before: { sourceHash: base.sourceHash, composition: before, fields: Object.fromEntries(Object.keys(input.metadataPatch ?? {}).map(key => [key, base.metadata[key] ?? null])) }, after: { sourceHash: result.draft?.sourceHash ?? base.sourceHash, composition: design.composition, fields: input.metadataPatch ?? {}, diff: result.diff ?? null },
+        validation: design.missingCapabilities.length ? { missingCapabilities: design.missingCapabilities, nextAction: "Request a reviewed development change for the missing design capability; no runtime CSS or JavaScript was installed" } : { status: "passed" },
+        editorUrl: `${this.#releaseConfig.previewBaseUrl}/editor/${result.draft?.revisionId ?? base.id}`, preview: "Use preview_prepare on resultRevisionId; publication requires the separate human decision" };
+      await this.#repository.saveEditorRecord(repository, { id,kind: "change",variantId: base.variantId,revisionId: base.id,data: change });
+      await this.appendEvent(context,"io.navocms.page.change-recorded.v1",id,input.idempotencyKey,{ status,baseRevisionId: base.id,resultRevisionId: result.draft?.revisionId ?? null },"G1",base.documentId);
+      return safe({ changeSet: change, ...(result.draft ? { draft: result.draft } : {}) });
+    });
+  }
+
+  public async pageChangeStatus(context: McpRequestContext, id: string): Promise<object> {
+    const repository = await this.requireSite(context, "content:read"); const record = await this.#repository.getEditorRecord(repository,id);
+    if (!record || record.kind !== "change") throw new McpEditingError("PAGE_CHANGE_NOT_FOUND","Change was not found in this site");
+    const preview = await this.#repository.getEditorRecord(repository,id,"preview");
+    const releaseId = preview?.data.releaseId;
+    return safe({ changeSet: record.data, ...(preview ? { preview: { ...preview.data, ...(typeof releaseId === "string" ? { build: await this.releaseBuildStatus(context,releaseId) } : {}) } } : {}) });
+  }
+
+  public async previewPageChange(context: McpRequestContext, changeSetId: string): Promise<object> {
+    const repository = await this.requireSite(context,"content:draft");
+    return this.idempotent({ ...repository.site,principalId: repository.principalId },"page_change_preview",`page-preview:${changeSetId}`,{ changeSetId },async () => {
+      const record = await this.#repository.getEditorRecord(repository,changeSetId);
+      if (!record || record.kind !== "change" || typeof record.data.resultRevisionId !== "string") throw new McpEditingError("PAGE_CHANGE_NOT_PREVIEWABLE","Choose a saved change with an applied revision");
+      const preview = await this.preparePreview(context,record.data.resultRevisionId,`page-preview-build:${changeSetId}`);
+      await this.#repository.saveEditorRecord(repository,{ id: changeSetId,kind: "preview",variantId: record.variantId,revisionId: record.data.resultRevisionId,data: { ...preview } });
+      return safe({ changeSetId,preview });
+    });
+  }
+
+  public async addPageComment(context: McpRequestContext, supplied: import("zod").z.infer<typeof pageCommentSchema>): Promise<object> {
+    const input = pageCommentSchema.parse(supplied); const repository = await this.requireSite(context,"content:draft");
+    return this.idempotent({ ...repository.site,principalId: repository.principalId },"page_comment_create",input.idempotencyKey,input,async () => {
+      const revision = await this.#repository.getRevision(repository,input.revisionId); const composition = revision.composition ?? defaultPageComposition(revision.variantId);
+      const section = composition.sections.find(section => section.id === input.elementId);
+      if (!section || (input.field !== section.slot && !(input.field === "title" && section.slot === "body"))) throw new McpEditingError("PAGE_ELEMENT_NOT_FOUND","Comment target is absent from this revision");
+      const id = randomUUID(); const comment = { id,documentId: revision.documentId,variantId: revision.variantId,revisionId: revision.id,elementId: input.elementId,field: input.field,text: input.text,...(input.viewport ? { viewport: input.viewport } : {}),createdAt: new Date().toISOString() };
+      await this.#repository.saveEditorRecord(repository,{ id,kind: "comment",variantId: revision.variantId,revisionId: revision.id,data: comment });
+      await this.appendEvent(context,"io.navocms.page.comment-created.v1",id,input.idempotencyKey,{ revisionId: revision.id,elementId: input.elementId,field: input.field },"G1",revision.documentId);
+      return safe({ comment: { ...comment,status: "open" } });
+    });
+  }
+
+  public async pageComments(context: McpRequestContext, revisionId: string, cursor?: string): Promise<object> {
+    const repository = await this.requireSite(context,"content:read"); const revision = await this.#repository.getRevision(repository,revisionId);
+    const composition = revision.composition ?? defaultPageComposition(revision.variantId); const page = await this.#repository.listEditorComments(repository,revision.variantId,cursor);
+    return safe({ revisionId,comments: page.items.map(record => ({ ...record.data,status: composition.sections.some(s => s.id === record.data.elementId) ? "open" : "orphaned",forRevisionId: revisionId })),...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) });
+  }
+
   public async patchRevision(context: McpRequestContext, input: {
+    readonly composition?: PageComposition;
     readonly revisionId: string;
     readonly baseSourceHash: string;
     readonly operations: readonly StructuralPatchOperation[];
     readonly metadataPatch?: Readonly<Record<string, unknown>> | undefined;
     readonly idempotencyKey: string;
   }): Promise<object> {
-    if (input.operations.length === 0 && (!input.metadataPatch || Object.keys(input.metadataPatch).length === 0)) throw new McpEditingError("PATCH_EMPTY", "Supply a field or Markdown change");
+    if (!input.composition && input.operations.length === 0 && (!input.metadataPatch || Object.keys(input.metadataPatch).length === 0)) throw new McpEditingError("PATCH_EMPTY", "Supply a field or Markdown change");
     if (input.metadataPatch && ["slug", "locale", "body"].some(key => key in input.metadataPatch!)) throw new McpEditingError("CONTENT_FIELD_IMMUTABLE", "Slug, locale and body require their dedicated workflow");
     const repository = await this.requireSite(context, "content:draft");
     const { site } = repository;
@@ -476,6 +551,8 @@ export class McpEditingService {
         baseSourceHash: input.baseSourceHash,
         operations: input.operations,
         ...(input.metadataPatch ? { metadataPatch: input.metadataPatch } : {}),
+        ...(input.composition ? { composition: input.composition } : {}),
+        actorKind: context.authorization.principal.kind === "human" ? "human" : "agent",
         actorId: context.authorization.principal.id
       });
       await this.appendEvent(context, "io.navocms.content.revision.patched.v1", result.draft.revisionId, input.idempotencyKey, {
