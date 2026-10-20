@@ -60,10 +60,14 @@ failure was 13.476 seconds. The entire recovery rehearsal took 71.894 seconds.
 These measurements use synthetic content, exclude account provisioning, key
 retrieval and ingress setup, and are not a production RPO/RTO guarantee.
 
-Local verification passed 215 tests with 58 database-dependent tests skipped and
+Local verification passed 216 tests with 58 database-dependent tests skipped and
 14 browser checks. A separate fresh Neon run passed the recovery integration and
 five database isolation suites. CI additionally exercises the complete database
 suite and both container targets; its final result is recorded with the release.
 Schedules and incident units are supplied as installation templates. No recurring
 host timer, external alert destination or off-host key/archive custody is claimed
 as activated by this submission.
+
+The final repeated Neon rehearsal restored the same 45 tables/four objects in
+57.775 seconds, with a 14.929-second snapshot-to-simulated-failure interval.
+The operator CLI also has a subprocess test for requested/failed audit events.

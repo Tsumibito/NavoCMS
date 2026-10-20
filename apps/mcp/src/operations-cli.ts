@@ -109,21 +109,22 @@ async function health() { const origin = new URL(required('NAVOCMS_HEALTH_ORIGIN
 } }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     const command = process.argv[2] ?? 'unknown', consequential = ['backup', 'restore', 'install'].includes(command);
+    const operationId = randomUUID();
     let events: DomainEventFactory | undefined;
     try {
         if (consequential) {
             events = new DomainEventFactory({ source: 'urn:navocms:operations', tenantId: required('NAVOCMS_TENANT_ID'), siteId: required('NAVOCMS_SITE_ID'), correlationId: randomUUID(), actor: { type: 'service', id: required('NAVOCMS_RUNTIME_PRINCIPAL_ID') } });
-            console.log(JSON.stringify(events.create({ type: `io.navocms.operations.${command}-requested.v1`, consequence: 'G2', data: { operation: command, status: 'requested' } })));
+            console.log(JSON.stringify(events.create({ type: `io.navocms.operations.${command}-requested.v1`, consequence: 'G2', idempotencyKey: operationId + ':requested', data: { operation: command, status: 'requested' } })));
         }
         const result = await operationsMain(process.argv.slice(2));
         if (events)
-            console.log(JSON.stringify(events.create({ type: `io.navocms.operations.${command}-completed.v1`, consequence: 'G2', data: { operation: command, status: 'completed' } })));
+            console.log(JSON.stringify(events.create({ type: `io.navocms.operations.${command}-completed.v1`, consequence: 'G2', idempotencyKey: operationId + ':completed', data: { operation: command, status: 'completed' } })));
         console.log(JSON.stringify(result));
     }
     catch (error) {
         const code = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'OPERATIONS_FAILED';
         if (events)
-            console.error(JSON.stringify(events.create({ type: `io.navocms.operations.${command}-failed.v1`, consequence: 'G2', data: { operation: command, status: 'failed', code } })));
+            console.error(JSON.stringify(events.create({ type: `io.navocms.operations.${command}-failed.v1`, consequence: 'G2', idempotencyKey: operationId + ':failed', data: { operation: command, status: 'failed', code } })));
         console.error(JSON.stringify({ status: 'failed', code }));
         process.exitCode = 1;
     }
