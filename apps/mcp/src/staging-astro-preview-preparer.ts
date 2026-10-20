@@ -3,6 +3,7 @@ import { contentHash, type ContentRevision } from "@navocms/content";
 import { createHash } from "node:crypto";
 
 import { McpEditingError } from "./errors.js";
+import type { SiteComponent } from "./site-passport.js";
 import type { SiteDescriptor } from "./model.js";
 
 const layoutSource = `---
@@ -16,11 +17,15 @@ const registrations = Object.freeze([
   Object.freeze({ id: "story-card", module: "./components/StoryCard.astro", source: "<article><slot /></article>" }),
   Object.freeze({ id: "section-shell", module: "./components/SectionShell.astro", source: "<section><slot /></section>" })
 ]);
+export const STAGING_SITE_COMPONENTS: readonly SiteComponent[] = Object.freeze([
+  ...registrations.map(component => ({ id: component.id, version: "v1", slots: ["default"], fields: component.id === "section-shell" ? ["title", "body", "media"] : [], sourceOfTruth: "reviewed-staging-design-policy", example: { componentId: component.id, slot: "default", contentSource: "content.revision" } })),
+  { id: "site-layout", version: "v1", slots: ["default"], fields: ["navigation", "languages", "title", "locale"], sourceOfTruth: "reviewed-delivery-layout", example: { componentId: "site-layout", contains: ["header", "main", "footer"], navigationSource: "published-route-inventory" } }
+]);
 const css = ":root { --navocms-page: #ffffff; --navocms-ink: #12263a; }\nbody { margin: 0; font-family: system-ui, sans-serif; background: var(--navocms-page); color: var(--navocms-ink); }\nheader, footer, main { padding: 24px; max-width: 1120px; margin: auto; } nav { display: flex; gap: 16px; flex-wrap: wrap; } img { max-width: 100%; height: auto; }\n";
 const designDigest = digest({ schema: "io.navocms.staging-design.v1", css, registrations });
 export const STAGING_ASTRO_GOVERNANCE_DIGEST = digest({ schema: "io.navocms.staging-governance.v1", semanticMarkdown: true, rawHtml: false, directivePolicy: "content-type-declared" });
 const deliveryDigest = `sha256:${contentHash(layoutSource)}`;
-export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-astro-policy.v1", designDigest, deliveryDigest, STAGING_ASTRO_GOVERNANCE_DIGEST, registrations, css });
+export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-astro-policy.v2", mediaPolicy: "responsive/v2", designDigest, deliveryDigest, STAGING_ASTRO_GOVERNANCE_DIGEST, registrations, css });
 
 /**
  * Reviewed kernel policy for the first staging site. It accepts only one

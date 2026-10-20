@@ -8,7 +8,7 @@ import type {
 } from "@navocms/media";
 import { assertSafeProjection, requirePermission } from "@navocms/security";
 
-import type { MediaUploadGateway } from "./media-upload-gateway.js";
+import { prepareResponsiveVariants, type MediaUploadGateway } from "./media-upload-gateway.js";
 import { McpEditingError } from "./errors.js";
 import type { McpRequestContext } from "./model.js";
 
@@ -47,6 +47,7 @@ export class McpMediaService {
       ...input,
       provenance: { ...input.provenance, receivedBy: scope.principalId }
     });
+    if (result.kind === "deduplicated") await prepareResponsiveVariants(this.#repository, scope, result.asset.id, result.asset.width!);
     const uploadUrl = result.kind === "upload-intent" && this.#uploadGateway
       ? await this.#uploadGateway.create(scope, result.intentId, result.expiresAt) : undefined;
     return project({ ...result, ...(uploadUrl ? { uploadUrl } : {}) });
@@ -58,7 +59,10 @@ export class McpMediaService {
   }
 
   public async finalize(context: McpRequestContext, input: FinalizeUploadInput): Promise<object> {
-    return project(await this.#repository.finalizeUpload(this.writeScope(context), input));
+    const scope = this.writeScope(context);
+    const asset = await this.#repository.finalizeUpload(scope, input);
+    await prepareResponsiveVariants(this.#repository, scope, asset.id, asset.width!);
+    return project(asset);
   }
 
   public async generateVariant(context: McpRequestContext, input: GenerateMediaVariantInput): Promise<object> {

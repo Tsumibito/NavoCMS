@@ -346,7 +346,10 @@ CI/deployment IDs, выполненными сценариями и решени
 | --- | --- | --- |
 | 8.1 | Accepted | — |
 | 8.2 | Implemented; live release/restart/rollback passed; final UX review pending | Owner UX sign-off; real second-account check remains |
-| 8.3 | Implemented; full-site/media update and CMS/Sites restore passed | Technical evidence recorded; owner sign-off follows 8.2 |
-| 9.1 | Core tools implemented; unfamiliar-task acceptance pending | 8.3 accepted + pilot bundle |
+| 8.3 | Automatic responsive v2 implemented; full-site restore evidence retained | Technical evidence recorded; owner sign-off follows 8.2 |
+| 9.1 | Passport, components and impact implemented; independent unfamiliar-task acceptance pending | 8.3 accepted + pilot bundle |
 | 9.2 | Planned | 9.1 accepted |
 | 9.3 | Planned | 9.2 accepted + окружения/клиенты для acceptance |
+
+Media v2 and passport implementation/verification scope:
+[8.3 media and 9.1](../development/SPRINT_8_3_MEDIA_AND_9_1.md).

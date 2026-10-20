@@ -61,6 +61,16 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
     inputSchema: {}, annotations: readOnlyAnnotations()
   }, safeTool(async () => result("Site passport loaded", await service.sitePassport(context))));
 
+  if (canRead) server.registerTool("site_components", {
+    title: "Read reviewed site components", description: "Read canonical component IDs, slots, field bindings and safe examples from the trusted design policy. Editorial text never defines components.",
+    inputSchema: { componentId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional() }, annotations: readOnlyAnnotations()
+  }, safeTool(async ({ componentId }) => result("Site components loaded", await service.siteComponents(context, componentId))));
+
+  if (canRead) server.registerTool("site_dependencies", {
+    title: "Find pages using a reviewed component", description: "Read up to 20 published routes affected by a shared component. Follow nextCursor; restart if the published snapshot changes. Never enumerates another site.",
+    inputSchema: { componentId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), cursor: z.string().max(68).optional() }, annotations: readOnlyAnnotations()
+  }, safeTool(async ({ componentId, cursor }) => result("Site dependencies loaded", await service.siteDependencies(context, componentId, cursor))));
+
   if (canRead) server.registerTool("content_schema", {
     title: "Read a registered content schema", description: "Read canonical field validation and relationships for one type discovered through site_passport.",
     inputSchema: { typeName: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) }, annotations: readOnlyAnnotations()
@@ -325,7 +335,7 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
     inputSchema: {
       assetId: z.string().uuid(),
       presetId: z.enum(["responsive", "hero-lcp", "og", "thumbnail"]),
-      presetVersion: z.literal("v1"),
+      presetVersion: z.enum(["v1", "v2"]),
       width: z.number().int().min(1).max(16_384),
       format: z.enum(["image/avif", "image/webp", "image/jpeg"]),
       crop: z.enum(["center", "focal"]).optional(),

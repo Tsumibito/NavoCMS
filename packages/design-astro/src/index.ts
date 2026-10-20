@@ -86,6 +86,7 @@ export interface AstroMediaSource {
   readonly mediaType: "image/avif" | "image/webp" | "image/jpeg";
   /** A bounded CSS media condition, used only to select a smaller source. */
   readonly media?: string;
+  readonly width?: number;
 }
 
 export interface AstroMediaBinding {
@@ -93,6 +94,9 @@ export interface AstroMediaBinding {
   readonly variantIdentity: string;
   readonly url: string;
   readonly alt: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly sizes?: string;
   readonly sources?: readonly AstroMediaSource[];
 }
 
@@ -241,8 +245,9 @@ function assertInput(input: AstroRenderInput): void {
     paths.add(outputPath); const seen = localized.get(route.id) ?? new Set<string>(); seen.add(route.locale); localized.set(route.id, seen);
     for (const item of route.media) {
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(item.assetId) || byteLength(item.alt) < 1 || byteLength(item.alt) > ASTRO_RENDER_LIMITS.altBytes || !/^[a-f0-9]{64}$/.test(item.variantIdentity) || !validMediaUrl(item.url) || !item.alt) throw new AstroDesignAdapterError("Renderer media input invalid");
+      if ((item.width !== undefined && (!Number.isInteger(item.width) || item.width < 1 || item.width > 1920)) || (item.height !== undefined && (!Number.isInteger(item.height) || item.height < 1 || item.height > 16384)) || (item.sizes !== undefined && item.sizes !== "(max-width: 1200px) 100vw, 1200px")) throw new AstroDesignAdapterError("Renderer responsive dimensions invalid");
       const sources = item.sources ?? [];
-      if (sources.length > 8 || new Set(sources.map((source) => source.variantIdentity)).size !== sources.length || sources.some((source) => !/^[a-f0-9]{64}$/.test(source.variantIdentity) || !validMediaUrl(source.url) || !["image/avif", "image/webp", "image/jpeg"].includes(source.mediaType) || (source.media !== undefined && !/^\(max-width: [1-9][0-9]{0,4}px\)$/.test(source.media)))) throw new AstroDesignAdapterError("Renderer media source input invalid");
+      if (sources.length > 16 || new Set(sources.map((source) => source.variantIdentity)).size !== sources.length || sources.some((source) => !/^[a-f0-9]{64}$/.test(source.variantIdentity) || !validMediaUrl(source.url) || (source.width !== undefined && (!Number.isInteger(source.width) || source.width < 1 || source.width > 1920)) || !["image/avif", "image/webp", "image/jpeg"].includes(source.mediaType) || (source.media !== undefined && !/^\(max-width: [1-9][0-9]{0,4}px\)$/.test(source.media)))) throw new AstroDesignAdapterError("Renderer media source input invalid");
     }
     if (!validDirectives(route.directives)) throw new AstroDesignAdapterError("Renderer directive input invalid");
     try { renderSemanticMarkdownHtml(route.source, route.directives); } catch (error) { throw new AstroDesignAdapterError(`Renderer content unsupported: ${error instanceof Error ? error.message : "invalid markdown"}`); }
@@ -251,7 +256,7 @@ function assertInput(input: AstroRenderInput): void {
 }
 function pagePath(path: string): string { return path === "/" ? "/index" : `${path.replace(/\/$/, "")}/index`; }
 function builtRoutePath(pagePath: string): string { return pagePath === "src/pages/index.astro" ? "index.html" : `${pagePath.slice("src/pages/".length, -".astro".length)}.html`; }
-function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string, routes: readonly AstroRenderRoute[]): string { const depth = route.path.split("/").filter(Boolean).length; return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\nconst title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media)};\nconst navigation = ${JSON.stringify(routes.filter(item => item.locale === route.locale).map(item => ({ path: item.path, title: item.title })))};\nconst languages = ${JSON.stringify(routes.filter(item => item.id === route.id).map(item => ({ path: item.path, locale: item.locale })))};\n---\n<SiteLayout title={title} navigation={navigation} languages={languages} locale=${JSON.stringify(route.locale)}><RouteComponent><main data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}><Fragment set:html={contentHtml} />{media.map((item) => <picture>{(item.sources ?? []).map((source) => <source srcset={source.url} type={source.mediaType} media={source.media} data-navocms-variant={source.variantIdentity} />)}<img src={item.url} alt={item.alt} data-navocms-variant={item.variantIdentity} /></picture>)}</main></RouteComponent></SiteLayout>\n`; }
+function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string, routes: readonly AstroRenderRoute[]): string { const depth = route.path.split("/").filter(Boolean).length; return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\nconst title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media.map(item => ({ ...item, sourceGroups: groupResponsiveSources(item.sources ?? []) })))};\nconst navigation = ${JSON.stringify(routes.filter(item => item.locale === route.locale).map(item => ({ path: item.path, title: item.title })))};\nconst languages = ${JSON.stringify(routes.filter(item => item.id === route.id).map(item => ({ path: item.path, locale: item.locale })))};\n---\n<SiteLayout title={title} navigation={navigation} languages={languages} locale=${JSON.stringify(route.locale)}><RouteComponent><main data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}><Fragment set:html={contentHtml} />{media.map((item) => <picture>{item.sourceGroups.map((source) => <source srcset={source.srcset} sizes={item.sizes} type={source.mediaType} media={source.media} data-navocms-variant={source.variantIdentity} />)}<img src={item.url} alt={item.alt} width={item.width} height={item.height} data-navocms-variant={item.variantIdentity} /></picture>)}</main></RouteComponent></SiteLayout>\n`; }
 function canonical(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`; return JSON.stringify(value); }
 function digest(value: unknown): `sha256:${string}` { return `sha256:${createHash("sha256").update(typeof value === "string" ? value : canonical(value)).digest("hex")}`; }
 function byteLength(value: string): number { return Buffer.byteLength(value, "utf8"); }
@@ -274,3 +279,19 @@ function safeBuiltOutputPath(value: string): boolean { return safeArtifactPath(v
 function attribute(element: DefaultTreeAdapterTypes.Element | DefaultTreeAdapterTypes.Template, name: string): string | undefined { return element.attrs.find((attribute) => attribute.name === name)?.value; }
 function executableJavaScriptType(type: string | undefined): boolean { return type === undefined || type === "text/javascript" || type === "application/javascript"; }
 async function assertCleanMaterializationDirectory(directory: string): Promise<void> { try { const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink() || (await readdir(directory)).length > 0) throw new AstroDesignAdapterError("Astro artifact target must be an empty non-symlink directory"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") await mkdir(directory, { recursive: true }); else throw error; } }
+
+/** Legacy media keeps its conditions; v2 sources use width-descriptor sets per format. */
+export function groupResponsiveSources(sources: readonly AstroMediaSource[]): readonly (AstroMediaSource & { srcset: string })[] {
+  const groups: (AstroMediaSource & { srcset: string })[] = [];
+  const seen = new Set<string>();
+  for (const source of sources) {
+    const key = `${source.mediaType}:${source.media ?? ""}:${source.width}`;
+    if (source.width && seen.has(key)) continue;
+    if (source.width) seen.add(key);
+    const candidate = source.width ? `${source.url} ${source.width}w` : source.url;
+    const group = source.width ? groups.find(item => item.width !== undefined && item.mediaType === source.mediaType && item.media === source.media) : undefined;
+    if (group) group.srcset += `, ${candidate}`;
+    else groups.push({ ...source, srcset: candidate });
+  }
+  return groups;
+}
