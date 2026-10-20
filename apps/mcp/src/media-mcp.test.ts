@@ -30,6 +30,20 @@ describe("MCP media discovery", () => {
     await expect(withoutStorage.prepare(context("editor"), intentInput())).rejects.toMatchObject({ code: "MEDIA_STORAGE_UNAVAILABLE" });
   });
 
+  it("distinguishes editorial references from page-preview bindings without claiming rendered output", async () => {
+    const media = new McpMediaService(repository(), { storageInjected: true });
+    const input = { assetId: "11111111-1111-4111-8111-111111111111", ownerId: "22222222-2222-4222-8222-222222222222", purpose: "hero", idempotencyKey: "reference-feedback-test" };
+    for (const ownerType of ["document", "revision"]) {
+      await expect(media.createReference(context("editor"), { ...input, ownerType })).resolves.toMatchObject({
+        id: "33333333-3333-4333-8333-333333333333", pagePreviewBinding: "editorial-reference-only", warning: "REFERENCE_NOT_USED_BY_PAGE_PREVIEW", nextStep: expect.stringContaining("content.revision")
+      });
+    }
+    const canonical = await media.createReference(context("editor"), { ...input, ownerType: "content.revision" });
+    expect(canonical).toEqual({ id: "33333333-3333-4333-8333-333333333333", pagePreviewBinding: "revision-reference" });
+    const tools = await listedTools("editor", true);
+    expect(tools.find(tool => tool.name === "media_reference_create")?.description).toContain("exact preview revisionId");
+  });
+
   it("keeps upload schemas binary-free and marks destructive mutations accurately", async () => {
     const tools = await listedTools("editor", true);
     const prepare = tools.find(({ name }) => name === "media_upload_prepare")!;
