@@ -13,3 +13,7 @@ playwright-report/
 test-results/
 .astro/
 apps/design-catalogue/src/generated/
+
+# Encrypted recovery bundles and operator identity coordinates are not source.
+*.navo
+*.env.keys

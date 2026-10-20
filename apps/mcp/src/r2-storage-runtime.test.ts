@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { S3Transport, S3TransportResponse } from "@navocms/s3-core";
 import { describe, expect, it } from "vitest";
 
-import { createR2StorageRuntime } from "./r2-storage-runtime.js";
+import { createR2StorageRuntime,initializeR2Namespaces } from "./r2-storage-runtime.js";
 import type { R2RuntimeSelectionResult } from "./r2-runtime.js";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -16,6 +16,12 @@ const selection = Object.freeze({
 }) satisfies R2RuntimeSelectionResult;
 
 describe("activated R2 storage runtime", () => {
+  it("initializes exact markers once and rejects conflicting existing ownership",async()=>{
+    const objects=new Map<string,Uint8Array>();let writes=0;
+    const transport:S3Transport={request:async input=>{const bytes=objects.get(input.key);if(input.method==="HEAD")return bytes?{status:200,headers:metadata(bytes)}:{status:404,headers:{}};if(input.method==="GET")return {status:200,headers:{},body:stream(bytes!)};if(input.method==="PUT"){expect(input.headers?.["if-none-match"]).toBe("*");if(bytes)return {status:412,headers:{}};writes++;objects.set(input.key,input.body!);return{status:200,headers:{}};}throw Error("Unexpected delete");}};
+    await initializeR2Namespaces(transport);await initializeR2Namespaces(transport);expect(writes).toBe(3);objects.set("navocms/v1/_namespace.json",new TextEncoder().encode("foreign owner"));await expect(initializeR2Namespaces(transport)).rejects.toThrow("MARKER_CONFLICT");expect(writes).toBe(3);
+  });
+
   it("proves both exact child namespace markers without writes or deletes", async () => {
     const transport = new MarkerTransport();
     const runtime = createR2StorageRuntime({ selection, tenantId, siteId, transport });

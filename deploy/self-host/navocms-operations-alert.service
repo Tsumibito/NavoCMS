@@ -1,0 +1,5 @@
+[Unit]
+Description=Record actionable NavoCMS operations failure
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger --priority daemon.err --tag navocms-operations NavoCMS readiness or backup failed; inspect failed systemd units and operations JSON error codes

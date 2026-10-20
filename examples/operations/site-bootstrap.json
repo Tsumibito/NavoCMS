@@ -1,0 +1,48 @@
+[
+  {
+    "tenantId": "11111111-1111-4111-8111-111111111111",
+    "tenantSlug": "pilot-org",
+    "tenantName": "Pilot organization",
+    "siteId": "22222222-2222-4222-8222-222222222222",
+    "siteSlug": "sites-pilot",
+    "siteName": "Sites pilot",
+    "primaryLocale": "en",
+    "locales": [
+      "en",
+      "fr"
+    ],
+    "environmentId": "33333333-3333-4333-8333-333333333333",
+    "environmentKind": "staging",
+    "environmentKey": "default",
+    "principal": {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "issuer": "https://identity.example.test",
+      "subject": "replace-with-workos-owner-subject",
+      "kind": "human",
+      "siteRole": "owner"
+    }
+  },
+  {
+    "tenantId": "11111111-1111-4111-8111-111111111111",
+    "tenantSlug": "pilot-org",
+    "tenantName": "Pilot organization",
+    "siteId": "22222222-2222-4222-8222-222222222222",
+    "siteSlug": "sites-pilot",
+    "siteName": "Sites pilot",
+    "primaryLocale": "en",
+    "locales": [
+      "en",
+      "fr"
+    ],
+    "environmentId": "33333333-3333-4333-8333-333333333333",
+    "environmentKind": "staging",
+    "environmentKey": "default",
+    "principal": {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "issuer": "urn:navocms:runtime",
+      "subject": "pilot-runtime",
+      "kind": "service",
+      "siteRole": "publisher"
+    }
+  }
+]

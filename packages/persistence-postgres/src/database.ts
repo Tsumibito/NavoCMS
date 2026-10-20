@@ -26,7 +26,7 @@ const ISOLATED_APPLICATION_TABLES = [
   "event_ledger", "idempotency_records", "runtime_jobs", "runtime_leases", "domain_outbox",
   "release_candidates", "release_previews", "release_approvals", "workflow_runs",
   "workflow_checkpoints", "release_publications", "quota_limits", "kill_switches", "usage_events",
-  "media_assets", "media_originals", "media_variants", "media_references", "media_upload_intents", "media_gc_candidates", "media_lifecycle_checkpoints", "media_variant_checkpoints", "reviewed_astro_artifacts", "reviewed_astro_build_inputs", "reviewed_astro_artifact_object_bindings", "browser_session_revocations", "site_release_snapshots", "media_upload_sessions"
+  "media_assets", "media_originals", "media_variants", "media_references", "media_upload_intents", "media_gc_candidates", "media_lifecycle_checkpoints", "media_variant_checkpoints", "reviewed_astro_artifacts", "reviewed_astro_build_inputs", "reviewed_astro_artifact_object_bindings", "browser_session_revocations", "site_release_snapshots", "media_upload_sessions", "page_editor_records"
 ] as const;
 
 export class PostgresDatabase {
