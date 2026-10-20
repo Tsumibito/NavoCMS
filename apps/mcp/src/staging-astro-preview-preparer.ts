@@ -14,18 +14,25 @@ const { title, locale, navigation = [], languages = [] } = Astro.props;
 `;
 const registrations = Object.freeze([
   Object.freeze({ id: "signal-button", module: "./components/SignalButton.astro", source: "<button><slot /></button>" }),
-  Object.freeze({ id: "story-card", module: "./components/StoryCard.astro", source: "<article><slot /></article>" }),
-  Object.freeze({ id: "section-shell", module: "./components/SectionShell.astro", source: "<section><slot /></section>" })
+  Object.freeze({ id: "story-card", module: "./components/StoryCard.astro", source: `---
+const { elementId, variant="regular", tone="plain" } = Astro.props;
+---
+<article class={elementId ? "navocms-section" : undefined} data-variant={elementId ? variant : undefined} data-tone={elementId ? tone : undefined}><slot /></article>` }),
+  Object.freeze({ id: "section-shell", module: "./components/SectionShell.astro", source: `---
+const { elementId, variant="regular", tone="plain" } = Astro.props;
+---
+<section class={elementId ? "navocms-section" : undefined} data-variant={elementId ? variant : undefined} data-tone={elementId ? tone : undefined}><slot /></section>` })
 ]);
 export const STAGING_SITE_COMPONENTS: readonly SiteComponent[] = Object.freeze([
   ...registrations.map(component => ({ id: component.id, version: "v1", slots: ["default"], fields: component.id === "section-shell" ? ["title", "body", "media"] : [], sourceOfTruth: "reviewed-staging-design-policy", example: { componentId: component.id, slot: "default", contentSource: "content.revision" } })),
   { id: "site-layout", version: "v1", slots: ["default"], fields: ["navigation", "languages", "title", "locale"], sourceOfTruth: "reviewed-delivery-layout", example: { componentId: "site-layout", contains: ["header", "main", "footer"], navigationSource: "published-route-inventory" } }
 ]);
 const css = ":root { --navocms-page: #ffffff; --navocms-ink: #12263a; }\nbody { margin: 0; font-family: system-ui, sans-serif; background: var(--navocms-page); color: var(--navocms-ink); }\nheader, footer, main { padding: 24px; max-width: 1120px; margin: auto; } nav { display: flex; gap: 16px; flex-wrap: wrap; } img { max-width: 100%; height: auto; }\n";
-const designDigest = digest({ schema: "io.navocms.staging-design.v1", css, registrations });
+const compositionCss = ".navocms-composition{display:flex;flex-direction:column;gap:32px}.navocms-composition[data-gap=tight]{gap:12px}.navocms-section{padding:24px;margin:0}.navocms-section[data-variant=compact]{padding:12px}.navocms-section[data-tone=muted]{background:#edf3fb}.navocms-section>:first-child{margin-top:0}";
+const designDigest = digest({ schema: "io.navocms.staging-design.v1", css: css + compositionCss, registrations });
 export const STAGING_ASTRO_GOVERNANCE_DIGEST = digest({ schema: "io.navocms.staging-governance.v1", semanticMarkdown: true, rawHtml: false, directivePolicy: "content-type-declared" });
 const deliveryDigest = `sha256:${contentHash(layoutSource)}`;
-export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-astro-policy.v2", mediaPolicy: "responsive/v2", designDigest, deliveryDigest, STAGING_ASTRO_GOVERNANCE_DIGEST, registrations, css });
+export const STAGING_ASTRO_POLICY_DIGEST = digest({ schema: "io.navocms.staging-astro-policy.v3", mediaPolicy: "responsive/v2", designDigest, deliveryDigest, STAGING_ASTRO_GOVERNANCE_DIGEST, registrations, css: css + compositionCss, pageComposition: "io.navocms.page-composition.v1" });
 
 /**
  * Reviewed kernel policy for the first staging site. It accepts only one
@@ -45,13 +52,13 @@ export class StagingAstroPreviewPreparer {
       ? revision.metadata.title : "Untitled";
     if (!slug || !site.locales.includes(locale)) throw new McpEditingError("STAGING_ASTRO_REVISION_INVALID", "Staging Astro preview requires a supported locale and canonical slug");
     const route = Object.freeze({ id: revision.documentId, path: `${locale === site.primaryLocale ? "" : `/${locale.toLowerCase()}`}${slug === "home" ? "/" : `/${slug}`}`, locale, revisionId: revision.id,
-      componentId: "section-shell", title, source: revision.source, sourceHash: revision.sourceHash, directives: [], media: [...media] });
+      componentId: "section-shell", title, source: revision.source, sourceHash: revision.sourceHash, directives: [], media: [...media], ...(revision.composition ? { variantId: revision.variantId,composition: revision.composition } : {}) });
     const render: AstroRenderInput = Object.freeze({ tenantId: site.tenantId, siteId: site.siteId,
       locales: Object.freeze({ default: site.primaryLocale, coverage: "available" as const, supported: Object.freeze([...site.locales]) }),
       anchors: Object.freeze({ content: astroContentDigest([route]), design: designDigest, delivery: deliveryDigest, governance: STAGING_ASTRO_GOVERNANCE_DIGEST }),
       deliveryLayout: Object.freeze({ schema: "io.navocms.delivery-layout.v1", source: layoutSource, digest: deliveryDigest }),
       expectedMediaDigest: astroMediaDigest([route]),
-      design: Object.freeze({ digest: designDigest, css, components: new Map(registrations.map((item) => [item.id, item])), recipes: [] }),
+      design: Object.freeze({ digest: designDigest, css: css + compositionCss, components: new Map(registrations.map((item) => [item.id, item])), recipes: [] }),
       routes: Object.freeze([route])
     });
     try { renderAstroArtifact(render); } catch { throw new McpEditingError("STAGING_ASTRO_RENDER_INVALID", "Reviewed staging Astro policy could not render this revision"); }

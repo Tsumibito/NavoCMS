@@ -6,6 +6,7 @@ export interface SiteDeliveryContext {
   readonly routes: readonly {
     readonly path: string; readonly locale: string; readonly documentId: string; readonly variantId: string;
     readonly revisionId: string; readonly typeName: string; readonly sectionId: string;
+    readonly sections?: import("@navocms/content").PageComposition["sections"];
     readonly componentId: string; readonly dataSource: string; readonly fields: readonly string[];
   }[];
   readonly redirects: readonly { readonly from: string; readonly to: string; readonly status: 301 }[];

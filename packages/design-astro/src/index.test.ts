@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { compileDesignSystem } from "@navocms/design";
-import { contentHash } from "@navocms/content";
+import { defaultPageComposition,applyPageDesign,contentHash } from "@navocms/content";
 import { describe, expect, it } from "vitest";
 
 import { AstroDesignAdapterError, astroArtifactHash, astroContentDigest, astroMediaDigest, astroRegistrationDigest, createAstroDesignAdapter, materializeAstroArtifact, renderAstroArtifact, verifyAstroArtifact, verifyBuiltAstroOutput, type AstroMediaBinding } from "./index.js";
@@ -136,6 +136,12 @@ describe("Astro design adapter", () => {
       expect(output["page-0/index.html"]).toContain("image/webp");
     } finally { await rm(directory, { recursive: true, force: true }); }
   }, 120_000);
+
+  it("renders approved composition order and stable field anchors in a checked Astro build",async()=>{
+    const adapter=createAstroDesignAdapter(await design(),registrations);const base=defaultPageComposition("variant-1");const composition=applyPageDesign(base,"variant-1",[{op:"variant",elementId:"variant-1:body",value:"compact"},{op:"component",elementId:"variant-1:body",value:"story-card"},{op:"move",elementId:"variant-1:media",value:"variant-1:body"}]).composition;
+    const route={id:"document-1",variantId:"variant-1",composition,path:"/designed",locale:"en",revisionId:"revision-1",componentId:"section-shell",title:"Designed",source:"# Designed\n\nProse stays intact.",sourceHash:contentHash("# Designed\n\nProse stays intact."),media:[]};const input={...renderInput(adapter,[route]),locales:{default:"en",supported:["en"]}};
+    const directory=await mkdtemp(join(tmpdir(),"navocms-composition-"));try{const output=await materializeAndBuild(directory,renderAstroArtifact(input));const html=output["designed/index.html"]!;expect(html.indexOf('data-navocms-element="variant-1:media"')).toBeLessThan(html.indexOf('data-navocms-element="variant-1:body"'));expect(html).toContain('data-navocms-field="variant-1:body:body"');expect(html).toContain("Prose stays intact.");expect(astroContentDigest([route])).not.toBe(astroContentDigest([{...route,composition:base}]));}finally{await rm(directory,{recursive:true,force:true});}
+  },120_000);
 
   it("materializes clean pinned projects and produces byte-identical full dist output", async () => {
     const adapter = createAstroDesignAdapter(await design(), registrations);

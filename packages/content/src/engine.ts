@@ -6,6 +6,7 @@ import { Ajv2020, type ErrorObject } from "ajv/dist/2020.js";
 import * as addFormatsModule from "ajv-formats";
 import type { FormatsPlugin } from "ajv-formats";
 
+import { validatePageComposition, type PageComposition } from "./composition.js";
 import { ContentError } from "./errors.js";
 import { canonicalMarkdown, parseMarkdown } from "./markdown.js";
 import type {
@@ -42,6 +43,7 @@ export interface CreateDocumentInput extends ContentScope {
 }
 
 export interface PatchRevisionInput extends ContentScope {
+  readonly composition?: PageComposition;
   readonly revisionId: string;
   readonly baseSourceHash: string;
   readonly operations: readonly StructuralPatchOperation[];
@@ -213,7 +215,7 @@ export class ContentEngine {
       source: base.source,
       baseSourceHash: input.baseSourceHash,
       operations: input.operations,
-      allowEmpty: Boolean(input.metadata && Object.keys(input.metadata).length),
+      allowEmpty: Boolean(input.composition || (input.metadata && Object.keys(input.metadata).length)),
       directives: this.directivesFor(input, document.typeName)
     });
     // `body` is a supported metadata mirror in the foundation packs. Never let it
@@ -228,6 +230,7 @@ export class ContentEngine {
       parentRevisionId: base.id,
       source: result.source,
       metadata,
+      ...(input.composition ?? base.composition ? { composition: input.composition ?? base.composition } : {}),
       provenance: input.provenance
     });
     return immutable({ revision, diff: result.diff });
@@ -373,6 +376,7 @@ export class ContentEngine {
       this.#variants.set(record.id, immutable({ ...record, ...target }));
     }
     for (const record of [...bundle.revisions].sort((left, right) => left.number - right.number)) {
+      if (record.composition) validatePageComposition(record.composition, record.variantId);
       const source = bundle.files[record.path];
       if (source === undefined) throw new ContentError("BUNDLE_FILE_MISSING", `Bundle file ${record.path} is missing`);
       const document = this.requireDocument(target, record.documentId);
@@ -427,6 +431,7 @@ export class ContentEngine {
   }
 
   private createRevision(input: ContentScope & {
+    readonly composition?: PageComposition;
     readonly documentId: string;
     readonly variantId: string;
     readonly parentRevisionId?: string;
@@ -454,7 +459,9 @@ export class ContentEngine {
         .filter((revision) => revision.variantId === variant.id)
         .map((revision) => revision.number)
     );
+    if (input.composition) validatePageComposition(input.composition, variant.id);
     const revision = immutable({
+      ...(input.composition ? { composition: input.composition } : {}),
       id: this.#id(),
       tenantId: input.tenantId,
       siteId: input.siteId,

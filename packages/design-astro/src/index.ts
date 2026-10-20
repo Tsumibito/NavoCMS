@@ -1,5 +1,5 @@
 import type { CompiledDesignSystem } from "@navocms/design";
-import { contentHash, renderSemanticMarkdownHtml, type DirectiveDefinition } from "@navocms/content";
+import { validatePageComposition, type PageComposition, contentHash, renderSemanticMarkdownHtml, type DirectiveDefinition } from "@navocms/content";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { dirname, posix, resolve } from "node:path";
@@ -66,6 +66,8 @@ export function createAstroDesignAdapter(
 }
 
 export interface AstroRenderRoute {
+  readonly variantId?: string;
+  readonly composition?: PageComposition;
   readonly id: string;
   readonly path: string;
   readonly locale: string;
@@ -224,7 +226,7 @@ export async function materializeAstroArtifact(directory: string, artifact: Astr
   }
 }
 
-export function astroContentDigest(routes: readonly AstroRenderRoute[], redirects?: AstroRenderInput["redirects"]): `sha256:${string}` { const routesDigest = digest([...routes].map((route) => ({ id: route.id, revisionId: route.revisionId, sourceHash: route.sourceHash, title: route.title, componentId: route.componentId, locale: route.locale, path: route.path, directives: normalizedDirectives(route.directives), media: sortedMedia(route.media) })).sort(routeOrder)); return redirects?.length ? digest({ routesDigest, redirects }) : routesDigest; }
+export function astroContentDigest(routes: readonly AstroRenderRoute[], redirects?: AstroRenderInput["redirects"]): `sha256:${string}` { const routesDigest = digest([...routes].map((route) => ({ id: route.id, revisionId: route.revisionId, sourceHash: route.sourceHash, title: route.title, componentId: route.componentId, locale: route.locale, path: route.path, directives: normalizedDirectives(route.directives), media: sortedMedia(route.media), ...(route.composition ? { composition: route.composition, variantId: route.variantId } : {}) })).sort(routeOrder)); return redirects?.length ? digest({ routesDigest, redirects }) : routesDigest; }
 export function astroMediaDigest(routes: readonly AstroRenderRoute[]): `sha256:${string}` { return digest(routes.flatMap((route) => route.media.map((item) => ({ ...item, route: route.id, locale: route.locale, path: route.path }))).sort(mediaOrder)); }
 export function astroRegistrationDigest(registrations: Iterable<AstroComponentRegistration>): `sha256:${string}` { return digest([...registrations].map(({ id, module, source, exportName }) => ({ id, module, source, exportName })).sort((left, right) => left.id.localeCompare(right.id))); }
 
@@ -242,6 +244,11 @@ function assertInput(input: AstroRenderInput): void {
   for (const route of input.routes) {
     const outputPath = `src/pages${pagePath(route.path)}.astro`;
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(route.id) || !/^[A-Za-z0-9_-]{1,128}$/.test(route.revisionId) || byteLength(route.path) > 512 || byteLength(route.title) < 1 || byteLength(route.title) > ASTRO_RENDER_LIMITS.titleBytes || byteLength(route.source) > ASTRO_RENDER_LIMITS.sourceBytes || route.media.length > ASTRO_RENDER_LIMITS.mediaPerRoute || !/^\/[a-z0-9/_-]*$/.test(route.path) || route.path.includes("//") || paths.has(outputPath) || !input.locales.supported.includes(route.locale) || !input.design.components.has(route.componentId) || route.sourceHash !== contentHash(route.source)) throw new AstroDesignAdapterError("Renderer route input invalid");
+    if (route.composition) {
+      if (!route.variantId) throw new AstroDesignAdapterError("Composition requires a canonical variant ID");
+      validatePageComposition(route.composition, route.variantId);
+      if (route.composition.sections.some(section => !input.design.components.has(section.componentId))) throw new AstroDesignAdapterError("Composition component is not registered");
+    }
     paths.add(outputPath); const seen = localized.get(route.id) ?? new Set<string>(); seen.add(route.locale); localized.set(route.id, seen);
     for (const item of route.media) {
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(item.assetId) || byteLength(item.alt) < 1 || byteLength(item.alt) > ASTRO_RENDER_LIMITS.altBytes || !/^[a-f0-9]{64}$/.test(item.variantIdentity) || !validMediaUrl(item.url) || !item.alt) throw new AstroDesignAdapterError("Renderer media input invalid");
@@ -256,7 +263,13 @@ function assertInput(input: AstroRenderInput): void {
 }
 function pagePath(path: string): string { return path === "/" ? "/index" : `${path.replace(/\/$/, "")}/index`; }
 function builtRoutePath(pagePath: string): string { return pagePath === "src/pages/index.astro" ? "index.html" : `${pagePath.slice("src/pages/".length, -".astro".length)}.html`; }
-function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string, routes: readonly AstroRenderRoute[]): string { const depth = route.path.split("/").filter(Boolean).length; return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\nconst title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media.map(item => ({ ...item, width: item.width ?? null, height: item.height ?? null, sizes: item.sizes ?? null, sourceGroups: groupResponsiveSources(item.sources ?? []).map(source => ({ ...source, media: source.media ?? null })) })))};\nconst navigation = ${JSON.stringify(routes.filter(item => item.locale === route.locale).map(item => ({ path: item.path, title: item.title })))};\nconst languages = ${JSON.stringify(routes.filter(item => item.id === route.id).map(item => ({ path: item.path, locale: item.locale })))};\n---\n<SiteLayout title={title} navigation={navigation} languages={languages} locale=${JSON.stringify(route.locale)}><RouteComponent><main data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}><Fragment set:html={contentHtml} />{media.map((item) => <picture>{item.sourceGroups.map((source) => <source srcset={source.srcset} sizes={item.sizes} type={source.mediaType} media={source.media} data-navocms-variant={source.variantIdentity} />)}<img src={item.url} alt={item.alt} width={item.width} height={item.height} data-navocms-variant={item.variantIdentity} /></picture>)}</main></RouteComponent></SiteLayout>\n`; }
+function page(route: AstroRenderRoute, registration: AstroComponentRegistration, html: string, routes: readonly AstroRenderRoute[]): string { const depth = route.path.split("/").filter(Boolean).length;
+  const sectionComponents = route.composition ? [...new Set(route.composition.sections.map(s => s.componentId))] : [];
+  const imports = sectionComponents.map((id,i) => `import PageSection${i} from '../${"../".repeat(depth)}components/${id}.astro';`).join("\n");
+  const sectionData = route.composition ? `const sections = ${JSON.stringify(route.composition.sections)} as const;\nconst sectionComponents = {${sectionComponents.map((id,i) => `${JSON.stringify(id)}: PageSection${i}`).join(",")}};\n` : "";
+  const pictures = `{media.map((item) => <picture>{item.sourceGroups.map((source) => <source srcset={source.srcset} sizes={item.sizes} type={source.mediaType} media={source.media} data-navocms-variant={source.variantIdentity} />)}<img src={item.url} alt={item.alt} width={item.width} height={item.height} data-navocms-variant={item.variantIdentity} /></picture>)}`;
+  const body = route.composition ? `{sections.map((section) => { const SectionComponent = sectionComponents[section.componentId]; return <div data-navocms-element={section.id} data-navocms-slot={section.slot}><SectionComponent elementId={section.id} variant={section.variant} tone={section.tone}><div data-navocms-field={section.id + ':' + section.contentRef.field}>{section.slot === 'body' ? <Fragment set:html={contentHtml} /> : <>${pictures}</>}</div></SectionComponent></div>; })}` : `<Fragment set:html={contentHtml} />${pictures}`;
+  return `---\nimport SiteLayout from '../${"../".repeat(depth)}layouts/SiteLayout.astro';\nimport RouteComponent from '../${"../".repeat(depth)}components/${registration.id}.astro';\n${imports}\n${sectionData}const title = ${JSON.stringify(route.title)};\nconst contentHtml = ${JSON.stringify(html)};\nconst media = ${JSON.stringify(route.media.map(item => ({ ...item, width: item.width ?? null, height: item.height ?? null, sizes: item.sizes ?? null, sourceGroups: groupResponsiveSources(item.sources ?? []).map(source => ({ ...source, media: source.media ?? null })) })))};\nconst navigation = ${JSON.stringify(routes.filter(item => item.locale === route.locale).map(item => ({ path: item.path, title: item.title })))};\nconst languages = ${JSON.stringify(routes.filter(item => item.id === route.id).map(item => ({ path: item.path, locale: item.locale })))};\n---\n<SiteLayout title={title} navigation={navigation} languages={languages} locale=${JSON.stringify(route.locale)}><RouteComponent><main ${route.composition ? `class="navocms-composition" data-gap="${route.composition.gap}" ` : ""}data-navocms-revision=${JSON.stringify(route.revisionId)} data-navocms-component=${JSON.stringify(registration.id)}>${body}</main></RouteComponent></SiteLayout>\n`; }
 function canonical(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`; return JSON.stringify(value); }
 function digest(value: unknown): `sha256:${string}` { return `sha256:${createHash("sha256").update(typeof value === "string" ? value : canonical(value)).digest("hex")}`; }
 function byteLength(value: string): number { return Buffer.byteLength(value, "utf8"); }

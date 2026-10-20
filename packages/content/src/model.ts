@@ -72,6 +72,7 @@ export interface ContentRevision extends ContentScope {
   readonly source: string;
   readonly sourceHash: string;
   readonly ast: ContentAst;
+  readonly composition?: import("./composition.js").PageComposition;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly provenance: RevisionProvenance;
   readonly createdAt: string;

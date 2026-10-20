@@ -10,7 +10,7 @@ import { InMemoryEditingRepository } from "../dist/repository.js";
 import { InMemoryReleaseWorkflowRepository } from "../dist/release-repository.js";
 import { outputManifestDigest } from "../dist/output-manifest.js";
 import { McpEditingService, type StagingAstroOperations } from "../dist/service.js";
-import { createMcpHttpServer } from "../dist/http.js";
+import { createMcpHttpServer, type McpHttpOptions } from "../dist/http.js";
 import type { PreviewBuildStatus } from "../dist/model.js";
 
 const site = Object.freeze({
@@ -147,6 +147,42 @@ test("a delegated agent identity cannot sign in for the confirmation", async ({ 
   }
 });
 
+test("page editor saves shared design/text revisions, comments and conflicts without a model", async ({ page }) => {
+  const harness = await confirmationHarness();
+  const created = await harness.service.createDraft(harness.context,{typeName:"article",slug:"editor-browser",locale:"en",title:"Editor browser",markdown:"# Editor browser\n\nOriginal paragraph.\n",idempotencyKey:"editor-browser-create-001"}) as {draft:{revisionId:string;sourceHash:string}};
+  await new Promise<void>(resolve=>harness.server.listen(0,"127.0.0.1",resolve));const base=`http://127.0.0.1:${(harness.server.address() as {port:number}).port}`;harness.setOrigin(base);
+  try {
+    const errors:string[]=[];page.on("pageerror",error=>errors.push(error.message));
+    await page.goto(base+"/editor/"+created.draft.revisionId);
+    await expect(page.getByRole("heading",{name:"Editor browser"})).toBeVisible();
+    expect(errors).toEqual([]);
+    const axe=await new AxeBuilder({page}).withTags(["wcag2a","wcag2aa","wcag21aa"]).analyze();expect(axe.violations).toEqual([]);
+    await page.setViewportSize({width:375,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+    await page.locator('[data-setting="variant"]').first().selectOption("compact");
+    await page.locator('#title').fill("Saved from browser");
+    await page.locator("#node").selectOption({label:"paragraph · Original paragraph."});await page.locator("#text").fill("Edited paragraph from browser.");
+    await page.getByRole("button",{name:"Save draft",exact:true}).click();await page.waitForURL(/\/editor\/[^?]+\?change=/);
+    const savedId=new URL(page.url()).pathname.split("/").at(-1)!;
+    const state=await harness.service.pageDesign(harness.context,savedId) as any;expect(state.composition.sections[0].variant).toBe("compact");expect(state.content.metadata.title).toBe("Saved from browser");expect(state.editableNodes.some((node:any)=>node.text.includes("Edited paragraph from browser."))).toBe(true);
+    await page.locator('#comment-text').fill("Keep this block compact");await page.getByRole("button",{name:"Save comment"}).click();await expect(page.locator('article.comment')).toContainText("Keep this block compact");
+    await page.getByRole("button",{name:"Build preview"}).click();await expect(page.locator('#open-preview')).toBeVisible();expect(await page.locator('#open-preview').getAttribute('href')).toContain('/previews/');await expect(page.frameLocator('#preview-frame').getByRole('heading',{name:'built',exact:true})).toBeVisible();
+    await harness.service.patchRevision(harness.context,{revisionId:savedId,baseSourceHash:state.baseSourceHash,operations:[],metadataPatch:{title:"Concurrent agent title"},idempotencyKey:"editor-concurrent-agent-001"});
+    await page.locator('#title').fill("Unsaved browser title");await page.getByRole("button",{name:"Save draft",exact:true}).click();await expect(page.locator('#feedback')).toContainText("Another edit was saved");await expect(page.locator('#title')).toHaveValue("Unsaved browser title");await expect(page.locator('#current')).toBeVisible();
+    const missingCsrf=await page.request.post(page.url().split('?')[0]!,{headers:{origin:base},data:{action:"save",revisionId:savedId}});expect(missingCsrf.status()).toBe(403);
+    harness.revokeSessions();const revoked=await page.request.post(page.url().split('?')[0]!,{headers:{origin:base},data:{action:"save"}});expect(revoked.status()).toBe(401);
+    expect(errors).toEqual([]);
+  } finally {await new Promise<void>(resolve=>harness.server.close(()=>resolve()));await new Promise<void>(resolve=>harness.idp.close(()=>resolve()));}
+});
+
+test("read-only editor sessions inspect but cannot save or comment",async({page})=>{
+  const harness=await confirmationHarness({readOnlyFirstLogin:true});const d=await harness.service.createDraft(harness.context,{typeName:"article",slug:"viewer-editor",locale:"en",title:"Read only",markdown:"# Read only\n",idempotencyKey:"editor-viewer-create-001"}) as {draft:{revisionId:string;sourceHash:string}};
+  await new Promise<void>(resolve=>harness.server.listen(0,"127.0.0.1",resolve));const base=`http://127.0.0.1:${(harness.server.address() as {port:number}).port}`;harness.setOrigin(base);
+  try{await page.goto(base+'/editor/'+d.draft.revisionId);await expect(page.getByText('Read-only access.')).toBeVisible();await expect(page.getByRole('button',{name:'Save draft',exact:true})).toBeDisabled();
+    const csrf=await page.locator('#edit').getAttribute('data-csrf');const r=await page.request.post(base+'/editor/'+d.draft.revisionId,{headers:{origin:base},data:{action:'save',csrf,revisionId:d.draft.revisionId,baseSourceHash:d.draft.sourceHash,metadataPatch:{title:'Denied'},idempotencyKey:'editor-viewer-denied-001'}});expect(r.status()).toBe(403);
+    await page.context().clearCookies();const expired=await page.request.post(base+'/editor/'+d.draft.revisionId,{headers:{origin:base},data:{action:'save',csrf}});expect(expired.status()).toBe(401);
+  }finally{await new Promise<void>(resolve=>harness.server.close(()=>resolve()));await new Promise<void>(resolve=>harness.idp.close(()=>resolve()));}
+});
+
 async function prepare(harness: ConfirmationHarness) {
   const created = await harness.service.createDraft(harness.context, {
     typeName: "article", slug: "browser-confirmation", locale: "en", title: "Browser confirmation",
@@ -162,6 +198,8 @@ interface ConfirmationHarness {
   readonly service: McpEditingService;
   readonly idp: ReturnType<typeof createHttpServer>;
   readonly logoutCount: () => number;
+  readonly setOrigin: (origin: string) => void;
+  readonly revokeSessions: () => void;
   readonly context: { authorization: { tenantId: string; siteId: string; principal: { id: string; kind: "human"; issuer: string; subject: string }; layers: readonly { name: string; permissions: readonly string[] }[] } };
 }
 
@@ -263,8 +301,10 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean; rea
       };
     }
   };
-  const server = createMcpHttpServer({
+  let forceRevoked = false;
+  const httpOptions: McpHttpOptions = {
     service,
+    browserSessionRevocations: { isRevoked: async () => forceRevoked,revoke: async () => {} },
     verifier: { verify: async () => { throw new Error("Browser tokens cannot authorize MCP"); } },
     resource: "https://cms.example.test/mcp",
     authorizationServers: ["https://identity.example.test"],
@@ -281,8 +321,9 @@ async function confirmationHarness(options: { readonly agentLogin?: boolean; rea
       tokenEndpoint: `http://127.0.0.1:${idpPort}/token`,
       logoutEndpoint: `http://127.0.0.1:${idpPort}/logout`
     }
-  });
-  return { server, service, idp, context, logoutCount: () => logoutCount };
+  };
+  const server = createMcpHttpServer(httpOptions);
+  return { server, service, idp, context, logoutCount: () => logoutCount,setOrigin: origin => { (httpOptions as {resource:string}).resource = origin + "/mcp"; },revokeSessions: () => { forceRevoked = true; } };
 }
 
 function randomId(): string {
