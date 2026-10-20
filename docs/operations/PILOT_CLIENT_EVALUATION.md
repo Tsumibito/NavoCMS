@@ -85,3 +85,14 @@ The owner records at least seven days of actual editorial use, all blocking
 issues and the incident/backup alert route. Measure RPO and RTO in a real
 independent recovery rehearsal with the retained archive and keys. Production
 cutover remains a separate URL/SEO/locale/consent/forms review and owner decision.
+
+## Photo reference feedback found during real Codex runs
+
+A generic media reference is not necessarily a visible page image. The preview
+renderer resolves only ownerType `content.revision` with ownerId equal to the
+exact revisionId selected for preview. `document` and `revision` are not aliases.
+The passport and tool schema expose this binding contract; non-rendered owner
+types remain valid editorial references but now return a warning and corrective
+next step. A `revision-reference` result records the binding kind, not proof that
+a preview has rendered. Verify the resulting page and responsive image sources.
+Retain the original failed photo attempts and all subsequent retries.

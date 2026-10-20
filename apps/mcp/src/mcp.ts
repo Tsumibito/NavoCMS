@@ -362,8 +362,8 @@ function registerMediaWriteTools(server: McpServer, media: McpMediaService, cont
   }, safeTool(async (input) => result("Media asset rejected", await media.reject(context, input))));
   server.registerTool("media_reference_create", {
     title: "Create a media reference",
-    description: "Attach an existing asset to a bounded owner reference. Requires media:write.",
-    inputSchema: { assetId: z.string().uuid(), ownerType: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), ownerId: z.string().uuid(), alt: z.string().min(1).max(512).optional(), purpose: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), idempotencyKey: z.string().min(16).max(128) }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    description: "Attach an existing asset to a bounded owner reference. For a visible page image use ownerType content.revision and ownerId equal to the exact preview revisionId. Other owner types are editorial references and do not render on the page. Requires media:write.",
+    inputSchema: { assetId: z.string().uuid(), ownerType: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/).describe("For page images use content.revision exactly; document and revision are not aliases."), ownerId: z.string().uuid().describe("The exact revisionId selected for preview when ownerType is content.revision."), alt: z.string().min(1).max(512).optional(), purpose: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/), idempotencyKey: z.string().min(16).max(128) }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, safeTool(async ({ alt, ...input }) => result("Media reference created", await media.createReference(context, { ...input, ...(alt ? { alt } : {}) }))));
   server.registerTool("media_reference_remove", {
     title: "Remove a media reference",

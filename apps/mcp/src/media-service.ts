@@ -74,7 +74,14 @@ export class McpMediaService {
   }
 
   public async createReference(context: McpRequestContext, input: MediaReferenceInput): Promise<object> {
-    return project(await this.#repository.createReference(this.writeScope(context), input));
+    const reference = await this.#repository.createReference(this.writeScope(context), input);
+    return project({ ...reference,
+      pagePreviewBinding: input.ownerType === "content.revision" ? "revision-reference" : "editorial-reference-only",
+      ...(input.ownerType === "content.revision" ? {} : {
+        warning: "REFERENCE_NOT_USED_BY_PAGE_PREVIEW",
+        nextStep: "For a visible page image, create a content.revision reference whose ownerId is the exact revisionId selected for preview; document and revision are not aliases."
+      })
+    });
   }
 
   public async removeReference(context: McpRequestContext, referenceId: string, idempotencyKey: string): Promise<object> {

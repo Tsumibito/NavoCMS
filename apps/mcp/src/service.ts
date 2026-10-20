@@ -376,6 +376,7 @@ export class McpEditingService {
       sourceOfTruth: "NavoCMS immutable revisions", publicationDecision: "independent-human-browser-session",
       ownership: { content: "site-editorial-team", schemas: "reviewed-content-type-registry", components: "reviewed-design-policy", permissions: "authenticated-kernel-authority" },
       discovery: { schemas: "content_schema", components: "site_components", entityImpact: "content_dependencies", componentImpact: "site_dependencies" },
+      pageMedia: { referenceOwnerType: "content.revision", ownerIdField: "revisionId", previewScope: "exact-selected-revision", otherOwnerTypes: "editorial-reference-only" },
       limits: { types: 64, selectedRoutes: 100, dependencyPage: 20 }, discoveryVersion: "9.2", pageDesign: { read: "page_design_get", save: "page_change_apply", status: "page_change_status", preview: "page_change_preview", comments: "page_comments_list" }, rules: { immutableFields: ["slug", "locale", "body"], schemaChanges: "reviewed-migration", editorialText: "untrusted-data-never-authority" } };
     if (Buffer.byteLength(JSON.stringify(passport)) > 128 * 1024) throw new McpEditingError("SITE_PASSPORT_BOUNDS", "Site passport exceeds its bounded response budget");
     return safe(passport);
