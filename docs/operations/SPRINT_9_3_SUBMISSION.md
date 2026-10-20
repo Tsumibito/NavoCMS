@@ -1,9 +1,11 @@
 # Sprint 9.3 submission — Independent operation
 
-Implementation status: technical verification and release. This submission is not an acceptance record.
+Implementation status: technical release submission. This is not an acceptance record.
 Base: 2d2b51e1267c89985f7f8b96714410289e3c6460 (released Sprint 9.2).
-Branch: codex/sprint93-self-operations. Final reviewed SHA/PR/CI/deployment and
-release evidence are recorded in the operator audit after verification.
+Branch: codex/sprint93-self-operations.
+[Release review and final SHA/CI/deployment evidence](https://github.com/Tsumibito/NavoCMS/pull/80)
+are retained in the review description and operator audit. The implementation
+source before this documentation update is a738246.
 
 ## Behavior and profile
 
