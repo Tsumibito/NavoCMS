@@ -1,0 +1,8 @@
+[Unit]
+Description=NavoCMS readiness and backup freshness
+OnFailure=navocms-operations-alert.service
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/navocms
+EnvironmentFile=/etc/navocms/compose-coordinates
+ExecStart=/usr/bin/docker compose -f deploy/self-host/compose.yml --profile operations run --rm operations node dist/operations-cli.js monitor /backups/latest.navo

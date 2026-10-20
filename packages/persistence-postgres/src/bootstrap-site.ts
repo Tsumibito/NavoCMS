@@ -39,6 +39,7 @@ export async function bootstrapSite(connectionString: string, input: SiteBootstr
   await client.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('navocms-recovery-activation'))");
     await client.query(
       `INSERT INTO navocms.tenants (id, slug, name) VALUES ($1, $2, $3)
        ON CONFLICT (id) DO UPDATE SET slug = EXCLUDED.slug, name = EXCLUDED.name`,

@@ -1,0 +1,9 @@
+[Unit]
+Description=NavoCMS encrypted site backup
+OnFailure=navocms-operations-alert.service
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/navocms
+EnvironmentFile=/etc/navocms/compose-coordinates
+ExecStart=/opt/navocms/deploy/self-host/backup.sh
+UMask=0077

@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/pnpm/store \
   pnpm build && \
   pnpm --filter @navocms/mcp --prod deploy --legacy /opt/navocms
 
-FROM node:${NODE_VERSION}-bookworm-slim AS runner
+FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 ARG SOURCE_COMMIT
 WORKDIR /app
 ENV NODE_ENV=production
@@ -47,3 +47,19 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 ENTRYPOINT ["tini", "--", "navocms-entrypoint"]
 CMD ["node", "dist/server.js"]
+
+
+FROM postgres:18-bookworm AS operations
+ARG SOURCE_COMMIT
+ENV NAVOCMS_REVIEWED_SOURCE_COMMIT=${SOURCE_COMMIT}
+WORKDIR /app
+COPY --from=runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/@dotenvx/dotenvx/src/cli/dotenvx.js /usr/local/bin/dotenvx
+COPY --from=runtime /usr/local/bin/navocms-entrypoint /usr/local/bin/navocms-entrypoint
+COPY --from=runtime --chown=postgres:postgres /app /app
+USER postgres
+ENTRYPOINT ["navocms-entrypoint"]
+CMD ["node", "dist/operations-cli.js", "doctor"]
+
+FROM runtime AS runner

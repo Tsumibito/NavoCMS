@@ -19,10 +19,10 @@ jobs:
     # Iterate locally while a PR is a draft; prove every review-ready head and main merge.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_DB: navocms_test
           POSTGRES_PASSWORD: navocms_test
@@ -79,10 +79,22 @@ jobs:
           node packages/persistence-postgres/dist/provision-runtime-role.js
           node packages/persistence-postgres/dist/bootstrap-site.js
 
+      - name: Prepare PostgreSQL 18 recovery clients
+        env:
+          NAVOCMS_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          for tool in pg_dump pg_restore; do
+            printf '#!/bin/sh\nexec docker exec -i -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGDATABASE -e PGSSLMODE "$NAVOCMS_TEST_POSTGRES_CONTAINER" %s "$@"\n' "$tool" > "/tmp/navocms-$tool"
+            chmod 700 "/tmp/navocms-$tool"
+          done
+
       - name: Validate contracts, production wiring, and all test suites
         env:
           NODE_ENV: test
           NAVOCMS_ALLOW_INSECURE_TEST_DATABASE: "true"
+          NAVOCMS_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          NAVOCMS_PG_DUMP: /tmp/navocms-pg_dump
+          NAVOCMS_PG_RESTORE: /tmp/navocms-pg_restore
           NAVOCMS_INTEGRATION_DATABASE_URL: postgresql://navocms_runtime:navocms_ci_runtime_password_0123456789@127.0.0.1:5432/navocms_test?sslmode=disable
           NAVOCMS_INTEGRATION_ADMIN_DATABASE_URL: postgresql://postgres:navocms_test@127.0.0.1:5432/navocms_test?sslmode=disable
         run: pnpm check
@@ -103,4 +115,10 @@ jobs:
             -f packages/persistence-postgres/tests/media-isolation.sql
 
       - name: Build production container
-        run: docker build --tag navocms:${{ github.sha }} .
+        run: |
+          docker build --build-arg SOURCE_COMMIT=${{ github.sha }} --tag navocms:${{ github.sha }} .
+          docker build --build-arg SOURCE_COMMIT=${{ github.sha }} --target operations --tag navocms-operations:${{ github.sha }} .
+          docker run --rm --entrypoint pg_dump navocms-operations:${{ github.sha }} --version
+          docker run --rm --entrypoint pg_restore navocms-operations:${{ github.sha }} --version
+          docker run --rm --entrypoint dotenvx navocms-operations:${{ github.sha }} --version
+          docker run --rm --entrypoint node navocms-operations:${{ github.sha }} --input-type=module -e "const m=await import('./dist/operations-cli.js'); if(typeof m.operationsMain!=='function')process.exit(1)"

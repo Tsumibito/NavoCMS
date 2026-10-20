@@ -267,6 +267,11 @@ realtime collaboration, генерация всего frontend с нуля.
 
 ## Sprint 9.3 — Пилот, воспроизводимая установка и восстановление
 
+Реализация и ограничения: [submission](../operations/SPRINT_9_3_SUBMISSION.md),
+[self-hosting](../operations/SELF_HOSTING.md),
+[client evaluation](../operations/PILOT_CLIENT_EVALUATION.md).
+Независимая приёмка и семидневный пилот фиксируются отдельно.
+
 **Зависимость:** 9.2 accepted. **Цель:** обычная эксплуатация работает без автора CMS.
 
 **Объём:**

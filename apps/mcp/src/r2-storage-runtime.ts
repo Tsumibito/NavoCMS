@@ -87,3 +87,12 @@ async function readPhysicalMarker(transport: S3Transport, key: string, expectedT
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   return new TextDecoder().decode(bytes) === expectedText;
 }
+
+/** Operator-only bootstrap; existing foreign or damaged markers are never overwritten. */
+export async function initializeR2Namespaces(transport:S3Transport):Promise<void>{
+ for(const [name,key]of [["root",ROOT_MARKER_KEY],["media",`navocms/v1/media/${MARKER_KEY}`],["artifacts",`navocms/v1/artifacts/${MARKER_KEY}`]]as const){
+  const text=MARKERS[name],bytes=new TextEncoder().encode(text);const head=await transport.request({method:"HEAD",key});
+  if(head.status===404){const result=await transport.request({method:"PUT",key,body:bytes,headers:{"content-type":"application/json","x-amz-meta-sha256":sha256(bytes),"x-amz-meta-byte-size":String(bytes.length),"if-none-match":"*"}});if(result.status<200||result.status>=300)throw Error("R2_NAMESPACE_INITIALIZATION_FAILED");}
+  if(!await readPhysicalMarker(transport,key,text))throw Error("R2_NAMESPACE_MARKER_CONFLICT");
+ }
+}

@@ -1,0 +1,32 @@
+# Operator owns HTTPS ingress. Only the decryption key enters platform environment.
+services:
+  cms:
+    image: navocms:${NAVOCMS_SOURCE_COMMIT:?pin a reviewed commit}
+    build:
+      context: ../..
+      target: runner
+      args:
+        SOURCE_COMMIT: ${NAVOCMS_SOURCE_COMMIT}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8788:8788"
+    environment:
+      DOTENV_PRIVATE_KEY: ${DOTENV_PRIVATE_KEY:-}
+      NAVOCMS_ENV_FILE: /run/navocms/runtime.env
+    volumes:
+      - ${NAVOCMS_RUNTIME_ENV_FILE:?encrypted runtime file}:/run/navocms/runtime.env:ro
+  operations:
+    profiles: [operations]
+    image: navocms-operations:${NAVOCMS_SOURCE_COMMIT:?pin a reviewed commit}
+    build:
+      context: ../..
+      target: operations
+      args:
+        SOURCE_COMMIT: ${NAVOCMS_SOURCE_COMMIT}
+    environment:
+      DOTENV_PRIVATE_KEY: ${DOTENV_OPS_PRIVATE_KEY:-}
+      NAVOCMS_ENV_FILE: /run/navocms/operations.env
+    volumes:
+      - ${NAVOCMS_OPS_ENV_FILE:?encrypted operations file}:/run/navocms/operations.env:ro
+      - ${NAVOCMS_BACKUP_DIRECTORY:?private backup directory}:/backups
+      - ${NAVOCMS_BOOTSTRAP_FILE:?operator bootstrap file}:/run/navocms/site.json:ro
