@@ -1,11 +1,20 @@
 import { sha256, type ReleaseProviderPublishInput } from "@navocms/kernel";
 import { describe, expect, it } from "vitest";
 
-import { CLOUDFLARE_CACHE_CONTROL, CloudflarePagesReleaseProvider, InMemoryDeliveryPhaseStore, type CloudflareDeployment, type CloudflareLiveProbe, type CloudflarePagesReleaseProviderOptions, type CloudflarePagesTransport, type ImmutableArtifactReference } from "./index.js";
+import { CLOUDFLARE_CACHE_CONTROL, immutableReferenceHash, CloudflarePagesReleaseProvider, InMemoryDeliveryPhaseStore, type CloudflareDeployment, type CloudflareLiveProbe, type CloudflarePagesReleaseProviderOptions, type CloudflarePagesTransport, type ImmutableArtifactReference } from "./index.js";
 
 const input: ReleaseProviderPublishInput = Object.freeze({ releaseId: "release-pages-only", releaseHash: "a".repeat(64), artifact: { mediaType: "text/html; charset=utf-8" as const, body: "release", hash: "b".repeat(64) } });
 
 describe("Cloudflare Pages release provider", () => {
+  it("accepts reviewed redirect configuration but retains path traversal protection", () => {
+    const base = deployable(input.releaseHash, input.artifact.hash).reference;
+    for (const path of ["_redirects", "../_redirects", "_redirects/../secret", "/_redirects", ".env", "_worker.js"]) {
+      const reference = { ...base, byteSize: 12, files: [{ path, sha256: "a".repeat(64), byteSize: 12 }] };
+      if (path === "_redirects") expect(immutableReferenceHash(reference)).toMatch(/^[a-f0-9]{64}$/);
+      else expect(() => immutableReferenceHash(reference)).toThrow();
+    }
+  });
+
   it("publishes, reconciles, and rolls back Pages without serializing or invoking Coolify", async () => {
     const cloudflare = new FakeCloudflare();
     const provider = createProvider(cloudflare);

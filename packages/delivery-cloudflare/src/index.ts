@@ -647,7 +647,7 @@ function boundedAttempts(value: number | undefined): number {
 }
 
 function safeIdentifier(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value); }
-function safeOutputPath(value: string): boolean { return /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*\/$)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && bytes(value) <= 512; }
+function safeOutputPath(value: string): boolean { return value === "_redirects" || /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*\/$)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && bytes(value) <= 512; }
 function hash(value: unknown): value is string { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
 function prefixedHash(value: unknown): value is string { return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value); }
 function commitSha(value: unknown): value is string { return typeof value === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value); }
