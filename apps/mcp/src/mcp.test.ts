@@ -77,7 +77,7 @@ describe("MCP editing service", () => {
       idempotencyKey: "publish-agent-editing-001"
     })).resolves.toMatchObject({
       release: { status: "published", artifactHash: preview.artifactHash },
-      publication: { artifactHash: preview.artifactHash, status: "applied" }
+      publication: { artifactHash: preview.artifactHash, status: "verified" }
     });
   });
 

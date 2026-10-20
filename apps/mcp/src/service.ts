@@ -924,7 +924,7 @@ export class McpEditingService {
       });
     }
     await this.#releases.markVerified(repositoryContext, releaseId, publication.id);
-    return publication;
+    return { ...publication, status: "verified" };
   }
 
   private async validateRelations(repository: RepositoryContext, typeName: string, metadata: Readonly<Record<string, unknown>>): Promise<void> {
