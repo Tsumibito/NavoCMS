@@ -624,6 +624,7 @@ export class McpEditingService {
         revisionId: revision.id,
         expiresAt
       }, "G1", release.correlationId);
+      const pagePath = stagingRender?.routes?.find(route => route.revisionId === revision.id)?.path;
       const build = Object.freeze({ releaseId: release.id, status: this.#stagingAstro ? "building" as const : "unsupported" as const });
       return safe({
         status: "previewed",
@@ -634,6 +635,7 @@ export class McpEditingService {
         artifactHash: artifact.hash,
         workflow,
         previewUrl: `${this.#releaseConfig.previewBaseUrl}/previews/${token}`,
+        ...(pagePath ? { pagePath } : {}),
         confirmationUrl: `${this.#releaseConfig.previewBaseUrl}/confirmations/${confirmationToken}`,
         build,
         expiresAt,

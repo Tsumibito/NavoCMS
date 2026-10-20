@@ -54,6 +54,7 @@ integration("MCP media PostgreSQL bridge", () => {
     const runtime = new StagingOperationalRuntime({ database: database!, environmentKey: "default", reviewedSourceCommit: "a".repeat(40), toolchainDirectory: "/unused", readinessContext: { site, principalId: scope.principalId }, runtimePrincipalId: scope.principalId, mediaStorage: storage, mediaBaseUrl: "https://cms.example.test", runner: { attest: async () => { throw new Error("Media-boundary test does not build Astro"); }, build: async () => { throw new Error("Unexpected build"); } } });
     const service = new McpEditingService(editing, new PostgresEventStore(database!), new PostgresIdempotencyStore(database!) as IdempotencyStore, new PostgresReleaseWorkflowRepository(database!), new EmbeddedReleaseProvider(), { environmentKey: "staging" }, database!, undefined, runtime);
     const preview = await service.preparePreview(request, patched.draft.revisionId, `media-preview-${suffix}`);
+    expect(preview.pagePath).toBe(`/media-patch-${suffix}`);
     await expect.poll(() => runtime.buildStatus({ site, principalId: scope.principalId }, preview.releaseId)).toMatchObject({ status: "failed" });
     const identities = await database!.withScope(scope, async client => (await client.query<{ variant_identity: string }>("SELECT variant_identity FROM navocms.media_variants WHERE asset_id=$1", [received.assetId])).rows);
     expect(identities).toHaveLength(3);
