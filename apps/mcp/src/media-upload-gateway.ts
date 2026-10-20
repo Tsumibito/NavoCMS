@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { sha256, verifyUpload, inspectMedia, type MediaScope, type MediaStorage, type MediaRepository } from "@navocms/media";
+import { sha256, verifyUpload, inspectMedia, type MediaScope, type MediaStorage, type MediaRepository, automaticResponsiveTransforms } from "@navocms/media";
 import type { PostgresDatabase } from "@navocms/persistence-postgres";
 
 /** Upload capabilities are database-backed, bounded and scoped; bytes never pass through MCP. */
@@ -34,9 +34,16 @@ export class MediaUploadGateway {
     await this.storage.putImmutable({ key: row.storage_key, bytes, mediaType });
     const scope = { ...this.runtimeScope, principalId: row.principal_id, principalKind: row.principal_kind };
     const asset = await this.repository.finalizeUpload(scope, { intentId: row.intent_id, uploadedStorageKey: row.storage_key, idempotencyKey: `upload-session:${row.intent_id}` });
-    for (const [width, format] of [[320,"image/webp"], [640,"image/webp"], [640,"image/jpeg"]] as const) {
-      await this.repository.generateVariant(scope, { assetId: asset.id, presetId: "responsive", presetVersion: "v1", width, format, idempotencyKey: `responsive:${asset.id}:${width}:${format}` });
-    }
-    return { assetId: asset.id, state: asset.state, responsiveVariants: 3 };
+    const responsiveVariants = await prepareResponsiveVariants(this.repository, scope, asset.id, asset.width!);
+    return { assetId: asset.id, state: asset.state, responsiveVariants };
   }
+}
+
+export async function prepareResponsiveVariants(repository: MediaRepository, scope: MediaScope, assetId: string, width: number): Promise<number> {
+  const transforms = automaticResponsiveTransforms(width);
+  for (const transform of transforms) {
+    await repository.generateVariant(scope, { assetId, presetId: "responsive", presetVersion: "v2", ...transform,
+      idempotencyKey: `responsive-v2:${assetId}:${transform.width}:${transform.format}` });
+  }
+  return transforms.length;
 }

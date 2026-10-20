@@ -61,13 +61,26 @@ integration("MCP media PostgreSQL bridge", () => {
       expect(await runtime.readMedia(variant.variant_identity, preview.releaseId)).toMatchObject({ mediaType: expect.stringMatching(/^image\//) });
     }
     expect(await runtime.publicSnapshot(preview.releaseHash)).toBeUndefined();
+    expect(await runtime.readMedia(digest(bytes), preview.releaseId)).toBeUndefined();
+    const original = (await storage.inventory(`tenants/${scope.tenantId}/sites/${scope.siteId}/originals/`, 20)).objects[0]!;
+    expect((await storage.read(original.key, bytes.length))!.bytes).toEqual(bytes);
+    const partialBytes = new Uint8Array(await sharp({ create: { width: 80, height: 60, channels: 3, background: "#abcdef" } }).png().toBuffer());
+    const mediaScope = { ...scope, principalKind: "human" as const };
+    const intent = await repository.createUploadIntent(mediaScope, { idempotencyKey: `partial-${suffix}`, expectedSha256: digest(partialBytes), expectedSize: partialBytes.length, expectedMediaType: "image/png", expiresAt: new Date(Date.now()+60_000).toISOString(), provenance: { kind: "upload", receivedAt: new Date().toISOString(), receivedBy: scope.principalId }, rights: { license: "test", restricted: false } });
+    if (intent.kind !== "upload-intent") throw new Error("Expected a distinct partial upload");
+    await storage.putImmutable({ key: intent.storageKey, bytes: partialBytes, mediaType: "image/png" });
+    const partial = await repository.finalizeUpload(mediaScope, { intentId: intent.intentId, uploadedStorageKey: intent.storageKey, idempotencyKey: `partial-finalize-${suffix}` });
+    await repository.generateVariant(mediaScope, { assetId: partial.id, presetId: "responsive", presetVersion: "v2", width: 320, format: "image/avif", idempotencyKey: `partial-variant-${suffix}` });
+    const incomplete = await editing.createDraft({ site, typeName: "landing-page", slug: `partial-${suffix}`, title: "Incomplete image", source: "# Incomplete", locale: "en", actorId: scope.principalId });
+    await repository.createReference(mediaScope, { assetId: partial.id, ownerType: "content.revision", ownerId: incomplete.revisionId, purpose: "hero", idempotencyKey: `partial-reference-${suffix}` });
+    await expect(runtime.prepare(request, site, await editing.getRevision({ site, principalId: scope.principalId }, incomplete.revisionId))).rejects.toMatchObject({ code: "STAGING_ASTRO_MEDIA_VARIANTS_INCOMPLETE" });
   });
 
   it("enforces permission and retains replay, drift, Ledger, and outbox trajectory", async () => {
     const storage = new LocalDeterministicMediaStorage();
     const media = new McpMediaService(new PostgresMediaRepository(database!, storage), { storageInjected: true });
     const key = `mcp-media-${randomUUID()}`;
-    const bytes = png(key);
+    const bytes = new Uint8Array(await sharp({ create: { width: 2, height: 2, channels: 3, background: "#123456" } }).png().toBuffer());
     const input = { idempotencyKey: key, expectedSha256: digest(bytes), expectedSize: bytes.byteLength, expectedMediaType: "image/png" as const, expiresAt: new Date(Date.now() + 60_000).toISOString(), provenance: { kind: "upload" as const, receivedAt: new Date().toISOString() }, rights: { license: "test", restricted: false } };
     await expect(media.prepare(viewerContext(), input)).rejects.toBeInstanceOf(SecurityError);
     const prepared = await media.prepare(editorContext(), input) as { kind: "upload-intent"; intentId: string; storageKey: string; asset: { id: string } };
@@ -86,7 +99,7 @@ integration("MCP media PostgreSQL bridge", () => {
           (SELECT count(*) FROM navocms.domain_outbox WHERE correlation_id = $1) AS outbox`, [prepared.asset.id]
       )).rows[0]!
     );
-    expect(trajectory).toEqual({ ledger: "3", outbox: "3" });
+    expect(trajectory).toEqual({ ledger: "9", outbox: "9" });
   });
 });
 

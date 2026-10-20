@@ -1,4 +1,4 @@
-import { sha256, type MediaStorage } from "@navocms/media";
+import { sha256, automaticResponsiveTransforms, type MediaStorage } from "@navocms/media";
 import type { AstroMediaBinding, AstroRenderInput } from "@navocms/design-astro";
 import { renderSemanticMarkdownHtml, type ContentRevision } from "@navocms/content";
 import type { SqlClient, PostgresDatabase } from "@navocms/persistence-postgres";
@@ -15,16 +15,21 @@ import { PostgresReviewedAstroBuildInputStore } from "./postgres-reviewed-astro-
 import type { RepositoryContext } from "./repository.js";
 import type { StoredRelease } from "./release-repository.js";
 import type { StagingAstroOperations } from "./service.js";
-import { STAGING_ASTRO_GOVERNANCE_DIGEST, STAGING_ASTRO_POLICY_DIGEST, StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
+import type { SiteDeliveryContext } from "./site-passport.js";
+import { STAGING_SITE_COMPONENTS, STAGING_ASTRO_GOVERNANCE_DIGEST, STAGING_ASTRO_POLICY_DIGEST, StagingAstroPreviewPreparer } from "./staging-astro-preview-preparer.js";
 import { ImageAttestedAstroBuildRunner, TrustedAstroBuilder, type TrustedAstroBuildRunner } from "./trusted-astro-builder.js";
 
 const INLINE_VARIANT_BYTES = 192 * 1024;
-const INLINE_MEDIA_BYTES = 512 * 1024;
+const INLINE_MEDIA_BYTES = 8 * 1024 * 1024;
 /** Durable workflow key for the pre-review trusted Astro build job. */
 export const STAGING_ASTRO_BUILD_WORKFLOW = "navocms.staging-astro.build.v1";
 
 interface MediaBindingRow extends Record<string, unknown> {
   readonly asset_id: string;
+  readonly preset_version: string;
+  readonly original_width: number;
+  readonly actual_width: number;
+  readonly height: number;
   readonly purpose: string;
   readonly alt: string | null;
   readonly variant_identity: string;
@@ -77,12 +82,25 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
 
   public policyDigest(): string { return STAGING_ASTRO_POLICY_DIGEST; }
 
-  public async siteContext(repository: RepositoryContext): Promise<object> {
+  public async siteContext(repository: RepositoryContext): Promise<SiteDeliveryContext> {
     const base = await this.snapshotBase(repository);
     const input = base ? await new PostgresReviewedAstroBuildInputStore(this.#database, repository, this.#environmentKey).get({ tenantId: repository.site.tenantId, siteId: repository.site.siteId, environment: "staging", environmentKey: this.#environmentKey, releaseId: base.release_id }) : undefined;
+    const routes = input?.render.routes ?? [];
+    const records = await this.#database.withScope(serviceScope(repository), async client => (await client.query<{ id: string; document_id: string; type_name: string; fields: string[] }>(
+      `SELECT r.id,r.document_id,t.name AS type_name,ARRAY(SELECT jsonb_object_keys(r.metadata_json)) AS fields
+       FROM navocms.content_revisions r JOIN navocms.content_documents d ON d.tenant_id=r.tenant_id AND d.site_id=r.site_id AND d.id=r.document_id
+       JOIN navocms.content_types t ON t.tenant_id=d.tenant_id AND t.site_id=d.site_id AND t.id=d.content_type_id
+       WHERE r.tenant_id=$1 AND r.site_id=$2 AND r.id=ANY($3::uuid[])`, [repository.site.tenantId, repository.site.siteId, routes.map(route => route.revisionId)]
+    )).rows);
     return { environmentKey: this.#environmentKey, releaseId: base?.release_id ?? null,
-      routes: input?.render.routes.map(route => ({ path: route.path, locale: route.locale, documentId: route.id, revisionId: route.revisionId, sectionId: "main", componentId: route.componentId, dataSource: "content.revision", fields: ["title", "body", "media"] })) ?? [],
-      redirects: input?.render.redirects ?? [], integrations: { build: "reviewed-astro", media: "injected-immutable-storage" }, policyDigest: STAGING_ASTRO_POLICY_DIGEST };
+      routes: routes.map(route => {
+        const record = records.find(record => record.id === route.revisionId);
+        if (record && (record.fields.length > 64 || record.fields.some(field => field.length > 128))) throw new McpEditingError("SITE_PASSPORT_BOUNDS", "Published field inventory exceeds the passport budget");
+        if (!record) throw new McpEditingError("SITE_SNAPSHOT_REVISION_MISSING", "Published revision is missing");
+        return { path: route.path, locale: route.locale, documentId: record.document_id, variantId: route.id, revisionId: route.revisionId,
+          typeName: record.type_name, sectionId: `${route.id}:main`, componentId: route.componentId, dataSource: "content.revision", fields: [...new Set([...record.fields, "media"])].sort() };
+      }), redirects: input?.render.redirects ?? [], components: STAGING_SITE_COMPONENTS,
+      integrations: { build: "reviewed-astro", media: "injected-immutable-storage" }, policyDigest: STAGING_ASTRO_POLICY_DIGEST };
   }
 
   public async prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision, additional: readonly ContentRevision[] = []): Promise<AstroRenderInput> {
@@ -446,34 +464,46 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
       principalId: context.authorization.principal.id
     }, async (client) => client.query<MediaBindingRow>(
       `SELECT r.asset_id::text, r.purpose, r.alt, v.variant_identity, v.sha256, v.storage_key,
-              v.byte_size::integer AS byte_size, v.media_type, (v.transform_json->>'width')::integer AS width
+              v.byte_size::integer AS byte_size, v.media_type, v.preset_version, o.width AS original_width, v.width AS actual_width, v.height, (v.transform_json->>'width')::integer AS width
          FROM navocms.media_references r
          JOIN navocms.media_assets a
            ON a.tenant_id = r.tenant_id AND a.site_id = r.site_id AND a.id = r.asset_id
+         JOIN navocms.media_originals o ON o.tenant_id=a.tenant_id AND o.site_id=a.site_id AND o.asset_id=a.id
          JOIN navocms.media_variants v
            ON v.tenant_id = r.tenant_id AND v.site_id = r.site_id AND v.asset_id = r.asset_id
         WHERE r.tenant_id = $1 AND r.site_id = $2 AND r.owner_type = 'content.revision'
           AND r.owner_id = $3 AND r.deleted_at IS NULL AND a.state = 'verified'
-          AND v.preset_id = 'responsive' AND v.preset_version = 'v1'
+          AND v.preset_id = 'responsive' AND (v.preset_version = 'v2' OR (v.preset_version = 'v1'
           AND ((v.media_type = 'image/webp' AND v.transform_json->>'width' IN ('320', '640'))
-            OR (v.media_type = 'image/jpeg' AND v.transform_json->>'width' = '640'))
+            OR (v.media_type = 'image/jpeg' AND v.transform_json->>'width' = '640'))))
         ORDER BY r.purpose, r.asset_id, v.media_type, v.width`,
       [revision.tenantId, revision.siteId, revision.id]
     ))).rows;
+    const referenceCount = await this.#database.withScope({ tenantId: revision.tenantId, siteId: revision.siteId, principalId: context.authorization.principal.id }, async client => Number((await client.query<{ count: string }>(
+      "SELECT count(DISTINCT (asset_id,purpose))::text AS count FROM navocms.media_references WHERE tenant_id=$1 AND site_id=$2 AND owner_type='content.revision' AND owner_id=$3 AND deleted_at IS NULL",
+      [revision.tenantId, revision.siteId, revision.id])).rows[0]!.count));
     const grouped = new Map<string, MediaBindingRow[]>();
     for (const row of rows) {
       if (!validRow(row) || row.byte_size > INLINE_VARIANT_BYTES) throw new McpEditingError("STAGING_ASTRO_MEDIA_INVALID", "Verified media variant metadata is outside the staging policy");
       const key = `${row.purpose}:${row.asset_id}`;
       grouped.set(key, [...(grouped.get(key) ?? []), row]);
     }
+    if (grouped.size !== referenceCount) throw new McpEditingError("STAGING_ASTRO_MEDIA_VARIANTS_INCOMPLETE", "Every referenced image must have verified delivery variants; originals cannot be published");
     let total = 0;
     const bound: AstroMediaBinding[] = [];
-    for (const [key, variants] of [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-      const webp320 = variants.find((variant) => variant.media_type === "image/webp" && variant.width === 320);
-      const webp640 = variants.find((variant) => variant.media_type === "image/webp" && variant.width === 640);
-      const jpeg640 = variants.find((variant) => variant.media_type === "image/jpeg" && variant.width === 640);
-      if (!webp320 || !webp640 || !jpeg640 || variants.length !== 3) throw new McpEditingError("STAGING_ASTRO_MEDIA_VARIANTS_INCOMPLETE", "A referenced staging image needs responsive WebP 320/640 and JPEG 640 variants");
-      const urls = await Promise.all([webp320, webp640, jpeg640].map(async (variant) => {
+    for (const [key, available] of [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+      const modern = available.some(variant => variant.preset_version === "v2");
+      let variants = available.filter(variant => variant.preset_version === (modern ? "v2" : "v1"));
+      if (modern) {
+        const expected = automaticResponsiveTransforms(variants[0]!.original_width);
+        if (variants.length !== expected.length || expected.some(transform => !variants.some(v => v.width === transform.width && v.media_type === transform.format))) {
+          throw new McpEditingError("STAGING_ASTRO_MEDIA_VARIANTS_INCOMPLETE", "Finish automatic responsive v2 processing before previewing this image");
+        }
+        variants = variants.sort((a, b) => ["image/avif", "image/webp", "image/jpeg"].indexOf(a.media_type) - ["image/avif", "image/webp", "image/jpeg"].indexOf(b.media_type) || a.width - b.width);
+      } else if (variants.length !== 3 || !variants.some(v => v.media_type === "image/webp" && v.width === 320) || !variants.some(v => v.media_type === "image/webp" && v.width === 640) || !variants.some(v => v.media_type === "image/jpeg" && v.width === 640)) {
+        throw new McpEditingError("STAGING_ASTRO_MEDIA_VARIANTS_INCOMPLETE", "A legacy image needs responsive WebP 320/640 and JPEG 640 variants");
+      }
+      const urls = await Promise.all(variants.map(async (variant) => {
         const object = await storage.read(variant.storage_key, INLINE_VARIANT_BYTES);
         if (!object || object.key !== variant.storage_key || object.mediaType !== variant.media_type || object.bytes.byteLength !== variant.byte_size || sha256(object.bytes) !== variant.sha256) {
           throw new McpEditingError("STAGING_ASTRO_MEDIA_STORAGE_MISMATCH", "Verified media bytes do not match the immutable staging variant");
@@ -483,17 +513,16 @@ export class StagingOperationalRuntime implements StagingAstroOperations {
         if (!this.#mediaBaseUrl) throw new McpEditingError("MEDIA_DELIVERY_UNAVAILABLE", "Immutable media delivery origin is missing");
         return `${this.#mediaBaseUrl}/media/${variant.variant_identity}`;
       }));
-      const [webp320Url, webp640Url, jpeg640Url] = urls;
-      if (!webp320Url || !webp640Url || !jpeg640Url) throw new McpEditingError("STAGING_ASTRO_MEDIA_STORAGE_MISMATCH", "Verified media bytes do not match the immutable staging variant");
+      const jpegIndex = variants.findIndex(v => v.media_type === "image/jpeg");
+      const jpeg = variants[jpegIndex]!;
       bound.push(Object.freeze({
-        assetId: jpeg640.asset_id,
-        variantIdentity: jpeg640.variant_identity,
-        url: jpeg640Url,
-        alt: jpeg640.alt ?? `${key.split(":", 1)[0]} image`,
-        sources: Object.freeze([
-          Object.freeze({ variantIdentity: webp320.variant_identity, url: webp320Url, mediaType: webp320.media_type, media: "(max-width: 480px)" }),
-          Object.freeze({ variantIdentity: webp640.variant_identity, url: webp640Url, mediaType: webp640.media_type })
-        ])
+        assetId: jpeg.asset_id, variantIdentity: jpeg.variant_identity, url: urls[jpegIndex]!,
+        alt: jpeg.alt ?? `${key.split(":", 1)[0]} image`,
+        ...(modern ? { width: jpeg.actual_width, height: jpeg.height, sizes: "(max-width: 1200px) 100vw, 1200px" } : {}),
+        sources: Object.freeze(variants.flatMap((variant, index) => variant.media_type === "image/jpeg" ? [] : [Object.freeze({
+          variantIdentity: variant.variant_identity, url: urls[index]!, mediaType: variant.media_type,
+          ...(modern ? { width: variant.actual_width } : variant.width === 320 ? { media: "(max-width: 480px)" } : {})
+        })]))
       }));
     }
     return Object.freeze(bound);

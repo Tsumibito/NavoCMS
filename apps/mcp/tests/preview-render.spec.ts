@@ -1,3 +1,7 @@
+import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
+import { groupResponsiveSources } from "../../../packages/design-astro/dist/index.js";
+import { processVariant, resolvePreset } from "../../../packages/media/dist/index.js";
 import { expect, test } from "@playwright/test";
 import { InMemoryEventStore, type ReleaseProvider, type ReleaseProviderPublication, type ReleaseProviderPublishInput } from "@navocms/kernel";
 import { NAVOCMS_PERMISSIONS, siteRoleAuthority } from "@navocms/security";
@@ -7,7 +11,7 @@ import { InMemoryEditingRepository } from "../dist/repository.js";
 import { InMemoryReleaseWorkflowRepository } from "../dist/release-repository.js";
 import { outputManifestDigest } from "../dist/output-manifest.js";
 import { McpEditingService, type StagingAstroOperations } from "../dist/service.js";
-import { createMcpHttpServer } from "../dist/http.js";
+import { createMcpHttpServer, type McpHttpOptions } from "../dist/http.js";
 import type { PreviewBuildStatus } from "../dist/model.js";
 
 const site = Object.freeze({
@@ -54,6 +58,43 @@ test("the built preview renders its own CSS and images and blocks scripts", asyn
   }
 });
 
+test("responsive preview selects AVIF for the screen and never requests the original", async ({ browser }) => {
+  const sharp = createRequire(new URL("../../../packages/media/package.json", import.meta.url))("sharp");
+  const original = new Uint8Array(await sharp({ create: { width: 1440, height: 960, channels: 3, background: "#123456" } }).png().toBuffer());
+  const originalHash = createHash("sha256").update(original).digest("hex");
+  const variants = new Map<string, { bytes: Uint8Array; mediaType: string; sha256: string }>();
+  const sources = [];
+  for (const [index, width] of [320, 640, 1280].entries()) {
+    const identity = String(index + 1).repeat(64);
+    const result = await processVariant({ bytes: original, mediaType: "image/png", preset: resolvePreset("responsive", "v2"), width, format: "image/avif", crop: "center" });
+    variants.set(identity, { bytes: result.bytes, mediaType: result.mediaType, sha256: createHash("sha256").update(result.bytes).digest("hex") });
+    sources.push({ variantIdentity: identity, url: `https://cms.example.test/media/${identity}`, mediaType: "image/avif" as const, width });
+  }
+  const fallbackIdentity = "9".repeat(64);
+  const jpeg = await processVariant({ bytes: original, mediaType: "image/png", preset: resolvePreset("responsive", "v2"), width: 1280, format: "image/jpeg", crop: "center" });
+  variants.set(fallbackIdentity, { bytes: jpeg.bytes, mediaType: jpeg.mediaType, sha256: createHash("sha256").update(jpeg.bytes).digest("hex") });
+  const requests: string[] = [];
+  const harness = await renderHarness({ snapshot: async () => undefined, media: async identity => { requests.push(identity); return variants.get(identity); } });
+  const preview = await prepare(harness, "responsive", "responsive-01");
+  const group = groupResponsiveSources(sources)[0]!;
+  harness.operations.appendOutput(preview.releaseId, { "index.html": `<html><head><meta name="viewport" content="width=device-width"></head><body><picture><source type="image/avif" srcset="${group.srcset}" sizes="(max-width: 1200px) 100vw, 1200px"><img src="https://cms.example.test/media/${fallbackIdentity}" alt="Responsive test"></picture></body></html>` });
+  await new Promise<void>(resolve => harness.server.listen(0, "127.0.0.1", resolve));
+  const address = harness.server.address(); if (!address || typeof address === "string") throw Error("No port");
+  try {
+    for (const [viewportWidth, expectedIdentity] of [[375, "2".repeat(64)], [1200, "3".repeat(64)]] as const) {
+      const context = await browser.newContext({ viewport: { width: viewportWidth, height: 900 }, deviceScaleFactor: 1 });
+      try {
+        const page = await context.newPage();
+        await page.goto(`http://127.0.0.1:${address.port}/previews/${preview.previewUrl.split("/previews/")[1]!}`);
+        await expect.poll(() => page.locator("img").evaluate(image => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+        expect(await page.locator("img").evaluate(image => (image as HTMLImageElement).currentSrc)).toContain(expectedIdentity);
+      } finally { await context.close(); }
+    }
+    expect(requests).not.toContain(originalHash);
+    expect(requests).toEqual(expect.arrayContaining(["2".repeat(64), "3".repeat(64)]));
+  } finally { await new Promise<void>((resolve, reject) => harness.server.close(error => error ? reject(error) : resolve())); }
+});
+
 test("two previews open in one browser never borrow each other's assets", async ({ browser }) => {
   const harness = await renderHarness();
   const alpha = await prepare(harness, "alpha-variant", "alpha-02", "rgb(1, 2, 3)");
@@ -88,7 +129,7 @@ interface RenderHarness {
   readonly context: { authorization: Awaited<ReturnType<typeof buildContext>>["authorization"] };
 }
 
-async function renderHarness(): Promise<RenderHarness> {
+async function renderHarness(delivery?: McpHttpOptions["delivery"]): Promise<RenderHarness> {
   const provider: ReleaseProvider = {
     key: "test.preview-render.v1",
     async publish(input: ReleaseProviderPublishInput): Promise<ReleaseProviderPublication> {
@@ -107,6 +148,7 @@ async function renderHarness(): Promise<RenderHarness> {
   const context = await buildContext();
   const server = createMcpHttpServer({
     service,
+    ...(delivery ? { delivery } : {}),
     verifier: {
       verify: async (token: string) => {
         if (token !== humanToken) throw new Error("unknown token");

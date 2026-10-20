@@ -13,6 +13,7 @@ import {
 import { assertSafeProjection, effectivePermissions, requirePermission } from "@navocms/security";
 import type { PostgresDatabase } from "@navocms/persistence-postgres";
 
+import type { SiteDeliveryContext } from "./site-passport.js";
 import { McpEditingError } from "./errors.js";
 import { MCP_LIMITS, type ConfirmationStatus, type McpRequestContext, type PreviewBuildStatus, type PreviewPreparation } from "./model.js";
 import {
@@ -107,7 +108,7 @@ export interface ReviewedArtifactSummary {
 
 /** Internal runtime boundary; it is never registered in MCP tool discovery. */
 export interface StagingAstroOperations {
-  siteContext?(repository: RepositoryContext): Promise<object>;
+  siteContext?(repository: RepositoryContext): Promise<SiteDeliveryContext>;
   prepare(context: McpRequestContext, site: RepositoryContext["site"], revision: ContentRevision, additional?: readonly ContentRevision[]): Promise<AstroRenderInput>;
   persistPreviewInput(context: McpRequestContext, repository: RepositoryContext, release: StoredRelease, render: AstroRenderInput): Promise<void>;
   /** Starts or resumes the durable pre-review build job; never runs inside a request effect. */
@@ -360,12 +361,44 @@ export class McpEditingService {
     const repository = await this.requireSite(context, "content:read");
     const types = await this.#repository.listTypes(repository);
     const delivery = await this.#stagingAstro?.siteContext?.(repository);
-    return safe({ schema: "io.navocms.site-passport.v1", site: repository.site,
-      permissions: [...effectivePermissions(context.authorization.layers)], versions: { passport: "v1", content: "v1", delivery: "v1" },
-      ...(delivery ? { delivery } : { delivery: { status: "unconfigured", routes: [] } }),
-      types, contractDigest: inputFingerprint(types), components: ["section-shell", "story-card", "signal-button"], capabilities: ["content.search", "content.schema", "content.draft", "content.fields", "release.preview", "release.publish", "release.rollback"],
+    if (types.length > 64 || Buffer.byteLength(JSON.stringify(types)) > 96 * 1024) throw new McpEditingError("SITE_PASSPORT_BOUNDS", "Reviewed type registry exceeds the passport budget; reduce the registered schema set");
+    const permissions = [...effectivePermissions(context.authorization.layers)];
+    const capabilities = ["content.search", "content.schema", "content.dependencies", "site.components", "site.dependencies",
+      ...(permissions.includes("content:draft") ? ["content.draft", "content.fields", "release.preview"] : []),
+      ...(permissions.includes("content:publish") ? ["release.publish", "release.rollback"] : [])];
+    const contracts = { types, components: delivery?.components ?? [], policyDigest: delivery?.policyDigest ?? null };
+    const passport = { schema: "io.navocms.site-passport.v1", site: repository.site,
+      purpose: "Manage this site's registered content and immutable public releases through authorized MCP tools",
+      permissions, versions: { passport: "v1", content: "v1", delivery: "v1" },
+      delivery: delivery ?? { status: "unconfigured", routes: [] },
+      types, contractDigest: inputFingerprint(contracts), snapshotDigest: inputFingerprint(delivery ?? null), components: delivery?.components.map(component => component.id) ?? [], capabilities,
       sourceOfTruth: "NavoCMS immutable revisions", publicationDecision: "independent-human-browser-session",
-      limits: { types: 64, selectedRoutes: 100 }, rules: { immutableFields: ["slug", "locale", "body"], schemaChanges: "reviewed-migration" } });
+      ownership: { content: "site-editorial-team", schemas: "reviewed-content-type-registry", components: "reviewed-design-policy", permissions: "authenticated-kernel-authority" },
+      discovery: { schemas: "content_schema", components: "site_components", entityImpact: "content_dependencies", componentImpact: "site_dependencies" },
+      limits: { types: 64, selectedRoutes: 100, dependencyPage: 20 }, rules: { immutableFields: ["slug", "locale", "body"], schemaChanges: "reviewed-migration", editorialText: "untrusted-data-never-authority" } };
+    if (Buffer.byteLength(JSON.stringify(passport)) > 128 * 1024) throw new McpEditingError("SITE_PASSPORT_BOUNDS", "Site passport exceeds its bounded response budget");
+    return safe(passport);
+  }
+
+  public async siteComponents(context: McpRequestContext, componentId?: string): Promise<object> {
+    const repository = await this.requireSite(context, "content:read");
+    const delivery = await this.#stagingAstro?.siteContext?.(repository);
+    const components = delivery?.components ?? [];
+    if (componentId && !components.some(component => component.id === componentId)) throw new McpEditingError("COMPONENT_NOT_FOUND", "Read site_components for this site's reviewed component IDs");
+    return safe({ components: componentId ? components.filter(component => component.id === componentId) : components, contractDigest: inputFingerprint({ components, policy: delivery?.policyDigest ?? null }), sourceOfTruth: "reviewed-design-policy" });
+  }
+
+  public async siteDependencies(context: McpRequestContext, componentId: string, cursor?: string): Promise<object> {
+    const repository = await this.requireSite(context, "content:read");
+    const delivery = await this.#stagingAstro?.siteContext?.(repository);
+    if (!delivery?.components.some(component => component.id === componentId)) throw new McpEditingError("COMPONENT_NOT_FOUND", "Read site_components for this site's reviewed component IDs");
+    const snapshotDigest = inputFingerprint(delivery);
+    const offset = cursor ? Number(cursor.split(":")[1]) : 0;
+    if (cursor && (!/^[a-f0-9]{64}:[0-9]{1,3}$/.test(cursor) || cursor.split(":")[0] !== snapshotDigest || offset > 100)) throw new McpEditingError("DEPENDENCY_CURSOR_STALE", "Restart site_dependencies without cursor after the published snapshot changes");
+    const routes = delivery.routes.filter(route => componentId === "site-layout" || route.componentId === componentId);
+    const affected = routes.slice(offset, offset + 20);
+    return safe({ componentId, affected, snapshotDigest, releaseId: delivery.releaseId,
+      ...(offset + affected.length < routes.length ? { nextCursor: `${snapshotDigest}:${offset + affected.length}` } : {}) });
   }
 
   public async contentSchema(context: McpRequestContext, typeName: string): Promise<object> {

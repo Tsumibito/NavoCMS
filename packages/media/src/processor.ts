@@ -1,7 +1,7 @@
 import sharp from "sharp";
 
 import type { VariantMediaType } from "./domain.js";
-import type { MediaPreset } from "./presets.js";
+import { responsiveByteBudget, type MediaPreset } from "./presets.js";
 import { MEDIA_LIMITS, inspectMedia } from "./validation.js";
 
 export interface VariantProcessInput {
@@ -33,12 +33,24 @@ export async function processVariant(input: VariantProcessInput): Promise<Proces
   const pipeline = sharp(input.bytes, { failOn: "error", limitInputPixels: MEDIA_LIMITS.maxPixels, sequentialRead: true })
     .rotate()
     .resize({ width: input.width, ...(input.preset.maxHeight ? { height: input.preset.maxHeight } : {}), fit: input.preset.fit, position: focal ? focalGravity(focal) : "centre", withoutEnlargement: true });
-  const encoded = input.format === "image/avif"
-    ? pipeline.avif({ quality: 50, effort: 4, chromaSubsampling: "4:2:0" })
-    : input.format === "image/webp"
-      ? pipeline.webp({ quality: 75, effort: 4, smartSubsample: false })
-      : pipeline.jpeg({ quality: 82, chromaSubsampling: "4:2:0", progressive: false, mozjpeg: false });
-  const { data, info } = await encoded.toBuffer({ resolveWithObject: true });
+  const modern = input.preset.presetVersion === "v2";
+  const startQuality = input.format === "image/avif" ? 50 : input.format === "image/webp" ? 75 : 82;
+  const minimumQuality = input.format === "image/avif" ? 32 : input.format === "image/webp" ? 51 : 58;
+  let quality = startQuality;
+  let result;
+  for (;;) {
+    const candidate = pipeline.clone();
+    const encoded = input.format === "image/avif"
+      ? candidate.avif({ quality, effort: 4, chromaSubsampling: "4:2:0" })
+      : input.format === "image/webp"
+        ? candidate.webp({ quality, effort: 4, smartSubsample: false })
+        : (modern ? candidate.flatten({ background: "#ffffff" }) : candidate).jpeg({ quality, chromaSubsampling: "4:2:0", progressive: false, mozjpeg: false });
+    result = await encoded.toBuffer({ resolveWithObject: true });
+    if (!modern || result.data.byteLength <= responsiveByteBudget(result.info.width)) break;
+    if (quality === minimumQuality) throw new Error("MEDIA_VARIANT_BYTE_BUDGET_EXCEEDED");
+    quality = Math.max(minimumQuality, quality - 6);
+  }
+  const { data, info } = result;
   if (!info.width || !info.height || info.width > MEDIA_LIMITS.maxDimension || info.height > MEDIA_LIMITS.maxDimension || info.width * info.height > MEDIA_LIMITS.maxPixels) throw new Error("MEDIA_VARIANT_DECODE_LIMIT");
   return Object.freeze({ bytes: new Uint8Array(data), width: info.width, height: info.height, mediaType: input.format });
 }
