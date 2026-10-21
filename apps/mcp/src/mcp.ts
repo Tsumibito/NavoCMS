@@ -209,7 +209,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
 
   if (canRead) server.registerTool("release_status", {
     title: "Read release status",
-    description: "Read the immutable hashes and current durable workflow state for one release.",
+    description: "Read immutable hashes, workflow state and read-only rollbackContext for one release: whether it is active and the previous publication release/hashes, if any. Inspection never authorizes rollback.",
     inputSchema: { releaseId: z.string().uuid() },
     annotations: readOnlyAnnotations()
   }, safeTool(async ({ releaseId }) => result("Release status loaded", await service.releaseStatus(context, releaseId))));
@@ -251,7 +251,7 @@ export function createMcpServer(service: McpEditingService, context: McpRequestC
 
   if (canPublish) server.registerTool("release_rollback", {
     title: "Roll back to the previous verified publication",
-    description: "Restore the prior verified artifact and retain the full audit trail. Requires exact hash and content:publish.",
+    description: "Restore the previous publication shown by release_status.rollbackContext and retain the audit trail. Requires exact CURRENT releaseId/hash, content:publish and an explicit owner instruction naming the rollback. This is a destructive write, not a read-only preflight. The existing rollback policy reuses the previously published artifact; it does not request a new publication receipt.",
     inputSchema: exactReleaseInput(),
     annotations: {
       readOnlyHint: false,

@@ -385,6 +385,20 @@ export class PostgresReleaseWorkflowRepository implements ReleaseWorkflowReposit
     });
   }
 
+  public async inspectRollback(context: RepositoryContext, releaseId: string) {
+    return this.#database.withScope(databaseScope(context), async client => {
+      const release = await requireRelease(client, context, releaseId);
+      const current = await activePublication(client, context, release.environment_id);
+      if (current?.release_id !== releaseId) return { activePublication: false };
+      const previous = current.previous_publication_id ? (await client.query<PublicationRow>(
+        `${publicationSelect()} WHERE p.tenant_id=$1 AND p.site_id=$2 AND p.environment_id=$3 AND p.id=$4`,
+        [context.site.tenantId, context.site.siteId, release.environment_id, current.previous_publication_id]
+      )).rows[0] : undefined;
+      const target = previous ? await requireRelease(client, context, previous.release_id) : undefined;
+      return { activePublication: true, ...(target ? { target: toRelease(target) } : {}) };
+    });
+  }
+
   public async rollback(context: RepositoryContext, releaseId: string, releaseHash: string) {
     return this.#database.withScope(databaseScope(context), async (client) => {
       const release = await requireExactRelease(client, context, releaseId, releaseHash, true);

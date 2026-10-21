@@ -64,6 +64,10 @@ describe("durable release workflow", () => {
       idempotencyKey: "publish-first-release-001"
     })).resolves.toMatchObject({ release: { status: "published" }, publication: { status: "verified" } });
 
+    await expect(service.releaseStatus(context, first.releaseId)).resolves.toMatchObject({
+      rollbackContext: { activePublication: true, previousRelease: null, inspectionOnly: true }
+    });
+
     const second = await draftPreviewApprove(service, context, "second-release", "Second release", "second");
     provider.verifyLive = false;
     await expect(service.publishRelease(context, {
@@ -80,6 +84,13 @@ describe("durable release workflow", () => {
       idempotencyKey: "reconcile-second-release-001"
     })).resolves.toMatchObject({ release: { status: "published" } });
     expect(provider.publishCount).toBe(2);
+
+    await expect(service.releaseStatus(context, second.releaseId)).resolves.toMatchObject({
+      release: { status: "published" }, rollbackContext: { activePublication: true,
+        previousRelease: { id: first.releaseId, releaseHash: first.releaseHash, artifactHash: first.artifactHash }, inspectionOnly: true }
+    });
+    await expect(service.releaseStatus(context, first.releaseId)).resolves.toMatchObject({ rollbackContext: { activePublication: false, previousRelease: null } });
+    expect(provider.rollbackCount).toBe(0);
 
     await expect(service.rollbackRelease(context, {
       releaseId: second.releaseId,

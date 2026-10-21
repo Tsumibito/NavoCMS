@@ -96,3 +96,15 @@ types remain valid editorial references but now return a warning and corrective
 next step. A `revision-reference` result records the binding kind, not proof that
 a preview has rendered. Verify the resulting page and responsive image sources.
 Retain the original failed photo attempts and all subsequent retries.
+
+## Inspect before requesting rollback
+
+Read the current release ID from the passport and call `release_status` for it.
+The additive `rollbackContext` identifies whether this is the active publication
+and returns its previous release ID and immutable hashes, or null if none exists.
+This bounded read is not a history browser or an authorization/preflight verdict:
+competing operations, live state and permissions are rechecked at execution.
+Ask the owner to authorize the named current release reverting to the inspected
+previous artifact. `release_rollback` takes the current release ID/hash. It reuses
+an already published artifact under the existing rollback policy; it does not
+create a new human publication receipt. Never forge a receipt or guess a target.
