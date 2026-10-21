@@ -168,6 +168,7 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
     const url = canonicalAlias(canonical, this.#previewSuffix, this.#productionHostname);
     const files: ImmutableArtifactFile[] = [];
     let headers: Headers | undefined;
+    const redirects = new Map<string, string>();
     for (const expected of input.reference.files) {
       const live = await this.#request(new URL(expected.path === "_redirects" ? redirectProofPath(expected.sha256) : livePath(expected.path), url.endsWith("/") ? url : `${url}/`), { method: "GET", redirect: "error", headers: { "accept": "*/*" } }, async (response, signal) => {
         if (!response.ok) return { status: response.status, headers: response.headers };
@@ -181,11 +182,31 @@ export class FetchCloudflarePagesTransport implements CloudflarePagesTransport {
       if (digest !== expected.sha256 || Buffer.byteLength(body, "utf8") !== expected.byteSize) throw new CloudflareDeliveryError("CLOUDFLARE_LIVE_BYTES_MISMATCH", "Cloudflare live bytes do not match the immutable artifact reference");
       if (expected.path === "_redirects") {
         for (const rule of parseRedirects(body)) {
+          redirects.set(rule.from, rule.to);
           const redirect = await this.#request(new URL(rule.from, url), { method: "GET", redirect: "manual" }, async response => ({ status: response.status, location: response.headers.get("location") }), remaining(deadline));
           if (redirect.status !== 301 || !redirect.location || new URL(redirect.location, url).href !== new URL(rule.to, url).href) throw new CloudflareDeliveryError("CLOUDFLARE_LIVE_REDIRECT_MISMATCH", "Cloudflare redirect does not match the reviewed rule");
         }
       }
       files.push(Object.freeze({ path: expected.path, sha256: digest, byteSize: expected.byteSize }));
+    }
+    // A successful target manifest does not prove removed URLs stopped serving old content.
+    for (const retired of input.retiredFiles ?? []) {
+      if (retired.path === "_redirects") continue;
+      const result = await this.#request(new URL(livePath(retired.path), url), { method: "GET", redirect: "manual" }, async (response, signal) => {
+        if (response.status === 404 || response.status === 410) return true;
+        if (response.status === 301) {
+          const target = redirects.get(new URL(livePath(retired.path), url).pathname);
+          const location = response.headers.get("location");
+          return target !== undefined && location !== null && new URL(location, url).href === new URL(target, url).href;
+        }
+        if (response.status !== 200) return false;
+        const body = await boundedBody(response, Math.max(retired.byteSize, ...input.reference.files.map(file => file.byteSize)), signal);
+        const digest = sha256(body);
+        // Pages may serve a reviewed SPA fallback instead of a 404. An unrelated
+        // response or the retired page with new release headers is not proof.
+        return digest !== retired.sha256 && input.reference.files.some(file => file.sha256 === digest && file.byteSize === Buffer.byteLength(body));
+      }, remaining(deadline));
+      if (!result) throw new CloudflareDeliveryError("CLOUDFLARE_RETIRED_ROUTE_STALE", "Removed output still serves stale or unverified content");
     }
     return Object.freeze({
       status: 200,
@@ -303,7 +324,7 @@ function canonicalAlias(row: Record<string, unknown>, suffix: string, expectedHo
       const pagesDeploymentHostname = expectedHostname?.endsWith(suffix)
         ? url.hostname.endsWith(`.${expectedHostname}`) && !url.hostname.slice(0, -(expectedHostname.length + 1)).includes(".")
         : false;
-      if (url.protocol === "https:" && !url.username && !url.password && !url.port && url.pathname === "/" && !url.search && !url.hash && (expectedHostname ? url.hostname === expectedHostname || pagesDeploymentHostname : url.hostname.endsWith(suffix))) return url.toString();
+      if (url.protocol === "https:" && !url.username && !url.password && !url.port && url.pathname === "/" && !url.search && !url.hash && (expectedHostname ? url.hostname === expectedHostname || pagesDeploymentHostname : url.hostname.endsWith(suffix))) return expectedHostname ? `https://${expectedHostname}/` : url.toString();
     } catch { /* bounded hostile alias is ignored */ }
   }
   throw new CloudflareDeliveryError("CLOUDFLARE_CANONICAL_ALIAS_INVALID", "Cloudflare canonical deployment has no allowed Pages alias");
