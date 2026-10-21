@@ -177,6 +177,11 @@ integration("Neon production persistence", () => {
     await firstService.publishRelease(context(), { releaseId: first.releaseId, releaseHash: first.releaseHash, idempotencyKey: `publish-${suffix}-first` });
     const second = await approvedRelease(firstService, suffix, "second");
     await firstService.publishRelease(context(), { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: `publish-${suffix}-second` });
+    await expect(firstService.releaseStatus(context(), second.releaseId)).resolves.toMatchObject({
+      rollbackContext: { activePublication: true, previousRelease: { id: first.releaseId, releaseHash: first.releaseHash }, inspectionOnly: true }
+    });
+    await expect(firstService.releaseStatus(context(), first.releaseId)).resolves.toMatchObject({ rollbackContext: { activePublication: false, previousRelease: null } });
+    expect(provider.rollbackCalls).toBe(0);
     provider.interruptOnce = true;
     await expect(firstService.rollbackRelease(context(), { releaseId: second.releaseId, releaseHash: second.releaseHash, idempotencyKey: `rollback-${suffix}` })).rejects.toThrow("injected rollback interruption");
 

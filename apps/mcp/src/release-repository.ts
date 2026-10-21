@@ -112,6 +112,7 @@ export interface ReleaseWorkflowRepository {
   recordConfirmation(tokenHash: string, decision: ConfirmationDecision): Promise<{ readonly record: ConfirmationRecord; readonly recorded: boolean } | undefined>;
   latestConfirmation(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<ConfirmationRecord | undefined>;
   getRelease(context: RepositoryContext, releaseId: string): Promise<StoredRelease>;
+  inspectRollback(context: RepositoryContext, releaseId: string): Promise<{ readonly activePublication: boolean; readonly target?: StoredRelease }>;
   approve(context: RepositoryContext, releaseId: string, releaseHash: string, approval: ReleaseApprovalInput): Promise<StoredRelease>;
   beginPublication(context: RepositoryContext, releaseId: string, releaseHash: string): Promise<{
     readonly release: StoredRelease;
@@ -309,6 +310,15 @@ export class InMemoryReleaseWorkflowRepository implements ReleaseWorkflowReposit
     const publication = [...this.#publications.values()].find((candidate) => candidate.releaseId === releaseId);
     const rollback = this.#pendingRollbacks.get(releaseId);
     return Object.freeze({ release: freezeRelease(release), ...(publication ? { publication } : {}), ...(rollback ? { rollback } : {}) });
+  }
+
+  public async inspectRollback(context: RepositoryContext, releaseId: string) {
+    const release = this.requireScoped(context, releaseId);
+    const current = this.activeFor(release.environmentId);
+    if (current?.releaseId !== releaseId) return { activePublication: false };
+    const previous = current.previousPublicationId ? this.#publications.get(current.previousPublicationId) : undefined;
+    const target = previous?.environmentId === release.environmentId ? this.requireScoped(context, previous.releaseId) : undefined;
+    return { activePublication: true, ...(target ? { target: freezeRelease(target) } : {}) };
   }
 
   public async rollback(context: RepositoryContext, releaseId: string, releaseHash: string) {

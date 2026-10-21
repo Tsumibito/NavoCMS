@@ -653,7 +653,15 @@ export class McpEditingService {
 
   public async releaseStatus(context: McpRequestContext, releaseId: string): Promise<object> {
     const repositoryContext = await this.requireSite(context, "content:read");
-    return safe({ release: releaseProjection(await this.#releases.getRelease(repositoryContext, releaseId)) });
+    const release = await this.#releases.getRelease(repositoryContext, releaseId);
+    const rollback = await this.#releases.inspectRollback(repositoryContext, releaseId);
+    return safe({ release: releaseProjection(release), rollbackContext: {
+      activePublication: rollback.activePublication,
+      previousRelease: rollback.target ? releaseProjection(rollback.target) : null,
+      inspectionOnly: true,
+      ownerInstruction: "Requires an explicit owner instruction for this current release and previous artifact; this read does not authorize rollback",
+      eligibility: "Not a preflight guarantee; publication state and operation permissions are rechecked when rollback executes"
+    } });
   }
 
   public async approveRelease(context: McpRequestContext, input: {
