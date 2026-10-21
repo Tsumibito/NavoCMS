@@ -226,7 +226,7 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
     await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).rejects.toMatchObject({ code: "CLOUDFLARE_PRODUCTION_BRANCH_MISMATCH" });
   });
 
-  it("accepts the exact canonical Pages deployment URL when aliases are null", async () => {
+  it("probes the stable public hostname even when canonical aliases are null", async () => {
     const requested: string[] = [];
     const responses = [
       json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: null, url: "https://a1b2c3d4.pages-project.pages.dev/" } } }),
@@ -237,7 +237,28 @@ describe("Fetch Cloudflare Pages direct upload transport", () => {
       fetcher: async (url) => { requested.push(String(url)); return responses.shift()!; }
     });
     await expect(transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference })).resolves.toMatchObject({ status: 200, referenceHash });
-    expect(requested[1]).toBe("https://a1b2c3d4.pages-project.pages.dev/en/");
+    expect(requested[1]).toBe("https://pages-project.pages.dev/en/");
+  });
+
+  it("rejects stale retired pages even with current release headers and accepts only absence or reviewed fallback", async () => {
+    const retiredBody = "<html>retired</html>";
+    const retiredFiles = [{ path: "retired/index.html", sha256: sha256(retiredBody), byteSize: Buffer.byteLength(retiredBody) }];
+    for (const mode of ["stale", "missing", "gone", "fallback", "unrelated", "forbidden"] as const) {
+      const urls: string[] = [];
+      const transport = new FetchCloudflarePagesTransport({
+        accountId: "account-1", projectKey: "pages-project", productionBranch: "main", productionHostname: "pages-project.pages.dev", apiToken: async () => "api-token-0123456789",
+        fetcher: async url => {
+          urls.push(String(url));
+          if (String(url).startsWith("https://api.cloudflare.com/")) return json({ result: { production_branch: "main", canonical_deployment: { id: "production-1", environment: "production", aliases: null, url: "https://a1b2c3d4.pages-project.pages.dev/" } } });
+          if (new URL(String(url)).pathname === "/en/") return new Response("<html>en</html>");
+          return new Response(mode === "stale" ? retiredBody : mode === "fallback" ? "<html>en</html>" : "unrelated", { status: mode === "missing" ? 404 : mode === "gone" ? 410 : mode === "forbidden" ? 403 : 200, headers: { "x-navocms-release-hash": reference.releaseHash } });
+        }
+      });
+      const probe = transport.verifyLive({ projectKey: "pages-project", deploymentId: "production-1", referenceHash, environment: "production", reference, retiredFiles });
+      if (["missing", "gone", "fallback"].includes(mode)) await expect(probe).resolves.toMatchObject({ status: 200 });
+      else await expect(probe).rejects.toMatchObject({ code: "CLOUDFLARE_RETIRED_ROUTE_STALE" });
+      expect(urls.at(-1)).toBe("https://pages-project.pages.dev/retired/");
+    }
   });
 
   it("does not broaden a custom production hostname to deployment subdomains", async () => {

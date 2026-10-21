@@ -32,6 +32,24 @@ describe("Cloudflare Pages release provider", () => {
     expect(JSON.stringify(first)).not.toContain("coolify");
   });
 
+  it("passes only removed output to both initial and reconciled rollback probes", async () => {
+    const cloudflare = new FakeCloudflare();
+    const provider = createProvider(cloudflare);
+    const first = await provider.publish(input);
+    const next = await provider.publish({ ...input, releaseId: "retired-current", releaseHash: "c".repeat(64), artifact: { ...input.artifact, hash: "d".repeat(64) } });
+    const decoded = JSON.parse(Buffer.from(next.providerReference.split(":")[1]!, "base64url").toString());
+    const retired = { path: "removed/index.html", sha256: sha256("removed"), byteSize: 7 };
+    decoded.reference.files.push(retired);
+    decoded.reference.fileCount += 1;
+    decoded.reference.byteSize += 7;
+    decoded.referenceHash = immutableReferenceHash(decoded.reference);
+    const current = { ...next, providerReference: `navocms-cloudflare-pages/v2:${Buffer.from(JSON.stringify(decoded)).toString("base64url")}` };
+    await provider.rollback(current, first);
+    await provider.rollback(current, first);
+    expect(cloudflare.liveInputs.map(probe => probe.retiredFiles)).toEqual([[retired], [retired]]);
+    expect(cloudflare.rollbackCalls).toBe(1);
+  });
+
   it("reads legacy v1 references through the isolated Pages-only compatibility path", async () => {
     const cloudflare = new FakeCloudflare();
     const provider = createProvider(cloudflare);
@@ -75,6 +93,7 @@ function deployable(releaseHash: string, releaseArtifactHash: string) {
 }
 
 class FakeCloudflare implements CloudflarePagesTransport {
+  public liveInputs: Parameters<CloudflarePagesTransport["verifyLive"]>[0][] = [];
   public createPreviewCalls = 0; public deployProductionCalls = 0; public rollbackCalls = 0;
   readonly #deployments = new Map<string, CloudflareDeployment>();
   public async findDeployment(input: Parameters<CloudflarePagesTransport["findDeployment"]>[0]) { return this.#deployments.get(`${input.referenceHash}:${input.environment}`); }
@@ -82,7 +101,7 @@ class FakeCloudflare implements CloudflarePagesTransport {
   public async deployProduction(input: Parameters<CloudflarePagesTransport["deployProduction"]>[0]) { this.deployProductionCalls += 1; return this.#put(input.projectKey, input.referenceHash, "production", `production-${this.deployProductionCalls}`); }
   public async retryDeployment(input: Parameters<CloudflarePagesTransport["retryDeployment"]>[0]) { return this.#deployments.get(`${input.referenceHash}:${input.environment}`)!; }
   public async inspectDeployment(input: Parameters<CloudflarePagesTransport["inspectDeployment"]>[0]) { return [...this.#deployments.values()].find((item) => item.id === input.deploymentId); }
-  public async verifyLive(input: Parameters<CloudflarePagesTransport["verifyLive"]>[0]): Promise<CloudflareLiveProbe> { return { status: 200, referenceHash: input.referenceHash, releaseHash: input.reference.releaseHash, outputHash: input.reference.outputHash, cacheControl: CLOUDFLARE_CACHE_CONTROL.production, files: input.reference.files }; }
+  public async verifyLive(input: Parameters<CloudflarePagesTransport["verifyLive"]>[0]): Promise<CloudflareLiveProbe> { this.liveInputs.push(input); return { status: 200, referenceHash: input.referenceHash, releaseHash: input.reference.releaseHash, outputHash: input.reference.outputHash, cacheControl: CLOUDFLARE_CACHE_CONTROL.production, files: input.reference.files }; }
   public async rollback(): Promise<void> { this.rollbackCalls += 1; }
   #put(projectKey: string, referenceHash: string, environment: "preview" | "production", id: string): CloudflareDeployment { const deployment = { id, projectKey, referenceHash, environment, status: "success" as const }; this.#deployments.set(`${referenceHash}:${environment}`, deployment); return deployment; }
 }

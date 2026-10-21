@@ -108,3 +108,19 @@ Ask the owner to authorize the named current release reverting to the inspected
 previous artifact. `release_rollback` takes the current release ID/hash. It reuses
 an already published artifact under the existing rollback policy; it does not
 create a new human publication receipt. Never forge a receipt or guess a target.
+
+## Public rollback delivery checks
+
+Rollback probes use the configured public hostname even when the provider reports
+only an immutable deployment URL. They verify the restored file manifest and
+URLs present only in the retired manifest, without cache-busting parameters.
+A retired URL must return 404/410, a reviewed permanent redirect, or bytes from
+the restored manifest (Pages may use an SPA fallback). Current release headers
+with retired body bytes fail with `CLOUDFLARE_RETIRED_ROUTE_STALE`. A failed probe
+leaves rollback pending; reconcile it rather than repeating the external effect.
+
+This detects stale delivery but cannot invalidate every CDN location. For Pages
+cache recovery, Cloudflare documents a purge in the owning DNS zone. A shared
+`pages.dev` hostname without an accessible zone is not a verified purge setup.
+Build-cache clearing and a successful redeployment are not proof of CDN recovery.
+See [Pages serving and caching](https://developers.cloudflare.com/pages/configuration/serving-pages/).

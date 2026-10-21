@@ -81,6 +81,7 @@ const PUBLIC_ERROR_CODES: ReadonlySet<string> = new Set([
   "CLOUDFLARE_PROJECT_SCOPE_DENIED",
   "CLOUDFLARE_RESPONSE_INVALID",
   "CLOUDFLARE_RETRY_INVALID",
+  "CLOUDFLARE_RETIRED_ROUTE_STALE",
   "CLOUDFLARE_ROLLBACK_INVALID",
   "CLOUDFLARE_TIMEOUT",
   "CLOUDFLARE_TIMEOUT_INVALID",
@@ -193,6 +194,7 @@ export interface CloudflarePagesTransport {
     referenceHash: string;
     environment: "preview" | "production";
     reference: ImmutableArtifactReference;
+    retiredFiles?: readonly ImmutableArtifactFile[];
   }>): Promise<CloudflareLiveProbe>;
   rollback(input: Readonly<{
     projectKey: string;
@@ -465,17 +467,18 @@ export class CloudflarePagesReleaseProvider implements ReleaseProvider {
     } else if (cloudflareState === "reserved") {
       // verifyLive uses the authoritative Pages canonical_deployment and its
       // immutable marker-bound bytes; success proves the uncertain rollback.
-      await this.#verifyRollbackTarget(targetReference, input);
+      await this.#verifyRollbackTarget(targetReference, input, currentReference.reference.files);
       await this.#options.phases.complete({ releaseId: rollbackScope, referenceHash: targetReference.referenceHash, phase: cloudflarePhase, externalId: targetReference.productionDeploymentId });
     }
-    await this.#verifyRollbackTarget(targetReference, input);
+    await this.#verifyRollbackTarget(targetReference, input, currentReference.reference.files);
   }
 
-  async #verifyRollbackTarget(targetReference: ProviderReference, input: Readonly<{ releaseHash: string; artifact: Readonly<{ hash: string }> }>): Promise<void> {
+  async #verifyRollbackTarget(targetReference: ProviderReference, input: Readonly<{ releaseHash: string; artifact: Readonly<{ hash: string }> }>, currentFiles: readonly ImmutableArtifactFile[]): Promise<void> {
+    const retiredFiles = currentFiles.filter(file => !targetReference.reference.files.some(target => target.path === file.path));
     const targetDeployment = await this.#call("cloudflare-pages", "verify", input, targetReference.referenceHash, () => this.#options.cloudflare.inspectDeployment({ projectKey: targetReference.projectKey, deploymentId: targetReference.productionDeploymentId }));
     if (!targetDeployment || targetDeployment.status !== "success") throw new CloudflareDeliveryError("ROLLBACK_TARGET_VERIFICATION_FAILED", "Rollback target deployment is not successful");
     assertCloudflareDeployment(targetDeployment, targetReference.projectKey, targetReference.referenceHash, "production");
-    const targetLive = await this.#call("cloudflare-pages", "verify", input, targetReference.referenceHash, () => this.#options.cloudflare.verifyLive({ projectKey: targetReference.projectKey, deploymentId: targetReference.productionDeploymentId, referenceHash: targetReference.referenceHash, environment: "production", reference: targetReference.reference }));
+    const targetLive = await this.#call("cloudflare-pages", "verify", input, targetReference.referenceHash, () => this.#options.cloudflare.verifyLive({ projectKey: targetReference.projectKey, deploymentId: targetReference.productionDeploymentId, referenceHash: targetReference.referenceHash, environment: "production", reference: targetReference.reference, retiredFiles }));
     if (targetLive.status !== 200 || targetLive.referenceHash !== targetReference.referenceHash || targetLive.releaseHash !== targetReference.reference.releaseHash || targetLive.outputHash !== targetReference.reference.outputHash || targetLive.cacheControl !== CLOUDFLARE_CACHE_CONTROL.production || !sameFileManifest(targetLive.files, targetReference.reference.files)) throw new CloudflareDeliveryError("ROLLBACK_TARGET_VERIFICATION_FAILED", "Rollback target bytes or cache contract do not match the immutable reference");
   }
 
